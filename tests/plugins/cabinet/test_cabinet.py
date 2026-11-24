@@ -13,7 +13,8 @@ cannot.
 call's parsed answer, an `ask` is the same call's raw text — the two the budget
 test needs, since what a model is handed is the text and what it reads is the
 fields in it.  A miss and a refusal both raise `ToolError`, so a test that used
-to read a sentence reads it off the raised error instead.
+to read a sentence reads it off the raised error instead — except a source
+`file_save` could not store, which is answered in the call's `failed` part.
 """
 
 from __future__ import annotations
@@ -35,12 +36,12 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 from slife2.helpers.clock import at
+from slife2.libs.harness.dumps import text_size
 from slife2.libs.host.config import ToolResultSettings, load
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, data_dir, subagent_file
+from slife2.libs.host.paths import agent_dir, data_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.libs.store import index as store_index
-from slife2.libs.store.index import connect_to, table_exists
-from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.libs.store.index import connect_to, connection_to, table_exists
 from slife2.plugins.cabinet import server as cabinet_server
 from slife2.plugins.cabinet import store as cabinet_store
 from slife2.plugins.cabinet.server import (
@@ -56,15 +57,15 @@ from slife2.plugins.cabinet.store import (
     FILE,
     IMAGE,
     NOTE,
+    REPLACE,
     REPORT,
     UPSERT,
     CabinetStore,
     index_path,
     slug,
     store_of,
-    vector_text,
 )
-from tests.fakes import FailingEmbedder, StubEmbedder, home_config
+from tests.fakes import FailingEmbedder, StubEmbedder
 
 pytestmark = pytest.mark.unit
 
@@ -118,50 +119,6 @@ def bag(agent: str = "jack") -> Path:
 
 def store(agent: str = "jack") -> CabinetStore:
     return store_of(index_path(agent))
-
-
-@pytest.mark.asyncio
-async def test_a_subagents_cabinet_follows_its_fork_flag(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-fork subagent owns its cabinet; a fork uses its maker's.
-
-    The cabinet is private work, so it follows the conversation.  A subagent
-    that is not a fork is a persistent agent of the maker's and gets its own
-    directory under `subagents/`; a fork is a temporary copy of its maker's
-    conversation, and what it writes lands in the maker's cabinet beside it.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    # A home of its own needs its configuration (SDD §4.1), exactly as a real
-    # one does: a provider, and nothing else.
-    home_config(tmp_path)
-    researcher = agent_dir("jack", "researcher")
-    record = subagent_file("jack", "researcher")
-
-    async with Client(cabinet()) as client:
-        record.write_text("fork: false\n", encoding="utf-8")
-        await payload(
-            client,
-            "note_write",
-            subagent="researcher",
-            subject="own",
-            content="the subagent's note",
-        )
-        own_mirror = Path("notes") / f"{cabinet_store.mirror_stem('own')}.md"
-        assert (researcher / "cabinet" / own_mirror).is_file()
-        assert not (agent_dir("jack") / "cabinet" / own_mirror).exists()
-
-        record.write_text("fork: true\n", encoding="utf-8")
-        await payload(
-            client,
-            "note_write",
-            subagent="researcher",
-            subject="shared",
-            content="the maker's note",
-        )
-        shared_mirror = Path("notes") / f"{cabinet_store.mirror_stem('shared')}.md"
-        assert (agent_dir("jack") / "cabinet" / shared_mirror).is_file()
-        assert not (researcher / "cabinet" / shared_mirror).exists()
 
 
 # --- the surface the model is given -------------------------------------------
@@ -243,15 +200,12 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
 async def test_a_body_that_cannot_be_encoded_is_normalised_before_anything_writes() -> (
     None
 ):
-    """**The mirror is written after the row's transaction, so the body has to
-    be storable before either.**
+    """**The body is made storable before either copy is written.**
 
     A lone surrogate — the exact shape the project documents as an ordinary
-    model answer (`index.storable`) — failed the file write *after* the row,
-    keyword index and vector were committed: the call reported failure over a
-    note that existed, every retry was refused "already a note", and an update
-    left the old mirror beside the new row.  The U+FFFD the turn store writes
-    is what both copies carry here.
+    model answer (`index.storable`) — is one the file cannot encode and the
+    keyword text would spell differently.  The U+FFFD the turn store writes is
+    what both copies carry here, so the mirror and the index describe one text.
     """
     async with Client(cabinet()) as client:
         await payload(client, "note_write", subject="half", content="half \ud83d")
@@ -308,6 +262,139 @@ async def test_a_note_is_created_then_replaced_by_an_update() -> None:
     assert read["path"] == wrote["path"] == written.relative_to(data_dir()).as_posix()
     assert (data_dir() / read["path"]).is_file(), "an agent's own tools can open it"
     assert "first" not in json.dumps(read), "the older body is gone"
+
+
+@pytest.mark.asyncio
+async def test_a_note_whose_file_is_gone_is_refused_by_name() -> None:
+    """A document whose text is gone is not one with an empty text.
+
+    The row is the address and the file is the document, so a person deleting
+    or renaming the file leaves a row that cannot answer.  The reader names the
+    document and says what happened instead of letting a raw
+    `FileNotFoundError` out of the tool.
+    """
+    async with Client(cabinet()) as client:
+        wrote = await payload(client, "note_write", subject="gone", content="body")
+        (data_dir() / wrote["path"]).unlink()
+
+        with pytest.raises(ToolError, match="file is gone"):
+            await ask(client, "note_read", subject="gone")
+
+
+@pytest.mark.asyncio
+async def test_a_missing_mirror_does_not_take_the_whole_cabinet_down() -> None:
+    """**One damaged document is one document, not a dead cabinet.**
+
+    A changed embedding model makes the next open walk every vectorized
+    document; a missing mirror raised there, so `sync` failed and *every* tool
+    for that agent failed with it — including the ones that answer from rows
+    alone.  The index reads the damaged document as having no text and names
+    it; the row is still listed, and the reader above still refuses its file.
+    """
+
+    class AnotherEmbedder(StubEmbedder):
+        def __init__(self) -> None:
+            super().__init__(identity="stub:two")
+
+    async with Client(cabinet()) as client:
+        wrote = await payload(client, "note_write", subject="gone", content="body")
+    (data_dir() / wrote["path"]).unlink()
+
+    # A fresh server means a fresh `synced` set, and the changed identity makes
+    # `sync` walk the corpus.
+    async with Client(build_server(load(), embedder=AnotherEmbedder())) as client:
+        listed = await payload(client, "note_list")
+        with pytest.raises(ToolError, match="file is gone"):
+            await ask(client, "note_read", subject="gone")
+
+    assert [entry["key"] for entry in listed["entries"]] == ["gone"], (
+        "the row is still listed; only its text is gone"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_replace_indexes_the_row_the_update_hit(tmp_path: Path) -> None:
+    """**A replacement's id is read from the row it updated, not from its snapshot.**
+
+    `write(REPLACE)` reads the row id, then awaits the embedding.  A concurrent
+    remove-and-create of the same key in that window replaces the row with a new
+    rowid, and the old id used to carry the new keyword text and chunks — which
+    no live row has, so the updated document vanished from both search legs until
+    a rebuild.  The id is read back inside the write's own transaction.
+    """
+
+    class Swapping(StubEmbedder):
+        """Embeds normally, but replaces the row once, between read and write."""
+
+        def __init__(self, swap) -> None:
+            super().__init__()
+            self._swap = swap
+            self._swapped = False
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            if not self._swapped:
+                self._swapped = True
+                await self._swap()
+            return await super().embed(texts)
+
+    async def swap() -> None:
+        await store.remove(NOTE, "Python")
+        await store.write(
+            NOTE, "Python", text=f"{OTHER} interloper", embedder=StubEmbedder()
+        )
+
+    store = CabinetStore(tmp_path / "index.db")
+    await store.sync(StubEmbedder())
+    # **A live row above it keeps the old id from being reused.**  SQLite hands a
+    # freed *max* rowid to the next insert, so the replaced row has to be the
+    # earlier one — otherwise the concurrent create lands on the very id the
+    # snapshot held and hides the defect.
+    await store.write(NOTE, "Python", text=f"{WORD} first", embedder=StubEmbedder())
+    await store.write(NOTE, "Other", text="unrelated", embedder=StubEmbedder())
+    await store.write(
+        NOTE,
+        "Python",
+        mode=REPLACE,
+        text=f"{WORD} second",
+        embedder=Swapping(swap),
+    )
+
+    by_words = await store.search(keywords=["second"], embedder=StubEmbedder())
+    by_meaning = await store.search(sentences=[WORD], embedder=StubEmbedder())
+
+    # Each leg ranks the updated row first; under the dead id both lost it —
+    # the keyword text and the chunks belonged to no live row, so the decoy's
+    # live row outranked the document the caller had just replaced.
+    assert by_words["results"][0]["key"] == "Python", "the keyword leg lost it"
+    assert by_meaning["results"][0]["key"] == "Python", "the meaning leg lost it"
+
+
+def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path: Path) -> None:
+    """The cabinet's half of the catalogue's rule.
+
+    A corpus nobody has indexed has no table and no recorded identity, and the
+    keyword leg still answers.  A recorded identity whose table is gone is
+    damage, and the search refuses rather than answering keyword-only.
+    """
+
+    async def go() -> None:
+        store = CabinetStore(tmp_path / "index.db")
+        await store.sync(StubEmbedder())
+        await store.write(NOTE, "one", text="some text", embedder=StubEmbedder())
+        with connection_to(store.path) as connection:
+            connection.execute("DROP TABLE cabinet_vec")
+
+        with pytest.raises(RuntimeError, match="records a vector index"):
+            await store.search(sentences=["some"], embedder=StubEmbedder())
+
+        with connection_to(store.path) as connection:
+            connection.execute("DELETE FROM index_meta WHERE key = 'vector_identity'")
+        answer = await store.search(
+            keywords=["some"], sentences=["some"], embedder=StubEmbedder()
+        )
+        assert [row["key"] for row in answer["results"]] == ["one"]
+
+    asyncio.run(go())
 
 
 def test_a_listing_orders_moments_and_windows_by_instant(tmp_path: Path) -> None:
@@ -641,6 +728,24 @@ async def test_a_listing_is_a_page_a_caller_can_walk() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_an_offset_past_sqlite_is_the_empty_page() -> None:
+    """A page start beyond SQLite's integer range is still "past the end".
+
+    The listing floored an offset at zero and did not cap the other end, so a
+    model that wrote more digits than SQLite binds made `note_list` answer
+    `OverflowError` out of the query — an internal error where the page, the
+    total and the offset applied are the whole answer.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_write", subject="n0", content="body 0")
+        page = await payload(client, "note_list", offset=2**63)
+
+    assert page["entries"] == []
+    assert page["total"] == 1
+    assert page["offset"] == 2**63 - 1
+
+
 # --- files: bytes on disk, never in the index ---------------------------------
 
 
@@ -766,6 +871,13 @@ def test_a_fetched_name_is_the_sites_name_and_never_a_path() -> None:
     )
     assert cabinet_server._download_name("https://e.test/a/a%2Fb.txt", "") == "a-b.txt"
     assert cabinet_server._download_name("https://e.test/a/CON", "") == "_CON"
+    # **A device name is reserved with any extension**, not only the last one:
+    # Windows reads `NUL.tar.gz` as the device too, and `Path.stem` stripped
+    # only `.gz`, so the save target was the device namespace.
+    assert (
+        cabinet_server._download_name("https://e.test/NUL.tar.gz", "") == "_NUL.tar.gz"
+    )
+    assert cabinet_server._download_name("https://e.test/CON.a.b", "") == "_CON.a.b"
 
 
 def test_a_url_that_points_at_this_machine_is_refused() -> None:
@@ -848,11 +960,79 @@ async def test_a_fetch_is_stopped_at_the_size_cap(
 
 @pytest.mark.asyncio
 async def test_a_source_that_is_neither_a_path_nor_an_http_url_is_refused() -> None:
+    """A refused source is the answer's `failed` part, not a raised call.
+
+    `file_save` names several sources, and which of them were stored is what
+    the caller's next move depends on, so a refusal is answered rather than
+    raised — one source's failure cannot take the call's other half with it.
+    """
     async with Client(cabinet()) as client:
-        with pytest.raises(ToolError, match="not an http"):
-            await ask(client, "file_save", paths=["ftp://example.test/x"])
-        with pytest.raises(ToolError, match="no such file"):
-            await ask(client, "file_save", paths=["/no/such/file"])
+        ftp = await payload(client, "file_save", paths=["ftp://example.test/x"])
+        missing = await payload(client, "file_save", paths=["/no/such/file"])
+
+    assert ftp["saved"] == []
+    assert ftp["failed"][0]["source"] == "ftp://example.test/x"
+    assert "not an http" in ftp["failed"][0]["error"]
+    assert missing["saved"] == []
+    assert missing["failed"][0]["source"] == "/no/such/file"
+    assert "no such file" in missing["failed"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_source_does_not_take_the_saved_ones_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The answer says what was stored, so a retry starts from the truth.**
+
+    A later URL that cannot be fetched used to raise after the earlier files
+    were copied: the call said it failed while documents it did not mention
+    were in the cabinet, and a retry stored them again under `-1` names.
+    """
+    source = data_dir() / "first.txt"
+    source.write_bytes(b"the first\n")
+    url = "https://example.test/gone.txt"
+
+    async def fetch(entry: str) -> tuple[bytes, str]:
+        raise ToolError(f"could not fetch {entry}: the site is gone")
+
+    monkeypatch.setattr(cabinet_server, "_fetch_url", fetch)
+
+    async with Client(cabinet()) as client:
+        answer = await payload(client, "file_save", paths=[str(source), url])
+        listed = await payload(client, "file_list")
+
+    assert keys(answer["saved"]) == ["documents/first.txt"]
+    assert answer["failed"] == [
+        {"source": url, "error": f"could not fetch {url}: the site is gone"}
+    ]
+    assert keys(listed["entries"]) == ["documents/first.txt"], "the stored file is real"
+
+
+@pytest.mark.asyncio
+async def test_a_saved_file_needs_no_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**A file is keyword text and has no vector**, so its save asks no model.
+
+    The store's write takes an embedder for the vectorized kinds only; a saved
+    file — like a dump and an image — passes none.  The cabinet is opened first,
+    so its one sync is already done, and asking for an embedder after that is
+    the failure this test would see: a save of bytes must not open an embedding
+    connection, let alone fail when the endpoint is down.
+    """
+    source = data_dir() / "no-model.txt"
+    source.write_bytes(b"stored without a model\n")
+
+    async def unreachable(connection: object) -> Any:
+        raise AssertionError("file_save asked for an embedder")
+
+    async with Client(cabinet()) as client:
+        await payload(client, "file_list")  # opens and syncs this cabinet
+        monkeypatch.setattr(
+            "slife2.clients.embedder.EmbedderConnection.get", unreachable
+        )
+        answer = await payload(client, "file_save", paths=[str(source)])
+
+    assert keys(answer["saved"]) == ["documents/no-model.txt"]
+    assert answer["failed"] == []
 
 
 # --- images: bytes, addressed by content ------------------------------------
@@ -904,6 +1084,44 @@ async def test_removing_an_image_takes_its_bytes_with_it() -> None:
     store = store_of(index_path("jack"))
     assert await store.remove(IMAGE, saved["key"]) is not None
     assert not path.is_file()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_image_save_keeps_bytes_a_row_references(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A take-back must not orphan a concurrent save's row.**
+
+    The bytes are content-addressed, so two saves of one picture share one file.
+    A save whose row-write fails takes the file back only while no row needs it:
+    a concurrent save that committed its row in the window still points at the
+    bytes, and discarding them would leave that row (and every marker naming it)
+    over a file that is gone.
+    """
+    real_write = CabinetStore.write
+
+    async def commit_then_fail(self, kind, key, **kwargs):
+        if kind == IMAGE:
+            # A concurrent save commits the row for this same content address…
+            await real_write(self, kind, key, **kwargs)
+            # …and then this call's own row-write fails.
+            raise RuntimeError("the row write failed")
+        return await real_write(self, kind, key, **kwargs)
+
+    monkeypatch.setattr(CabinetStore, "write", commit_then_fail)
+    async with Client(cabinet()) as client:
+        with pytest.raises(ToolError):
+            await ask(client, "image_save", url="data:image/png;base64,AAAA")
+
+    opened = store_of(index_path("jack"))
+    with opened._connect() as connection:
+        rows = connection.execute(
+            "SELECT file_path FROM cabinet_doc WHERE kind = ?", (IMAGE,)
+        ).fetchall()
+    assert len(rows) == 1, "the concurrent save's row is there"
+    assert (opened.root / str(rows[0]["file_path"])).is_file(), (
+        "a row references the bytes, so they were not taken back"
+    )
 
 
 @pytest.mark.asyncio
@@ -1015,7 +1233,7 @@ async def test_a_binary_sniff_beats_a_wrong_guess() -> None:
 async def test_a_saved_file_is_read_in_windows_like_a_dump() -> None:
     """**The same window over a file that `dump_read` gives a dump.**
 
-    The file on disk stays whole; the answer is bounded by `tool_result.tokens`
+    The file on disk stays whole; the answer is bounded by `tool_result.bytes`
     and `next` names the line the following window starts at.
     """
     source = data_dir() / "long.txt"
@@ -1187,6 +1405,10 @@ async def test_the_two_legs_answer_different_questions() -> None:
             client, "cabinet_search", sentences=[f"{WORD} in the body"]
         )
 
+    assert set(by_words) == {"results", "best", "confidence", "browsed", "limit"}
+    assert by_words["best"] == 1.0
+    assert by_words["confidence"] == "sure"
+    assert by_words["browsed"] is False
     assert keys(by_words["results"]) == ["alpha"]
     assert by_words["results"][0]["matched_in"] == "line"
     assert (data_dir() / by_words["results"][0]["path"]).is_file(), (
@@ -1374,6 +1596,31 @@ async def test_a_search_with_neither_input_browses() -> None:
 
     assert keys(browsed["results"]) == ["one"]
     assert browsed["browsed"] is True
+    assert browsed["best"] is None, "a browse measured nothing"
+    assert browsed["confidence"] is None, "and judged nothing"
+    assert browsed["limit"] == 20
+
+
+@pytest.mark.asyncio
+async def test_a_blank_keyword_does_not_throw_away_the_sentence() -> None:
+    """**Two legs, and one having no term is not the other being absent.**
+
+    `keywords: [""]` beside a real sentence used to raise `EmptyQuery` out of
+    `match_expression`, which the tool answered as a refusal — so the meaning
+    leg never ran.  The turn store already reads its two inputs this way; the
+    cabinet now does too.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "note_write", subject="one", content="the migration plan")
+        found = await payload(
+            client,
+            "cabinet_search",
+            keywords=[""],
+            sentences=["the migration plan"],
+        )
+
+    assert keys(found["results"]) == ["one"]
+    assert found["browsed"] is False
 
 
 @pytest.mark.asyncio
@@ -1530,22 +1777,29 @@ def test_a_slug_keeps_what_a_person_reads_and_never_collides_silently() -> None:
     assert slug("///").startswith("doc-"), "a name with no word in it is still a name"
 
 
-def test_a_file_has_no_vector_text() -> None:
-    """**A saved file is keyword-only.**  Its identity is not embedded.
+@pytest.mark.asyncio
+async def test_a_file_is_not_vectorized() -> None:
+    """**A saved file is keyword-only.**  Its bytes are never embedded.
 
     A file's size is not the agent's to control, so meaning search over files
-    is deferred until a RAG pass exists; `vector_text` is the agent-written
-    document's body, and a file has no body.
+    is deferred until a RAG pass exists; the rule is the kind's (`Spec`), and a
+    write of a file places no chunk however much text it is handed.
     """
-    row = {
-        "kind": FILE,
-        "title": "spec sheet",
-        "source": "C:/tmp/spec.pdf",
-        "file_path": "documents/spec.pdf",
-        "summary": "",
-    }
-
-    assert vector_text(row) == ""
+    store = store_of(index_path("jack"))
+    await store.sync(StubEmbedder())
+    await store.write(
+        FILE,
+        "documents/spec.txt",
+        text="words the meaning leg must not see",
+        file_path="documents/spec.txt",
+        title="spec sheet",
+        embedder=StubEmbedder(),
+    )
+    with store._connect() as connection:
+        chunks = connection.execute(
+            "SELECT COUNT(*) AS n FROM cabinet_chunk"
+        ).fetchone()["n"]
+    assert int(chunks) == 0, "the meaning leg covers the agent-written kinds only"
 
 
 def test_a_category_says_what_a_file_is_only_when_it_knows() -> None:
@@ -1586,7 +1840,7 @@ async def test_sync_embeds_every_document_and_not_one_batch(
     embedder = StubEmbedder()
     await store.sync(embedder)
     for index in range(3):
-        await store.write(NOTE, f"n{index}", body=f"body {index}", embedder=embedder)
+        await store.write(NOTE, f"n{index}", text=f"body {index}", embedder=embedder)
     with store._connect() as connection:
         # The state a changed embedding model leaves: rows, no vectors.  The
         # rebuild clears all three tables, and the third is the one that says
@@ -1622,7 +1876,7 @@ async def test_sync_ends_with_a_document_that_has_nothing_to_embed(
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "empty", body="", embedder=embedder)
+    await store.write(NOTE, "empty", text="", embedder=embedder)
 
     status = await asyncio.wait_for(
         store.sync(embedder),
@@ -1648,12 +1902,53 @@ async def test_a_category_is_one_folder_name() -> None:
     source.write_bytes(b"x")
     async with Client(cabinet()) as client:
         for category in ("./documents", "documents/", "NOTES", "a/b"):
-            with pytest.raises(ToolError) as refused:
-                await ask(client, "file_save", paths=[str(source)], category=category)
-            assert "not one folder name" in str(refused.value) or (
-                "cannot be filed under it" in str(refused.value)
+            answer = await payload(
+                client, "file_save", paths=[str(source)], category=category
+            )
+            assert answer["saved"] == [], category
+            error = answer["failed"][0]["error"]
+            assert "not one folder name" in error or (
+                "cannot be filed under it" in error
             ), category
     assert not (bag() / "notes").exists() or not list((bag() / "notes").glob("*.txt"))
+
+
+@pytest.mark.asyncio
+async def test_a_reserved_category_cannot_be_reached_by_another_spelling() -> None:
+    """`dumps` is a cabinet mirror like `notes`, and a trailing dot is the notes
+    directory once Windows normalises the component.  Both must be refused, or a
+    saved file lands among the mirrors — and a file filed under `dumps` is silently
+    overwritten by the next `dump_save` whose mirror stem matches its name."""
+    source = data_dir() / "report.txt"
+    source.write_bytes(b"x")
+    async with Client(cabinet()) as client:
+        for category in ("dumps", "notes.", "DIARY."):
+            answer = await payload(
+                client, "file_save", paths=[str(source)], category=category
+            )
+            assert answer["saved"] == [], category
+            assert "cannot be filed under it" in answer["failed"][0]["error"], category
+
+
+def test_the_reserved_categories_are_the_cabinets_own_directories() -> None:
+    """**The guard is derived from the one place that owns the directories.**
+
+    The mirror dirs are `SPECS`' and the image kind's bytes dir is `PICTURES_DIR`;
+    a hand-written set would silently stop guarding a directory the moment a
+    mirror was renamed.  The set's meaning is unchanged — the four mirrors and
+    `pictures` — but it now moves with the facts it guards.
+    """
+    assert cabinet_server.RESERVED_CATEGORIES == frozenset(
+        {spec.mirror for spec in cabinet_store.SPECS.values() if spec.mirror}
+        | {cabinet_store.PICTURES_DIR}
+    )
+    assert cabinet_server.RESERVED_CATEGORIES == {
+        "notes",
+        "diary",
+        "reports",
+        "dumps",
+        "pictures",
+    }
 
 
 # --- the rules the store keeps when nobody is watching ------------------------
@@ -1726,8 +2021,8 @@ async def test_two_subjects_that_slugify_alike_are_two_files() -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "a b", body="first", embedder=embedder)
-    await store.write(NOTE, "a/b", body="second", embedder=embedder)
+    await store.write(NOTE, "a b", text="first", embedder=embedder)
+    await store.write(NOTE, "a/b", text="second", embedder=embedder)
     first = store.get(NOTE, "a b")
     second = store.get(NOTE, "a/b")
     assert first is not None and second is not None
@@ -1743,6 +2038,118 @@ async def test_two_subjects_that_slugify_alike_are_two_files() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_mirror_the_filesystem_refuses_rolls_the_create_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The row commits only after its file is in place.**
+
+    A mirror held open by an editor (Windows refuses the replace) used to fail
+    after the row, its keyword text and its vectors had committed — a call that
+    reported failure over a note that existed, and every retry refused with
+    "already a note".  The mirror is written inside the row's transaction now,
+    so the refusal takes the whole write back and the create can be retried.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    real = cabinet_store._write_mirror
+
+    def held_open(root: Path, relative: str, text: str) -> None:
+        raise PermissionError(relative)
+
+    monkeypatch.setattr(cabinet_store, "_write_mirror", held_open)
+    with pytest.raises(PermissionError):
+        await store.write(NOTE, "locked", text="first", embedder=embedder)
+
+    assert store.get(NOTE, "locked") is None, "the row went back with the file"
+    with store._connect() as connection:
+        for table in ("cabinet_doc", "cabinet_fts", "cabinet_chunk"):
+            count = connection.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+            assert int(count["n"]) == 0, f"no {table} row survived the refused mirror"
+
+    monkeypatch.setattr(cabinet_store, "_write_mirror", real)
+    written = await store.write(NOTE, "locked", text="second", embedder=embedder)
+    assert written is not None, "the create is not lost to a retry"
+    assert (bag() / str(written["mirror"])).read_text(encoding="utf-8") == "second"
+
+
+@pytest.mark.asyncio
+async def test_a_mirror_the_filesystem_refuses_keeps_the_update_whole(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A refused replacement leaves the old document, row, index and file.**
+
+    The update replaces the row, the keyword text and the vectors before the
+    mirror is written; rolling it all back is what keeps the old row from
+    naming the new file or the new row from naming the old one — the two
+    disagreements the failure used to leave behind.  A create has no old
+    document to keep, which is why this half is a test of its own.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    first = await store.write(NOTE, "mutable", text="first", embedder=embedder)
+    assert first is not None
+
+    def held_open(root: Path, relative: str, text: str) -> None:
+        raise PermissionError(relative)
+
+    monkeypatch.setattr(cabinet_store, "_write_mirror", held_open)
+    with pytest.raises(PermissionError):
+        await store.write(
+            NOTE, "mutable", mode=REPLACE, text="second", embedder=embedder
+        )
+
+    kept = store.get(NOTE, "mutable")
+    assert kept is not None
+    assert store.text_of(kept) == "first", "the old text is still the document"
+    with store._connect() as connection:
+        indexed = connection.execute(
+            "SELECT search FROM cabinet_fts WHERE rowid = ?", (int(kept["id"]),)
+        ).fetchone()["search"]
+    assert "first" in indexed and "second" not in indexed, "the index rolled back too"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_unlink_refuses_the_remove_and_keeps_the_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The file goes inside the remove's transaction, before the commit.**
+
+    The stem is a function of the key, so a concurrent re-create of the same key
+    lands on the same file — unlinking after the commit deleted the live
+    successor's file.  Inside the transaction, a filesystem that refuses the
+    unlink (an editor holding the file open) rolls the whole remove back: the
+    row, its keyword text and its file are all still there, and the remove can be
+    retried once the file is let go.
+    """
+    store = store_of(index_path("jack"))
+    embedder = StubEmbedder()
+    await store.sync(embedder)
+    written = await store.write(NOTE, "held", text="body", embedder=embedder)
+    assert written is not None
+    mirror = bag() / str(written["mirror"])
+    assert mirror.is_file()
+
+    def refused(path: Path) -> None:
+        raise PermissionError(path)
+
+    monkeypatch.setattr(cabinet_store, "_unlink_document", refused)
+    with pytest.raises(PermissionError):
+        await store.remove(NOTE, "held")
+
+    kept = store.get(NOTE, "held")
+    assert kept is not None, "the row went back with the refused unlink"
+    assert mirror.is_file(), "the file was never unlinked"
+    assert store.text_of(kept) == "body"
+    with store._connect() as connection:
+        indexed = connection.execute(
+            "SELECT COUNT(*) AS n FROM cabinet_fts WHERE rowid = ?", (int(kept["id"]),)
+        ).fetchone()["n"]
+    assert int(indexed) == 1, "the keyword text rolled back too"
+
+
+@pytest.mark.asyncio
 async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
     """**A saved file has no vector.**  A summary is written and indexed as
     words, and `annotate` does not ask the embedding model at all.
@@ -1755,7 +2162,7 @@ async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
     await store.write(
         FILE,
         "documents/spec.txt",
-        body="",
+        text="",
         file_path="documents/spec.txt",
         title="spec sheet",
         embedder=StubEmbedder(),
@@ -1772,6 +2179,61 @@ async def test_a_file_summary_is_keyword_text_and_needs_no_embedding() -> None:
 
 
 @pytest.mark.asyncio
+async def test_annotate_reads_and_writes_under_one_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The summary is composed and written in one transaction.**
+
+    The row and its body were read on one connection and the summary written on
+    another, so a concurrent update or remove could land between them — the
+    older body's keyword text overwriting the newer, or an orphan index entry
+    over a removed row.  The read now happens inside the write transaction:
+    while annotate is between its read and its write, a second writer cannot
+    take the lock.
+    """
+    store = store_of(index_path("jack"))
+    await store.sync(StubEmbedder())
+    await store.write(NOTE, "locked", text="first", embedder=StubEmbedder())
+
+    read_done = threading.Event()
+    resume = threading.Event()
+    real = cabinet_store.CabinetStore._index_text
+
+    def paused(self, row):
+        found = real(self, row)
+        read_done.set()
+        resume.wait(timeout=5.0)  # timeouts: a hang guard, not a budget
+        return found
+
+    monkeypatch.setattr(cabinet_store.CabinetStore, "_index_text", paused)
+    result: dict[str, Any] = {}
+
+    def run() -> None:
+        result["row"] = asyncio.run(store.annotate(NOTE, "locked", summary="about it"))
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert read_done.wait(timeout=5.0)  # timeouts: a hang guard, not a budget
+        # annotate is between its read and its write, holding the write lock: a
+        # second writer cannot begin.  (The two-connection code held no lock
+        # here, and this BEGIN IMMEDIATE succeeded.)
+        other = connect_to(store.path)
+        try:
+            other.execute("PRAGMA busy_timeout=50")
+            with pytest.raises(sqlite3.OperationalError):
+                other.execute("BEGIN IMMEDIATE")
+        finally:
+            other.close()
+    finally:
+        resume.set()
+        thread.join(timeout=5.0)  # timeouts: a hang guard, not a budget
+
+    assert result["row"] is not None
+    assert result["row"]["summary"] == "about it"
+
+
+@pytest.mark.asyncio
 async def test_sync_reports_a_document_the_index_has_no_vector_for() -> None:
     """**`ready` is not "the pass ran"**: a hole it cannot reach is named.
 
@@ -1784,7 +2246,7 @@ async def test_sync_reports_a_document_the_index_has_no_vector_for() -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "hole", body="something to embed", embedder=embedder)
+    await store.write(NOTE, "hole", text="something to embed", embedder=embedder)
     with store._connect() as connection:
         # The state a failed placement leaves: tried, and nothing in the index.
         connection.execute("DELETE FROM cabinet_chunk")
@@ -1819,7 +2281,7 @@ async def test_a_failed_index_rebuild_leaves_the_vectors_table(
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(NOTE, "one", body="some text", embedder=embedder)
+    await store.write(NOTE, "one", text="some text", embedder=embedder)
     monkeypatch.setattr("slife2.libs.store.index.vector_ddl", explode)
 
     with pytest.raises(RuntimeError, match="no DDL for you"):
@@ -1848,8 +2310,8 @@ async def test_two_writes_of_one_key_make_one_document() -> None:
     day = "2026-10-11"
 
     first, second = await asyncio.gather(
-        store.write(DIARY, day, body="morning", embedder=embedder),
-        store.write(DIARY, day, body="evening", embedder=embedder),
+        store.write(DIARY, day, text="morning", embedder=embedder),
+        store.write(DIARY, day, text="evening", embedder=embedder),
     )
 
     assert (first is None) != (second is None), "exactly one create won"
@@ -1881,27 +2343,28 @@ async def test_a_folder_filter_matches_only_the_folder_named() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_search_caps_the_shortlist_it_hands_to_sql(
+async def test_a_search_does_not_cap_the_shortlist_it_hands_to_sql(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The union is capped where it is built, which is what `MAX_SQL_VARS` says.
+    """**`MAX_SQL_VARS` is a binding limit, not a depth cap.**
 
-    Nothing the caller passes bounds the shortlist — every sentence contributes
-    its meaning leg's ids and the keyword leg's — while the query that reads the
-    rows binds one value per id.  The cap is small here so that the property is
-    visible on a corpus of five: what the search hands on is the top of the
-    union rather than all of it, and the page is what the caller asked for.
+    The union is built from every sentence's meaning leg and the keyword leg;
+    the query that reads its rows binds one value per id and already chunks
+    them (`rows_in_order`).  Truncating the union where it was built hid rows
+    behind the caller's filters — an `unloaded_only` search could be empty while
+    a match existed — so the page, not the binding number, is what bounds the
+    answer.  The cap is small here to make the property visible on five rows.
     """
     monkeypatch.setattr(store_index, "MAX_SQL_VARS", 2)
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
     for index in range(5):
-        await store.write(NOTE, f"n{index}", body=WORD, embedder=embedder)
+        await store.write(NOTE, f"n{index}", text=WORD, embedder=embedder)
 
     answer = await store.search(keywords=[WORD], embedder=embedder)
 
-    assert len(answer["results"]) == 2, "the shortlist, not the corpus"
+    assert len(answer["results"]) == 5, "the page, not the binding cap"
 
 
 # --- the dump, and the two readers that have to stay inside the budget --------
@@ -1934,7 +2397,7 @@ async def save_dump(call: str, body: str) -> None:
     store = store_of(index_path("jack"))
     embedder = StubEmbedder()
     await store.sync(embedder)
-    await store.write(DUMP, call, mode=UPSERT, body=body, embedder=embedder)
+    await store.write(DUMP, call, mode=UPSERT, text=body, embedder=embedder)
 
 
 @pytest.mark.asyncio
@@ -1956,7 +2419,7 @@ async def test_dump_save_answers_the_files_size_and_a_relative_path() -> None:
 async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     """**The property the arrangement rests on**, and not a nicety.
 
-    A reader of ours handing back more than `tool_result.tokens` would be one
+    A reader of ours handing back more than `tool_result.bytes` would be one
     system at both ends of a loop: the harness truncates a result, the model
     reads it back, and the truncation fires again on our own tool's answer.  So
     the bound is on the whole answer — envelope included, which is why the
@@ -1964,12 +2427,12 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     """
     body = dump_body()
     await save_dump("call_big", body)
-    tight = replace(load(), tool_result=ToolResultSettings(tokens=120))
+    tight = replace(load(), tool_result=ToolResultSettings(bytes=2_048))
 
     async with Client(build_server(tight, embedder=StubEmbedder())) as client:
         answer = await ask(client, "dump_read", call="call_big")
 
-    assert estimate_text_tokens(answer) <= 120
+    assert text_size(answer) <= 2_048
     window = json.loads(answer)
     shown = window["text"].splitlines()
     assert shown[0].endswith("line 1 of a tool output"), (
@@ -1979,6 +2442,34 @@ async def test_a_dump_read_never_returns_more_than_the_budget() -> None:
     assert window["chars"] == len(body)
     assert window["path"] == "agents/jack/cabinet/dumps/call_big.md"
     assert window["next"] == len(shown) + 1, "the next window starts where this stopped"
+
+
+@pytest.mark.asyncio
+async def test_a_budget_edit_reaches_the_next_dump_read() -> None:
+    """**The reader's budget is read per call, not captured at boot.**
+
+    The harness reads `tool_result.bytes` live, and the reader's cap and that
+    budget are one number.  A cabinet that captured the boot snapshot would
+    diverge from it after an operator edit until a restart — the reader handing
+    back more (or less) than the budget.  The source seam is what makes the
+    reader follow the file on the next call.
+    """
+    await save_dump("call_live", dump_body())
+    live = replace(load(), tool_result=ToolResultSettings(bytes=2_048))
+
+    def source() -> Any:
+        return live
+
+    async with Client(
+        build_server(load(), embedder=StubEmbedder(), source=source)
+    ) as client:
+        tight = await ask(client, "dump_read", call="call_live")
+        # An operator raises the budget; the next read follows without a restart.
+        live = replace(live, tool_result=ToolResultSettings(bytes=8_192))
+        wider = await ask(client, "dump_read", call="call_live")
+
+    assert text_size(tight) <= 2_048
+    assert 2_048 < text_size(wider) <= 8_192
 
 
 @pytest.mark.asyncio
@@ -2083,6 +2574,37 @@ async def test_a_grep_match_answers_both_addresses() -> None:
     }
     assert by_char["text"] == "marker"
     assert by_line["text"].endswith("beta marker")
+
+
+@pytest.mark.asyncio
+async def test_a_casefold_that_changes_width_still_answers_the_original_address():
+    """**A folded match is not an original offset.**
+
+    `ß` casefolds to two characters, so a match found in the folded line sits
+    one place later in the real one.  The character address is what the caller
+    passes to `dump_read mode="char"`, so a late offset makes the reader start
+    inside the word it was sent to — the quiet kind of wrong this address
+    exists to prevent.
+    """
+    body = "Straße ALPHA\n"
+    await save_dump("call_casefold", body)
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_casefold", pattern="alpha"
+        )
+        at = found["matches"][0]["char"]
+        read = await payload(
+            client,
+            "dump_read",
+            call="call_casefold",
+            mode="char",
+            offset=at,
+            limit=5,
+        )
+
+    assert at == body.index("ALPHA")
+    assert read["text"] == "ALPHA"
 
 
 @pytest.mark.asyncio
@@ -2301,7 +2823,7 @@ async def test_a_long_matched_line_keeps_its_addresses_and_is_marked_cut() -> No
     assert match["text"].startswith("start ")
     assert 0 < len(match["text"]) < len(body)
     assert len(match["text"]) <= len("start ") + cabinet_server.GREP_AFTER_CHARS
-    assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+    assert text_size(json.dumps(found)) <= load().tool_result.bytes
 
 
 @pytest.mark.asyncio
@@ -2344,7 +2866,39 @@ async def test_a_mid_line_match_gets_a_window_around_it() -> None:
     assert window["text"] == match["text"], (
         "`text_char` is the address the same window is read back from"
     )
-    assert estimate_text_tokens(json.dumps(found)) <= load().tool_result.tokens
+    assert text_size(json.dumps(found)) <= load().tool_result.bytes
+
+
+@pytest.mark.asyncio
+async def test_a_second_match_on_a_long_line_windows_its_own_occurrence() -> None:
+    """Two matches on one long line: the second's window must surround the second
+    occurrence and read back from its own `text_char`.
+
+    `_fit_match_text` used to window the *first* occurrence while addressing it as
+    the current match, so the second hit showed the first's surroundings under the
+    second's address — the model read the wrong text at the wrong place.
+    """
+    body = "x" * 60000 + " marker " + "y" * 60000 + " marker " + "z" * 60000
+    await save_dump("call_two_matches", body)
+    second_at = body.index("marker", body.index("marker") + 1)
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_two_matches", pattern="marker"
+        )
+        assert found["matched"] == 2
+        second = next(m for m in found["matches"] if m["char"] == second_at)
+        window = await payload(
+            client,
+            "dump_read",
+            call="call_two_matches",
+            mode="char",
+            offset=second["text_char"],
+            limit=len(second["text"]),
+        )
+
+    assert "marker z" in second["text"], "the window is around the second occurrence"
+    assert window["text"] == second["text"], "and reads back from its own address"
 
 
 @pytest.mark.asyncio
@@ -2358,7 +2912,7 @@ async def test_a_huge_pattern_is_not_quoted_back() -> None:
         )
 
     assert json.loads(answer)["matched"] == 0
-    assert estimate_text_tokens(answer) <= load().tool_result.tokens
+    assert text_size(answer) <= load().tool_result.bytes
 
 
 @pytest.mark.asyncio
@@ -2441,7 +2995,7 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
     embedder = StubEmbedder()
     await store.sync(embedder)
     await store.write(
-        DUMP, "call", mode=UPSERT, body=f"{WORD} in a tool output", embedder=embedder
+        DUMP, "call", mode=UPSERT, text=f"{WORD} in a tool output", embedder=embedder
     )
     await store.write(
         IMAGE,
@@ -2451,7 +3005,7 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
         mime="image/png",
         embedder=embedder,
     )
-    await store.write(NOTE, "readable", body=f"a note about {WORD}", embedder=embedder)
+    await store.write(NOTE, "readable", text=f"a note about {WORD}", embedder=embedder)
 
     attachments = "SELECT id FROM cabinet_doc WHERE kind IN (?, ?)"
     kinds = (DUMP, IMAGE)
@@ -2474,3 +3028,77 @@ async def test_an_attachment_is_stored_but_not_indexed() -> None:
     assert int(indexed) == int(chunks) == int(embedded) == 0
     assert status["ready"] is True, status["problems"]
     assert status["documents"] == 1, "the corpus, not the rows in the directory"
+
+
+def test_every_spelling_of_a_day_is_one_diary_key() -> None:
+    """**One day is one document.**  `date.fromisoformat` accepts `20260105`,
+    `2026-W02-1` and `2026W021`; keeping the caller's spelling made each a
+    separate row that also sorted outside the `YYYY-MM-DD` order, so
+    `diary_list` could show 2020 above 2030 and a `since` window could exclude
+    the day it named.
+    """
+    assert cabinet_server._diary_key("20260105") == "2026-01-05"
+    assert cabinet_server._diary_key("2026-W02-1") == "2026-01-05"
+    assert cabinet_server._diary_key("2026-01-05") == "2026-01-05"
+
+
+@pytest.mark.asyncio
+async def test_a_diary_day_is_read_and_removed_in_any_accepted_spelling() -> None:
+    """**The read and the remove use the write's key rule.**
+
+    A day written as `20260105` is stored under `2026-01-05`; reading or removing
+    it in another accepted spelling of that same day must find it, not refuse a
+    key the store never held.  An invalid date is refused the same way the write
+    refuses it.
+    """
+    async with Client(cabinet()) as client:
+        wrote = await payload(client, "diary_write", content="the day", date="20260105")
+        assert wrote["key"] == "2026-01-05"
+        # Read it back in another accepted spelling of the same day.
+        read = await payload(client, "diary_read", date="2026-W02-1")
+        assert read["key"] == "2026-01-05"
+        assert read["text"] == "the day"
+        # Remove it in yet another spelling, then it is gone.
+        removed = await payload(client, "diary_remove", date="20260105")
+        assert removed["key"] == "2026-01-05"
+        assert removed["removed"] is True
+        with pytest.raises(ToolError, match="no diary entry"):
+            await ask(client, "diary_read", date="2026-01-05")
+        # An invalid date is refused, consistent with the write.
+        with pytest.raises(ToolError, match="is not a date"):
+            await ask(client, "diary_read", date="not-a-date")
+
+
+@pytest.mark.asyncio
+async def test_a_diary_summary_takes_the_day_in_any_accepted_spelling() -> None:
+    """**A summary is a reader, and it uses the write's key rule.**
+
+    `diary_write` stores `2026-01-05`; a `cabinet_summarize` naming the same day
+    as `2026-W02-1` passed the caller's spelling straight to the row lookup, so
+    it refused a document that was there — the one corpus kind whose key has a
+    canonical spelling and the one tool that did not use it.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "diary_write", content="the day", date="20260105")
+        written = await payload(
+            client,
+            "cabinet_summarize",
+            kind=DIARY,
+            key="2026-W02-1",
+            summary="about the migration",
+            tags="work",
+        )
+        read = await payload(client, "diary_read", date="2026-01-05")
+        with pytest.raises(ToolError, match="is not a date"):
+            await ask(
+                client,
+                "cabinet_summarize",
+                kind=DIARY,
+                key="not-a-date",
+                summary="x",
+            )
+
+    assert written["key"] == "2026-01-05"
+    assert written["summary"] == "about the migration"
+    assert read["summary"] == "about the migration", "the summary found the row"
+    assert read["tags"] == "work"

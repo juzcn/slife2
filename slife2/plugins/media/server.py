@@ -20,17 +20,21 @@ about a model rather than about a vendor.  `MediaSettings.resolve` is the four
 step search that answers it, and `slife2/plugins/media/adapters.py` is the translation
 layer — so this file never learns a vendor's name either.
 
-**The four tools carry no addressing of their own.**  A caller names a model only
-to override the configured default, and a `folder` only to sort its own work;
-everything else — endpoint, key, the model's own parameters — is the config's,
-which is what makes "switch to the cheap image model" a config edit rather than
-a new call.
+**The four tools carry no provider addressing of their own.**  A caller names a
+model only to override the configured default, and an `output` only to name the
+file; everything else — endpoint, key, the model's own parameters — is the
+config's, which is what makes "switch to the cheap image model" a config edit
+rather than a new call.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
+import os
 import re
+import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -46,9 +50,9 @@ from slife2.libs.host.config import (
     MediaProviderSettings,
     MediaSettings,
 )
+from slife2.libs.host.paths import local_path, work_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
-from slife2.libs.turn.tokens import clip_to_tokens
 from slife2.plugins.media.adapters import (
     MediaAdapter,
     MediaAdapterError,
@@ -70,19 +74,22 @@ CONFIG_KEY = "media"
 
 INSTRUCTIONS = (
     "Generation: images, video, speech and transcripts, from the `media:` "
-    "providers. Each tool answers the file it wrote — `transcribe_audio`, the "
-    "text itself. `generate_video` can take minutes; a long render times out on "
-    "the wait while the job keeps running at the provider."
+    "providers. Each tool writes where `output` names — a relative path is "
+    "relative to this conversation's work directory — or into the media directory. The two "
+    "file-to-file tools are `transcribe_audio` (an audio `input`, answered as "
+    "text or written to `output`) and `text_to_speech` (a text file in `input` "
+    "when `text` is empty). `generate_video` can take minutes; a long render "
+    "times out on the wait while the job keeps running at the provider."
 )
 
 # ── The one bound a caller can be wrong about ────────────────────────────────
 # An image size is the argument a model gets *plausibly* wrong — "2048x2048" for
 # a model whose floor is 768 — and the vendor's own refusal arrives after the
-# call has been paid for.  So it is checked here, against the vendor's numbers.
-
-#: Smallest and largest total pixels the vendor accepts (about 768²..4096²).
-MIN_PIXELS = 589_824
-MAX_PIXELS = 16_777_216
+# call has been paid for.  The *spelling* is checked here, because `WIDTH*HEIGHT`
+# is what every tool documents and every adapter takes.  The pixel *range* is a
+# vendor's own fact, so it is checked in the adapter that knows it
+# (`DashScopeAIGCAdapter.generate_image`): one provider's numbers refused in
+# another's name is a sentence that lies about the provider actually called.
 
 #: `1024*1024`, `1024x1024`, `1024 X 1024` — the three ways this gets written.
 _SIZE = re.compile(r"^(\d+)\s*[xX*]\s*(\d+)$")
@@ -92,7 +99,9 @@ def check_size(size: str) -> str:
     """A size the caller wrote, or a sentence saying why it is not one.
 
     Empty passes: "whatever the model defaults to" is a valid thing to want, and
-    the config's own `params` may already say it.
+    the config's own `params` may already say it.  The grammar is the whole of
+    this check — whether the pixels are a range the provider takes is the
+    adapter's question, asked where the provider is known.
     """
     if not size.strip():
         return ""
@@ -101,14 +110,6 @@ def check_size(size: str) -> str:
         raise ToolError(
             f"{size!r} is not a size. Write it as `WIDTH*HEIGHT`, "
             f"two whole numbers — `1024*1024`."
-        )
-    pixels = int(matched.group(1)) * int(matched.group(2))
-    if not MIN_PIXELS <= pixels <= MAX_PIXELS:
-        direction = "small" if pixels < MIN_PIXELS else "large"
-        raise ToolError(
-            f"{size!r} is too {direction}: {pixels} pixels, and this "
-            f"provider takes {MIN_PIXELS}..{MAX_PIXELS} (about 768x768 to "
-            f"4096x4096)."
         )
     return size.strip()
 
@@ -149,19 +150,17 @@ class Media:
         except ConfigError as exc:
             raise ToolError(str(exc)) from exc
 
-    def output(self, ctx: Context, folder: str) -> Path:
-        """Where this call's artifact goes: `agents/<agent>/media[/folder]/`.
+    def output(self, ctx: Context) -> Path:
+        """The default place for this call's artifact: `agents/<agent>/media/`.
 
         The agent comes from the call, like every other per-agent fact in this
         system: one process serves every agent, so "whose work is this" is
         something only the caller can say — and a call that does not say is
-        refused rather than written under somebody else's name.
+        refused rather than written under somebody else's name.  A caller that
+        named an `output` path does not use this.
         """
         agent, subagent = conversation_of(ctx)
-        try:
-            return media_dir(agent, subagent, folder)
-        except MediaAdapterError as exc:
-            raise ToolError(str(exc)) from exc
+        return media_dir(agent, subagent)
 
     async def close(self) -> None:
         for adapter in self._adapters.values():
@@ -171,6 +170,81 @@ class Media:
                 logger.debug("media adapter did not close cleanly", exc_info=True)
 
 
+def _input_path(ctx: Context, value: str) -> Path:
+    """A local path as the agent's working directory sees it.
+
+    A relative path is resolved against that directory — the one its own tools
+    run in — because this process serves every agent and has no cwd of its own
+    to mean.  An absolute path is used as written.
+
+    The rule is `slife2.libs.host.paths.local_path`'s, with this conversation's
+    work directory as its base — the drive-relative refusal included, which
+    arrives as a `ValueError` and is a tool's to answer as a `ToolError`.
+    """
+    agent, subagent = conversation_of(ctx)
+    try:
+        return local_path(value, base=work_dir(agent, subagent))
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+def _reference_path(ctx: Context, value: str) -> str:
+    """A reference image as the adapter takes it: URL/URI, or a local path."""
+    if not value or value.startswith(("http://", "https://", "data:")):
+        return value
+    return str(_input_path(ctx, value))
+
+
+def _output_path(ctx: Context, output: str) -> Path | None:
+    """The file the caller named, or None for the media directory."""
+    if not output.strip():
+        return None
+    return _input_path(ctx, output)
+
+
+async def _make_parent(target: Path) -> None:
+    try:
+        await asyncio.to_thread(target.parent.mkdir, parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ToolError(f"could not create {str(target.parent)!r}: {exc}") from exc
+
+
+async def _read_text(ctx: Context, value: str) -> str:
+    """A text file the caller named, read off the event loop."""
+    path = _input_path(ctx, value)
+    try:
+        return await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except OSError as exc:
+        raise ToolError(f"could not read {value!r}: {exc}") from exc
+
+
+async def _place(written: str, target: Path) -> None:
+    """Move one adapter's artifact to the path the caller named.
+
+    **The old file is replaced by a complete one or not at all.**  The move is
+    `Path.replace`, a rename in the destination's own directory: every adapter
+    writes into `outputs_dir`, and the caller sets that to `target.parent`, so
+    source and target are on one filesystem by construction.  The previous
+    order removed `target` first and then moved, so a failed move left the
+    caller with neither the old file nor the new one; and the `shutil.move`
+    fallback it kept could copy half a file over the old one before failing.
+    A same-directory replace is atomic, so a refusal leaves the old document
+    exactly as it was and the artifact at its generated name.
+    """
+
+    def move() -> None:
+        source = Path(written)
+        if source == target:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(target)
+
+    try:
+        await asyncio.to_thread(move)
+    except OSError as exc:
+        raise ToolError(f"could not write {str(target)!r}: {exc}") from exc
+
+
 def build_server(
     config: Config, *, adapters: dict[str, MediaAdapter] | None = None
 ) -> FastMCP:
@@ -178,8 +252,8 @@ def build_server(
 
     `adapters` is the seam, and it is the one worth having: every test of the
     four tools drives a fake adapter, so what is under test is the *tool* half
-    (which provider, which model, which parameters, which folder) with no HTTP
-    anywhere.  The adapters' own shapes are tested against a fake transport in
+    (which provider, which model, which parameters, which output path) with no
+    HTTP anywhere.  The adapters' own shapes are tested against a fake transport in
     `tests/plugins/media/test_media.py`, which is the other half.
     """
     media = Media(config, adapters=adapters)
@@ -202,8 +276,8 @@ def build_server(
         model: str = "",
         size: str = "",
         image: str = "",
-        folder: str = "",
-    ) -> dict[str, Any]:
+        output: str = "",
+    ) -> str:
         """Draw an image from a description, and answer where it was written.
 
         The picture is a file on this machine: copy it, or save it into the
@@ -216,28 +290,40 @@ def build_server(
             size: `WIDTH*HEIGHT`, e.g. `1024*1024`. Empty uses the model's own
                 default.
             image: A picture to work from — a local path, an `http(s)` URL or a
-                `data:` URI. For models that take a reference image.
-            folder: A folder inside the media directory to write into. Empty
-                writes at the top.
+                `data:` URI. A relative path is relative to your working
+                directory. For models that take a reference image.
+            output: A file path for the image. A relative path is relative to
+                this conversation's work directory. Empty writes a generated name into your
+                media directory.
 
         Returns:
-            `path` — the file the picture was written to.
+            The file's path, as text.
         """
         wanted = check_size(size)
         provider, entry = media.resolve("image", model)
         params = merge_params(entry.params, {"size": wanted} if wanted else {})
-        output = await _run(
+        reference = _reference_path(ctx, image)
+        target = _output_path(ctx, output)
+        if target is None:
+            outputs_dir = media.output(ctx)
+        else:
+            await _make_parent(target)
+            outputs_dir = target.parent
+        written = await _run(
             "image",
             lambda: media.adapter(provider).generate_image(
                 model=entry.model,
                 prompt=prompt,
                 size=wanted,
-                image=image or None,
-                outputs_dir=media.output(ctx, folder),
+                image=reference or None,
+                outputs_dir=outputs_dir,
                 extra_params=params,
             ),
         )
-        return {"path": output}
+        if target is None:
+            return written
+        await _place(written, target)
+        return str(target)
 
     @mcp.tool(name="generate_video", meta=FOR_THE_MODEL)
     async def generate_video(
@@ -248,12 +334,12 @@ def build_server(
         resolution: str = "",
         ratio: str = "",
         duration: int = 0,
-        folder: str = "",
+        output: str = "",
         # The model's own argument rather than a budget of ours: it is the
         # schema's default, the tool reads it, and there is nothing here to
         # route through the registry.
         timeout: float = 0,  # timeouts: the model's number, not ours
-    ) -> dict[str, Any]:
+    ) -> str:
         """Render a video from a description, and answer where it was written.
 
         A render takes minutes: one that outruns `timeout` fails, with the
@@ -265,17 +351,20 @@ def build_server(
             prompt: What happens in the video.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for video.
-            image: A first frame to animate, as a local path. For
+            image: A first frame to animate, as a local path or a URL. A
+                relative path is relative to this conversation's work directory. For
                 image-to-video models.
             resolution: `720P`, `1080P`. Empty uses the model's own default.
             ratio: `16:9`, `9:16`, `1:1`. Empty uses the model's own default.
             duration: Seconds. Zero uses the model's own default.
-            folder: A folder inside the media directory to write into.
+            output: A file path for the video. A relative path is relative to
+                this conversation's work directory. Empty writes a generated name into your
+                media directory.
             timeout: How long to wait, in seconds. Zero or less uses the
                 default.
 
         Returns:
-            `path` — the file the video was written to.
+            The file's path, as text.
         """
         provider, entry = media.resolve("video", model)
         given: dict[str, Any] = {}
@@ -286,103 +375,127 @@ def build_server(
         if duration:
             given["duration"] = duration
         params = merge_params(entry.params, given)
-        output = await _run(
+        reference = _reference_path(ctx, image)
+        target = _output_path(ctx, output)
+        if target is None:
+            outputs_dir = media.output(ctx)
+        else:
+            await _make_parent(target)
+            outputs_dir = target.parent
+        written = await _run(
             "video",
             lambda: media.adapter(provider).generate_video(
                 model=entry.model,
                 prompt=prompt,
-                image=image or None,
-                outputs_dir=media.output(ctx, folder),
+                image=reference or None,
+                outputs_dir=outputs_dir,
                 extra_params=params,
                 deadline_s=timeout if timeout > 0 else None,
             ),
         )
-        return {"path": output}
+        if target is None:
+            return written
+        await _place(written, target)
+        return str(target)
 
     @mcp.tool(name="text_to_speech", meta=FOR_THE_MODEL)
     async def text_to_speech(
-        ctx: Context, text: str, model: str = "", voice: str = "", folder: str = ""
-    ) -> dict[str, Any]:
+        ctx: Context,
+        text: str = "",
+        input: str = "",
+        output: str = "",
+        model: str = "",
+        voice: str = "",
+    ) -> str:
         """Say something out loud, into an audio file, and answer where it is.
+
+        **The file-to-file case.**  `input` names a text file to read when
+        `text` is empty; `output` names the audio file to write.  With neither
+        `text` nor `input`, there is nothing to say.
 
         Args:
             text: What to say.
+            input: A text file to say when `text` is empty. A relative path is
+                relative to this conversation's work directory.
+            output: A file path for the audio. A relative path is relative to
+                this conversation's work directory. Empty writes a generated name into your
+                media directory.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for speech.
             voice: Which voice, by the provider's own name. Empty uses the
                 model's default.
-            folder: A folder inside the media directory to write into.
 
         Returns:
-            `path` — the file the audio was written to.
+            The file's path, as text.
         """
+        if not text.strip():
+            if not input.strip():
+                raise ToolError(
+                    "nothing to say — pass `text`, or a text file in `input`."
+                )
+            text = await _read_text(ctx, input)
         provider, entry = media.resolve("tts", model)
-        output = await _run(
+        target = _output_path(ctx, output)
+        if target is None:
+            outputs_dir = media.output(ctx)
+        else:
+            await _make_parent(target)
+            outputs_dir = target.parent
+        written = await _run(
             "speech",
             lambda: media.adapter(provider).text_to_speech(
                 model=entry.model,
                 text=text,
                 voice=voice or entry.voice,
-                outputs_dir=media.output(ctx, folder),
+                outputs_dir=outputs_dir,
                 extra_params=dict(entry.params),
             ),
         )
-        return {"path": output}
+        if target is None:
+            return written
+        await _place(written, target)
+        return str(target)
 
     @mcp.tool(name="transcribe_audio", meta=FOR_THE_MODEL)
     async def transcribe_audio(
-        path: str, model: str = "", offset: int = 0, limit: int = 0
-    ) -> dict[str, Any]:
-        """Write down what an audio file says, and answer the text.
+        ctx: Context, input: str, model: str = "", output: str = ""
+    ) -> str:
+        """Write down what an audio file says: text, or a transcript file.
 
-        A recording can be longer than one answer may carry, so this is read in
-        pages: `offset` says where to start and `limit` how much to ask for.
-        Read the rest from `offset + len(text)` — an hour of speech is several
-        turns of reading, and every page says where the next one begins.
+        **The file-to-file case.**  `input` is the audio file; `output` is
+        where the transcript is written.  With `output` the answer is that
+        path and the text does not enter the conversation; without it the
+        transcript is the answer, and a long one is kept by the harness as a
+        dump.  Read a dump with `dump_read`, or find text in it with
+        `dump_grep`.
 
         Args:
-            path: The audio file, as a local path.
+            input: The audio file, as a local path. A relative path is relative
+                to this conversation's work directory.
             model: `provider/model`, or a bare name. Empty uses the configured
                 default for transcription.
-            offset: The character to start at; `0` is the beginning.
-            limit: The most characters to answer with. `0` answers as much as
-                one page may hold, which is also the ceiling on any `limit` —
-                a page is never longer than that whatever is asked for.
-
-        Returns:
-            `text` — the transcript from `offset` — `total`, how many characters
-            the whole transcript is, and `offset`/`limit` as asked. So
-            `offset + len(text) < total` says whether more remains.
+            output: A file path to write the transcript to instead of answering
+                it. A relative path is relative to this conversation's work directory. The
+                answer is the file's path. Empty answers the text itself. A
+                file already there is replaced.
         """
-        if not path.strip():
-            raise ToolError("no audio file was named — pass the path of the recording.")
-        start = max(0, offset)
+        if not input.strip():
+            raise ToolError("no audio input was named — pass the recording's path.")
         provider, entry = media.resolve("asr", model)
         text = await _run(
             "transcript",
             lambda: media.adapter(provider).transcribe_audio(
                 model=entry.model,
-                # Not expanded here: every filesystem call belongs in the
-                # adapter, where it goes off the event loop.
-                audio_path=Path(path),
+                # Resolved here rather than in the adapter: the caller's
+                # working directory is this process's caller's fact, and the
+                # adapter has no conversation to ask.
+                audio_path=_input_path(ctx, input),
                 extra_params=dict(entry.params),
             ),
         )
-        page = text[start : start + limit] if limit > 0 else text[start:]
-        # **The budget is the last word, whatever `limit` said.**  A page size
-        # in characters is not a size in tokens — `limit=20000` of Chinese is
-        # several times what an English 20000 is, and a transcript is the one
-        # answer here whose length is the recording's rather than the caller's.
-        # An answer over `tool_result.tokens` is one the harness would have to
-        # shorten again, which is our own reader feeding our own truncation
-        # (the cabinet's `dump_read` and `dump_grep` bound themselves the same
-        # way).
-        return {
-            "text": clip_to_tokens(page, config.tool_result.tokens),
-            "total": len(text),
-            "offset": start,
-            "limit": limit,
-        }
+        if output.strip():
+            return await _write_transcript(ctx, output, text)
+        return text
 
     return mcp
 
@@ -417,6 +530,44 @@ async def _run(noun: str, call: Callable[[], Awaitable[str]]) -> str:
         raise ToolError(f"the {noun} call failed: {exc}") from exc
     except FileNotFoundError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def _write_transcript(ctx: Context, output: str, text: str) -> str:
+    """Write a transcript where the caller named, and answer that path.
+
+    **A file already there is replaced whole or left as it was.**  The write
+    goes to a temporary file beside the target and is renamed over it, so a
+    full disk or a refusal mid-write cannot truncate the transcript the caller
+    had; a failed write leaves the old file standing and says why.
+    """
+    target = _output_path(ctx, output)
+    if target is None:
+        return text
+    await _make_parent(target)
+
+    def write() -> None:
+        _replace_text(target, text)
+
+    try:
+        await asyncio.to_thread(write)
+    except (OSError, UnicodeError) as exc:
+        raise ToolError(f"could not write {output!r}: {exc}") from exc
+    return str(target)
+
+
+def _replace_text(target: Path, text: str) -> None:
+    """Put *text* at *target* by rename, keeping the old file until it lands."""
+    handle, tmp = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as opened:
+            opened.write(text)
+            opened.flush()
+            os.fsync(opened.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:

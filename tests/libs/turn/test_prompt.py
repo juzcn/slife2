@@ -1,11 +1,11 @@
-"""The guide is the home's, and only the system prompt reads it.
+"""The guide is the system's, and only the system prompt reads it.
 
-`AGENTS.md` — the model's guide to its own tools — is a document a person writes
-beside the configuration, not a template shipped inside the package.  These
-tests hold that boundary: the system prompt carries the home's text, a prompt of
-one's own can place it, an instruction template reads nothing from the home, and
-a home without the guide is refused by name rather than rendered with a blank
-section.
+`AGENTS.md` — the model's guide to its own tools — is a system-delivered file
+installed beside the configuration, not a template shipped inside the package.
+These tests hold that boundary: the system prompt carries the home's text, a
+prompt of one's own can place it, an instruction template reads nothing from the
+home, and a home without the guide is refused by name rather than rendered with
+a blank section.
 """
 
 from __future__ import annotations
@@ -82,7 +82,7 @@ def test_an_instruction_template_reads_nothing_from_the_home(
     """`render_instruction` is one turn's text, and a turn is the same in every home.
 
     The home's guide is deleted before the render to prove the instruction path
-    never looked for it: `recall.j2` and its siblings must not acquire a home
+    never looked for it: the decision template and its siblings must not acquire a home
     dependency the system prompt alone is supposed to have.
     """
     (isolated_runtime / "AGENTS.md").unlink()

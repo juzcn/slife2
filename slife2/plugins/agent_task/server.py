@@ -1,38 +1,65 @@
-"""slife2-agent-task — the agent task: one loop of the agent's own, run on a
+"""slife2-agent-task — the agent task: one turn of the caller's own, run on a
 description, answered by a message.
 
-An **agent task** is a background loop.  The model starts one with a name and a
-description; the loop runs as the calling agent — the same system prompt, the
-same model, the same tools — and its last message is handed back to that
-conversation when it stops.  Nothing waits for it: the call that starts one
-answers at once, and the answer arrives later as a message on the `agent-task`
-channel, wearing the marker that says which task it was (SDD §9.3).
+An **agent task** is a background turn.  The model starts one with a name and a
+description; the turn runs as the conversation that asked for it — the agent's
+own or one of its subagents' — with that conversation's system prompt, model,
+tools and context, and its last assistant message is the task result.  Nothing
+waits for it: the call that starts one answers at once, and the answer arrives
+later as a message on the `agent-task` channel, wearing the marker that says
+which task it was (SDD §9.3).
 
 **It is a plugin because it holds loops**, which is what `slife2-agent` holds and
 why that one is a plugin.  What it does *not* do is reach for anything the agent
-*server* owns: the turn it runs is `slife2.libs.turn.loop.AgentLoop` **called with nothing
-turned off** — `observer` already defaults to `NULL_OBSERVER` and `auto` to
-`None`, which are exactly a task's two answers, nobody is watching and there is
-no inbox to cut in from.  A behaviour this turn needs and the loop does not have
-belongs in `AgentLoop` behind a parameter that defaults off, never in a copy of
-the loop.
+*server* owns: the turn it runs is `slife2.libs.turn.loop.AgentLoop` with its
+own `auto` — the rebuild at the first boundary and the compaction, never an
+inbox, which a task does not have — and an observer that publishes the turn to
+whoever is watching.  That observer is a reader, not a caller's
+progress stream: a task has no caller waiting on it.  A behaviour this turn needs
+and the loop does not have belongs in `AgentLoop` behind a parameter that
+defaults off, never in a copy of the loop.
 
-**A task runs on the agent's own context, under the agent's own key.**  Its
-single turn is set up exactly as a turn of the agent's is — `restore` when the
-loop is built, `rebuild` once before the turn, `_func_tool_unload` at the turn's
-end — and the key every hop carries is `(agent, "")`, the agent's own
-conversation.  SDD §5.5's *the context is chosen, not accumulated* has no exception
-for a task: one that ran on whatever happened to be in the list would be the one
-turn in this system whose context nobody decided.  `restore` and `rebuild` are
-`slife2-context`'s and the trim is `slife2-toolhub`'s; what is repeated here is
-the *order* they are called in, which is the price of this plugin and the thing
-SDD §9.3 names rather than denies.
+**A task runs on a clone of the caller's context, under the caller's own key.**
+The key every hop carries is `(agent, subagent)`: the agent's own conversation
+for a task the agent started, and the subagent's when a subagent started it.
+`restore` reads that conversation's live-context list, and `rebuild` at the
+turn's first boundary decides on that snapshot with `publish=False` — the
+task's context is its own, and the conversation's list is not moved.  The head
+is that conversation's system prompt, rendered the way the agent server renders
+it.
+SDD §5.5's *the context is chosen, not accumulated* has no exception for a
+task: one that ran on whatever happened to be in a list would be the one turn in
+this system whose context nobody decided.  `restore` and `rebuild` are
+`slife2-context`'s and the trim is `slife2-toolhub`'s; the order they are called
+in is `slife2.libs.turn.runtime`'s, one runtime shared with the agent server.
 
 **Nothing is recorded, and that is a decision about tasks.**  A task's result
 reaches the conversation as a message and *that* message is what the agent server
 records, so writing the task's own round trip as well would file the same answer
 twice under a description that is a rendered template rather than anything the person
-said.  A task reads the agent's context and adds nothing to it.
+said.  A task reads a clone of the caller's context and adds nothing to it — no
+turn, and no context decision written back.
+
+**Four of the model's tools are served here rather than by the agent server.**
+A task is a live turn, but the agent server's live turn is a different one — the
+same conversation id, a different message list, in a different process — so the
+four tools that act on a live turn are the task's own
+(`LIVE_CONVERSATION_TOOLS`).  `_check_new_input` has nothing to hand over: a task
+has no inbox and no harness cut-in, so it answers "nothing waiting" and never
+touches the maker's queue.  `attach_image` injects into the task's own single
+user message — the rendered description — because that message *is* the turn's
+request, and the cabinet key route is asked of the cabinet directly, as the
+agent server asks it.  `_turn_compact` and `_context_rebuild` act on the task's
+own list and its clone of the history.  A by-name call reaches the same four
+bodies; none is left to fall through to the hub.
+
+**A running task is watchable, and the watch is a read.**  The turn's observer
+publishes to the task's tap and watchers (`slife2.libs.turn.watchhub`, shared
+with the agent server); the stream opens with an empty snapshot and the agent's
+plan, a `TaskBrief` with the description, the turn's events from its start, and
+`Closed` with the ending.  Watching starts no turn, spends no model call, and
+does not change the `finished` rule: the answer still reaches the conversation
+by hand-over.
 
 Two things it deliberately does not have, each because nothing needs it rather
 than because it was left out:
@@ -41,10 +68,12 @@ than because it was left out:
   batch for every caller (`slife2.libs.turn.loop`), so the list it leaves is well
   formed; and a task's list is local and dies with it, so there is no next
   request to poison either way.
-* **No filtering of the tool set.**  The catalogue is one list for the whole
-  system (`slife2-toolhub`), so a task may start a task and the registry here is
-  **flat** — no parents, no depth.  `agent-task: max_running` is the bound
-  instead; SDD §14.2 holds the one it does not bound.
+* **The rules are the prompt's, not the registry's.**  A task is one turn, so a
+  result that arrives later — from a background tool call or from another task —
+  has nowhere to land.  The opening template tells the model not to use
+  `_async` or start another task; the hub's catalogue is unchanged.  The
+  registry is **flat** — no parents, no depth — and `agent-task: max_running`
+  bounds concurrency; SDD §14.2 holds the one it does not bound.
 
 The answer goes back through `slife2-tui`'s `submit`, which is this system's one
 path for "something outside the conversation became a turn in it" (SDD §5.4).  A
@@ -63,116 +92,106 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
+import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
-from slife2.clients.model import MCPBackend, open_backend
-from slife2.clients.toolclient import (
-    FUNC_TOOL_UNLOAD,
-    acquire_tool,
-    remote_tools,
-    tool_lookup,
-    trim_answer,
-    unload_tools,
-)
+from slife2.clients.toolclient import acquire_tool, remote_tools, tool_lookup
 from slife2.helpers.clock import now
+from slife2.libs.harness import dumps
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import (
     AGENT_TASK_SERVER_NAME,
-    API_SERVER_NAMES,
-    CONTEXT_SERVER_NAME,
-    TOOLHUB_SERVER_NAME,
     Config,
     load_cached,
 )
-from slife2.libs.host.paths import home_key
+from slife2.libs.host.paths import home_key, subagent_file
+from slife2.libs.host.subagents import subagent_spec
 from slife2.libs.model.base import LLMBackend
 from slife2.libs.plugin.audience import (
     FOR_THE_MODEL,
     ConversationId,
-    conversation_key,
+    conversation_meta,
 )
 from slife2.libs.plugin.protocol import (
     agent_reader,
-    close_server,
+    conversation_reader,
     house_server,
-    open_server,
     serve_plugin,
     tool_payload,
     unreadable,
 )
-from slife2.libs.turn.context import context_usage, turn_prompt_note, with_lead
-from slife2.libs.turn.loop import AgentLoop, TurnResult, harness_call
-from slife2.libs.turn.messages import Message, ToolSpec
-from slife2.libs.turn.prompt import render_instruction, render_system_prompt
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CANCEL,
+    AGENT_TASK_LIST,
+    AGENT_TASK_START,
+    AGENT_TASK_STATUS,
+    CANCELLED,
+    FAILED,
+    FINISHED,
+    NOTHING_WAITING,
+    RUNNING,
+    UNKNOWN,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CHANNEL as CHANNEL,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_MARKER as MARKER_PREFIX,
+)
+from slife2.libs.turn import attachments, compact, plan
+from slife2.libs.turn.context import (
+    failure_text,
+    turn_prompt_lead,
+    with_lead,
+)
+from slife2.libs.turn.events import TurnEvent, TurnObserver
+from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
+from slife2.libs.turn.messages import Message
+from slife2.libs.turn.prompt import opening_messages, render_instruction
+from slife2.libs.turn.runtime import (
+    ModelRef,
+    TurnRuntime,
+    measured_tokens,
+)
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
-    CATALOGUE_MISSING,
     CHECK_NEW_INPUT,
+    CONTEXT_REBUILD,
+    LIVE_CONVERSATION_TOOLS,
+    TURN_COMPACT,
     CatalogueAnswer,
     Tool,
     ToolFailed,
+    ToolFunc,
     ToolRegistry,
 )
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, WatchItem
+from slife2.libs.turn.watch import encode as encode_watch
+from slife2.libs.turn.watchhub import Tap, WatchHub
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = AGENT_TASK_SERVER_NAME
 
 #: This server's key in the config's `servers:` table, and the name of the
-#: section that holds its one number.
-CONFIG_KEY = "agent-task"
+#: section that holds its one number.  It is the channel too: the key a plugin
+#: runs under is the channel its answers come back on.
+CONFIG_KEY = CHANNEL
 
-#: **The two tools a task's model must not have.**  They act on a *live*
-#: conversation: `_check_new_input` pops a queued message out of the running
-#: loop's inbox and hands it to whoever called, and `attach_image` injects parts
-#: into that loop's last user message.  A task shares the agent's identity by
-#: design — same context, same store, same tools — but it is not that live loop,
-#: and the shared identity is exactly what makes the two indistinguishable at
-#: the agent server.  So they are withheld here, and a by-name call is answered
-#: "not here" instead of stealing the main conversation's message or image.
-LIVE_CONVERSATION_TOOLS = frozenset({CHECK_NEW_INPUT, ATTACH_IMAGE})
+# **A task shares the maker's identity, and the prompt carries the rest.**  The
+# modes it must not use — `_async` and another task — are named in the opening
+# template; the registry is the hub's list, with the four live-conversation
+# bodies replaced by this turn's own (`live_bodies`).
 
-#: The four tools, named once.  They are the whole surface, and the vocabulary
-#: they share is one: `agent_task_cancel` answers with the same `status` field
-#: `agent_task_status` does, so stopping a task needs no second set of outcomes.
-AGENT_TASK_START = "agent_task_start"
-AGENT_TASK_STATUS = "agent_task_status"
-AGENT_TASK_LIST = "agent_task_list"
-AGENT_TASK_CANCEL = "agent_task_cancel"
-
-#: Every state a task can be in.  `unknown` is not one of them — it is what a
-#: name the registry does not hold answers, and it includes a task the cap has
-#: forgotten, which is honest because this process can no longer tell.
-RUNNING = "running"
-FINISHED = "finished"
-FAILED = "failed"
-CANCELLED = "cancelled"
-UNKNOWN = "unknown"
-
-#: The channel an agent task's answer comes back on, and the first half of the
-#: key its own state is filed under.  A channel is the key a plugin runs under
-#: (`wechat`, `tui`, and this) and a task's answer also wears the task's name —
-#: `agent-task:research` — because a hand-over carries the channel and the words
-#: and nothing else, and the window draws the bubble from the channel alone
-#: (`slife2.tui.widgets.channel_prefix`).
-CHANNEL = "agent-task"
-
-#: What the answer wears, so the model can read the task's id back out of the
-#: row.  It is **content**, not an annotation this build derives: it goes into
-#: the stored message verbatim, which by `SDD` §5.5's convention is what
-#: the word-shaped spelling says and `[TURN:…]`'s capitals do not.
-#:
-#: **`AgentTaskResult`, because that is what the line is**: an agent task's
-#: result, read by the model beside `slife2.libs.harness.async_tasks`'s
-#: `[AgentToolResult:{…}]` — two results, one from a task and one from a tool
-#: call, named so that neither can be taken for the other.  The *bubble* a window
-#: draws is the shorter `AsyncTask(name)> ` (`slife2.tui.widgets.channel_prefix`):
-#: a person is being told which task answered.
-MARKER_PREFIX = "[AgentTaskResult:"
+# The tools, the states, the channel and the marker are
+# `slife2.libs.plugin.vocabulary`'s: each crosses a process boundary — the
+# scheduler starts a task, the window draws its answer, the probe reads the
+# result — so the readers import the names without loading this server.
 
 #: The template a task is opened with.  Asked for by bare name, so it is the
 #: shipped one — this is machinery, the way this system tells a loop that nobody
@@ -189,10 +208,34 @@ RETIRED = 32
 #: that a name it chose a while ago still means something.
 DESCRIPTION_CHARS = 120
 
+#: The registry's key: `(home, agent, name)` — and the watch hub's key too, so
+#: a watcher and the task it is reading cannot disagree about which task is
+#: meant.  **The maker's conversation is not in the key**: a task's name is the
+#: handle the agent's own conversation, its subagents and the window all address
+#: it by, so one agent has one task namespace however many conversations it runs
+#: (`AgentTask.key`).
+TaskKey = tuple[str, str, str]
+
+
+class WatchPublisher:
+    """The observer a task's turn publishes through, for whoever is watching.
+
+    A task has no caller progress stream: nobody asked for the turn and nobody
+    is waiting on it, so the one reader it can have is a watcher.  `publish` is
+    synchronous by the hub's contract; `on_event` is async because a turn's
+    observer is.
+    """
+
+    def __init__(self, publish: Callable[[TurnEvent], None]) -> None:
+        self._publish = publish
+
+    async def on_event(self, event: TurnEvent) -> None:
+        self._publish(event)
+
 
 @dataclass
 class AgentTask:
-    """One background loop, and everything this process knows about it.
+    """One background turn, and everything this process knows about it.
 
     The five fields `report` answers with are a task's *whole* description:
     there is no message list here, no transcript and no result beyond the one
@@ -206,6 +249,13 @@ class AgentTask:
     name: str
     description: str
     started_at: str
+    #: **The maker's conversation**, as the second half of `(agent, subagent)`
+    #: — empty for the agent's own, a name for one of its subagents'.  A task
+    #: stands in for the conversation that asked for it, so this is the key every
+    #: hop it makes carries: the context it restores and rebuilds, the plan it
+    #: reads and writes, the model it runs on, and the store a `turn_read` reads.
+    #: It is not part of the registry's key, which is the agent's (`TaskKey`).
+    subagent: str = ""
     #: The home the task was started in, **kept rather than looked up**, and
     #: that is not a detail: this object outlives the call that made it.  Its loop
     #: runs on after the request returns — so a `key` that asked
@@ -222,18 +272,25 @@ class AgentTask:
     #: the answer travels by message, so that a result cannot enter the
     #: conversation twice (SDD §9.3).
     text: str = ""
-    #: Whether the answer reached the conversation.  Kept because "was it handed
-    #: over" is the one fact about a task that nothing else can reconstruct — the
-    #: delivery log is the process's, and the conversation cannot be asked
-    #: whether something arrived.  `finished` implies `True`; a `failed` task may
-    #: have delivered its failure message or may have delivered nothing.
-    delivered: bool = False
+    #: The sentence its last watch frame carried, kept while the task is still
+    #: answerable.  A watch that arrives after the end has no events to replay;
+    #: this is what lets the screen say what happened rather than open on a
+    #: status with no account of it.  Set when the task stops, never served to
+    #: the model (`report` is the model's shape).
+    ending: str = ""
     #: The running coroutine, kept so it is not collected mid-flight and so that
     #: `agent_task_cancel` has something to cancel.
     handle: asyncio.Task[None] | None = field(default=None, repr=False)
+    #: The tap `start_tap` opened for this task, kept so its `finally` can tell
+    #: its own from a replacement's.  A cancelled task's `finally` runs after
+    #: `agent_task_cancel` has returned, and the name may already have been
+    #: started again: the new task's tap and watchers are under the same key,
+    #: and closing or dropping by key alone would end the new task's watch and
+    #: take its replay from later joiners (`WatchHub.drop_if`'s reason).
+    tap: Tap | None = field(default=None, repr=False)
 
     @property
-    def key(self) -> tuple[str, str, str]:
+    def key(self) -> TaskKey:
         """`(home, agent, name)` — what this process's registry is keyed by.
 
         Keyed by the agent and not by the name, because this server is shared:
@@ -241,6 +298,12 @@ class AgentTask:
         the other's, stop it, or be capped by it.  And keyed by the home for the
         same reason one level up: two homes may each be running an agent called
         `jack`, whose tasks are as separate as their conversations.
+
+        **A subagent's task shares its agent's namespace**, because the name is
+        the handle every reader addresses it by — the agent's own conversation,
+        any of its subagents, and the window — and a name that meant one task to
+        one reader and another to the next would be no handle at all.  The
+        conversation the task *runs on* is `identity`, which is not this key.
 
         Read off the object rather than from the ambient home, because a task's
         loop outlives the call that started it — see the field.
@@ -264,24 +327,27 @@ class AgentTask:
 
     @property
     def identity(self) -> ConversationId:
-        """`(agent, "")` — **the agent's own conversation, which is the point.**
+        """`(agent, subagent)` — **the conversation this task stands in for.**
 
-        A task is the main agent's task, not a conversation beside it: the same
-        prompt, the same model, the same tools, the same context store, and the
-        same key.  So every hop it makes carries the agent's own conversation id
-        — the tool list the hub hands back is bound to it, the model call goes
-        out under it, and `restore` and `rebuild` are asked about *this agent's*
-        context, which is what "it runs on the current agent's context" means at
-        the only place that is observable.  A `turn_read` from inside a task
-        answers from the log the conversation is also written to, because that
-        is the log a task is working out of.
+        A task is one turn of the caller's own conversation: the same prompt,
+        the same model, the same tools, the same context store, and the same
+        key.  So every hop it makes carries that conversation id — the tool list
+        the hub hands back is bound to it, the model call goes out under it, and
+        `restore` and `rebuild` are asked about *its* context, which is what "it
+        runs on the caller's current context" means at the only place that is
+        observable.  A `turn_read` from inside a task answers from the log the
+        conversation is also written to, because that is the log a task is
+        working out of.
 
-        The empty second half is `subagent`'s "this agent's own conversation",
-        which is exactly what a task is running on (SDD §3.2).
+        **The second half is the caller's, and that is the difference a subagent
+        makes.**  A subagent that starts a task is running its own conversation
+        — its own prompt, model, context and plan — and a task that resolved
+        `(agent, "")` for it would be standing in for somebody else.  The empty
+        second half is `subagent`'s "this agent's own conversation" (SDD §3.2).
         """
-        return (self.agent, "")
+        return (self.agent, self.subagent)
 
-    def report(self) -> dict[str, Any]:
+    def report(self, *, status: str = "") -> dict[str, Any]:
         """The five fields, in one shape for three readers.
 
         The marker on the answer, every tool's reply and a row of
@@ -289,14 +355,95 @@ class AgentTask:
         between two spellings of one fact — which is the same reason the marker
         keys are named after the arguments and fields the tools use
         (SDD §5.5).
+
+        `status` is the marker's alone: what the answer *will be* if it lands,
+        while the object is still `running` through the hand-over.  The finish
+        time follows the status reported rather than the object's —
+        `finished_at` is empty until the task stops, so a reader asking
+        mid-delivery is not told a finish time beside a `running` status, two
+        contradictory facts.  The stamp itself is written when the loop returns
+        (`run`), and a terminal status reports it unchanged.
         """
+        shown = status or self.status
         return {
             "task_id": self.task_id,
             "name": self.name,
-            "status": self.status,
+            "status": shown,
             "started_at": self.started_at,
-            "finished_at": self.finished_at,
+            "finished_at": self.finished_at if shown != RUNNING else "",
         }
+
+
+@dataclass
+class TaskTurn:
+    """The live half of a task's one turn: the list a tool mutates, and the model
+    that reads it.
+
+    **Not on `AgentTask`.**  A task object outlives its turn — the registry keeps
+    it answerable until the retired cap forgets it — and the message list is the
+    one thing that must die with the coroutine that produced it (`run` lets go of
+    the answer for that reason).  So the list lives here, in a holder the tool
+    registry closes over, made when the turn is built and dropped when `run_loop`
+    returns.
+    """
+
+    #: The list `run_turn` advances in place.  `attach_image` injects into its
+    #: last user message — the rendered description, the task's single request.
+    messages: list[Message]
+    #: The model reference, for the "cannot read images" refusal.
+    model: str
+    #: Whether that model accepts images at all.  Taken once, when the turn is
+    #: built: a task's backend is fixed for its one turn, so a `model_switch`
+    #: mid-task moves the agent server's loops and not this one.
+    accepts_images: bool
+    #: **The prompt budget**: the model's window minus the completion request,
+    #: so the compaction's figure and the automatic threshold are measured
+    #: against what a request can actually carry.  Required: the config entry
+    #: states a window.
+    prompt_window: int
+    #: The turns `messages` is made of, and how many of them the prefix accounts
+    #: for.  The restored live-context list; a private `_context_rebuild`
+    #: replaces them, and the opening after `covered` is the carried tail.
+    turn_ids: list[int] = field(default_factory=list)
+    covered: int = 0
+    #: Whether this task's one automatic `_context_rebuild` has been tried —
+    #: set before the call, because a failed hub hop never reaches the body.
+    rebuilt: bool = False
+    #: The live ids this task's own compaction has hidden from its later model
+    #: calls.  The same turn-scoped projection the agent server keeps: the list
+    #: `run_turn` advances is the task's whole exchange, and only the view the
+    #: model is sent shrinks (`slife2.libs.turn.compact`).
+    hidden: set[str] = field(default_factory=set)
+    #: The fraction at which this task's own turn compacts itself, read from the
+    #: live config when the task starts — the same `agent.compact_at` the agent
+    #: server's conversations use.  A task is one turn and records nothing, so a
+    #: turn that overflows has no next turn to recover on: this is the bound
+    #: that keeps it alive.
+    compact_at: float = 0.0
+    #: Whether the automatic pass has stopped asking: a selector that kept
+    #: everything or failed has made a decision about the whole context.  A
+    #: later successful call — the model's own — resumes the pass.
+    compact_hold: bool = False
+    #: The figure the last saved turn measured, read back with the list.  The
+    #: task's own rebuild runs before its first call, so this is the context
+    #: usage the decision is shown until one of the task's own calls completes.
+    context_tokens: int = 0
+    #: The loop running this task's one turn, set once it is built; the
+    #: compaction reads its last measured call, the same figure the agent
+    #: server's own tool uses.
+    live: AgentLoop | None = None
+
+
+def task_id_for(name: str) -> str:
+    """The id a task's name derives, `agent-task:<name>`.
+
+    **One spelling for the held and the unknown answer.**  An `AgentTask`'s
+    report and `unknown_report` are one shape by design; they were two
+    `f"{CHANNEL}:…"` literals, so a format change could make a name the
+    registry does not hold answer with an id different from the one the same
+    name would have had.
+    """
+    return f"{CHANNEL}:{name}"
 
 
 def unknown_report(name: str) -> dict[str, Any]:
@@ -310,7 +457,7 @@ def unknown_report(name: str) -> dict[str, Any]:
     held is still named the way the answer would have named it.
     """
     return {
-        "task_id": f"{CHANNEL}:{name}",
+        "task_id": task_id_for(name),
         "name": name,
         "status": UNKNOWN,
         "started_at": "",
@@ -328,7 +475,7 @@ def channel_for(task: AgentTask) -> str:
     footnote hands the model (SDD §5.5) — so a result says which task it came from
     outside the marker as well as inside it.
     """
-    return f"{CHANNEL}:{task.name}"
+    return task_id_for(task.name)
 
 
 def marker(task: AgentTask, *, status: str = "") -> str:
@@ -340,12 +487,32 @@ def marker(task: AgentTask, *, status: str = "") -> str:
     `status` is what the answer *is*, which is not always the object's status at
     the moment it is built: a successful loop is still `running` while its answer
     is being handed over (a task is `finished` only when it lands), and the
-    marker has to say what the answer will be if it lands.
+    marker has to say what the answer will be if it lands.  It goes through
+    `report`, so the finish time follows the status the marker claims — the
+    answer says `finished` with the moment the work ended, not with an empty
+    field beside it.
     """
-    payload = task.report()
-    if status:
-        payload["status"] = status
+    payload = task.report(status=status)
     return f"{MARKER_PREFIX}{json.dumps(payload, ensure_ascii=False)}]"
+
+
+def closed_reason(task: AgentTask, outcome: str) -> str:
+    """What a task's last watch frame says happened.
+
+    `outcome` is what the *loop* did, which is not the same as the task's
+    status: a loop that answered and a hand-over that failed is `finished` work
+    and a `failed` task, and the frame has to say both rather than call the
+    answer a failure.  A cancelled task never reaches the other branches —
+    cancellation is not an outcome the answer can describe, and there is no
+    answer.
+    """
+    if task.status == CANCELLED:
+        return "the task was cancelled"
+    if outcome == FINISHED:
+        if task.status == FINISHED:
+            return "the task finished; its answer was delivered to the conversation"
+        return "the task finished, but its answer could not be delivered"
+    return task.text.strip() or "the task failed"
 
 
 def build_server(
@@ -354,6 +521,7 @@ def build_server(
     backend: LLMBackend | None = None,
     context_client: Client | None = None,
     hub_client: Client | None = None,
+    cabinet_client: Client | None = None,
     window_client: Client | None = None,
     source: Callable[[], Config] | None = None,
 ) -> FastMCP:
@@ -364,11 +532,14 @@ def build_server(
     restore, a rebuild and a hand-over — and every peer that would make those
     network calls can be handed in as a client over the in-memory transport
     instead.  `window_client` is the agent server's too, because the hand-over is
-    the one thing a task does that a turn does not.
+    the one thing a task does that a turn does not; `cabinet_client` is only the
+    `[Image:…]` key route inside a task's own `attach_image`, and it is opened
+    lazily so a task with no picture never reaches it.
 
-    `source` is the config to read when a task actually runs, so a test can hand
-    in a config that no file backs; without it the file is re-read, which is what
-    makes a `model_switch` reach the next task.
+    `source` is the config to read when a task actually runs.  In production it
+    is `load_cached`, so a `model_switch` or an edited prompt reaches the next
+    task; a test hands in a config that no file backs, and without one the
+    injected config is kept (`slife2.libs.host.config.for_the_call`).
     """
 
     #: Every task this process has run, live and recently ended, by the client
@@ -376,7 +547,7 @@ def build_server(
     #: reason the agent server's loop registry is not: the lifespan is not the
     #: process's lifetime over the in-memory transport, and clearing here would
     #: forget tasks every time a caller disconnected.
-    tasks: dict[tuple[str, str, str], AgentTask] = {}
+    tasks: dict[TaskKey, AgentTask] = {}
 
     #: The ended ones, oldest first, so that the cap has an order to forget in.
     #: Held as the objects rather than as keys: a name that has been started
@@ -384,466 +555,480 @@ def build_server(
     #: would throw away the new one.
     retired: list[AgentTask] = []
 
-    #: Model clients, one per server, and the backends built over them — the
-    #: same arrangement as the agent server's, and for the same reason: a
-    #: handshake per task would be a handshake per task.
-    clients: dict[str, Client] = {}
-    backends: dict[str, MCPBackend] = {}
+    #: The turn in flight and every open `watch` call, keyed like the registry.
+    #: **The mechanism is `slife2.libs.turn.watchhub`'s**, shared with the agent
+    #: server: a task's tap carries its `TaskBrief` and the events its loop
+    #: produced, and a watcher that joins mid-turn is handed them from the start.
+    #: A task records nothing, so the tap's `recorded_turn` stays `None`.
+    watching: WatchHub[TaskKey] = WatchHub()
 
-    #: The hub, opened on first use.  Kept for the process: it is asked for a
-    #: tool list before every model call.
-    hub_conn: Client | None = None
+    #: **The middle of a task's turn**, shared with the agent server: the model
+    #: clients, the context and hub connections, the restore, the rebuild and
+    #: the trim.  What is a task's own is its store (the local message list) and
+    #: its policy — it records nothing and delivers its answer by hand-over.
+    #: The cabinet is here for the one route a task's own `attach_image` has to
+    #: ask it about: an `[Image:…]` key its restored context carries.
+    runtime = TurnRuntime(
+        config,
+        backend=backend,
+        context_client=context_client,
+        hub_client=hub_client,
+        cabinet_client=cabinet_client,
+        source=source,
+    )
 
-    #: The context plugin, opened on first use.  It is what holds a
-    #: conversation's turn log and decides which of its turns a turn runs on,
-    #: and a task asks it the same two questions a turn of the agent's does.
-    context_conn: Client | None = None
-
-    #: One opener at a time for lazily-built connections, so that two tasks
-    #: starting together do not build two clients for one server.
-    opening = asyncio.Lock()
-
-    #: **One pre-turn read-then-write at a time for one conversation**, keyed by
-    #: `(home, agent)` — which is what a conversation is (`AgentTask.key` minus
-    #: the task's name).
-    #:
-    #: `restore` reads the agent's live-context list and `rebuild` writes it back
-    #: (`set_context_turns`), and the two are **one step**: a rebuild's target is
-    #: built from the snapshot its own restore read, so two tasks interleaving
-    #: them write a list decided against a conversation that has moved — the
-    #: task that wrote first runs its turn on a list the store no longer has, and
-    #: the store keeps a decision taken before the other's turn was even in it.
-    #: The cap allows `max_running` tasks for one agent, so this is a state two
-    #: calls can reach rather than a hypothetical.
-    #:
-    #: The agent server holds its own `Loop.lock` across exactly this pair
-    #: (`send_message`, which says why the restore has to be inside it).  This
-    #: process cannot hold *that* lock — the agent's conversation is served by
-    #: another daemon — so what is serialised here is the writers this process
-    #: has: its own tasks, one turn's set-up at a time.
-    conversations: dict[tuple[str, str], asyncio.Lock] = {}
-
-    def conversation(task: AgentTask) -> asyncio.Lock:
-        """This task's agent's lock, made on the first ask."""
-        key = (task.home, task.agent)
-        found = conversations.get(key)
-        if found is None:
-            found = asyncio.Lock()
-            conversations[key] = found
-        return found
-
-    #: Whether this build opened the two long-lived clients, and so whether it
-    #: is the one that closes them.  An injected client belongs to whoever
-    #: handed it in.
-    context_owned = context_client is None
-    hub_owned = hub_client is None
-
-    def live() -> Config:
+    def current() -> Config:
         """The config a task is built from, read when it runs.
 
         Re-read rather than captured at start-up, so a `model_switch` or an
         edited prompt reaches the next task — the same rule the agent server
         follows, and here it is the whole of what makes a task's model current.
         """
-        return source() if source is not None else load_cached()
+        return runtime.current()
 
-    # ── the peers ────────────────────────────────────────────────────────
+    async def registry(task: AgentTask, turn: TaskTurn) -> ToolRegistry:
+        """The tools a task runs with: the hub's list, bound to the maker.
 
-    async def hub() -> Client:
-        """The toolhub, opened on first use.
+        Bound to the maker's id, so a tool that reads this conversation's store
+        reads the one the task is standing in for — which is the same fact as
+        the key being the maker's, seen from the tool side.
 
-        A hub that is not there **raises**, like every other peer in this
-        system: a task with a quietly short tool list would be a loop that fails
-        in ways the model cannot see (SDD §7.1).
-        """
-        nonlocal hub_conn
-        if hub_client is not None:
-            return hub_client
-        if hub_conn is not None:
-            return hub_conn
-        async with opening:
-            if hub_conn is None:
-                hub_conn = await open_server(
-                    config.server("toolhub").url,
-                    name=TOOLHUB_SERVER_NAME,
-                    fallback_tool="list_tools",
-                    # No clock on the connection: a request deadline there would
-                    # be one on every request that crosses it, tool calls
-                    # included.  The asks this process makes state their own
-                    # patience where they are made (`slife2.clients.toolclient`).
-                )
-        return hub_conn
-
-    async def memory() -> Client:
-        """The context plugin, opened on first use.
-
-        A context plugin that is **not there raises**, like every other peer in
-        this system, and it is the peer whose absence is felt soonest: a task
-        whose context cannot be restored is a task that should not run.
-        """
-        nonlocal context_conn
-        if context_client is not None:
-            return context_client
-        if context_conn is not None:
-            return context_conn
-        async with opening:
-            if context_conn is None:
-                context_conn = await open_server(
-                    config.server("context").url,
-                    name=CONTEXT_SERVER_NAME,
-                    fallback_tool="remember",
-                    timeout=_T.timeouts.work.context,
-                )
-        return context_conn
-
-    async def registry(task: AgentTask) -> ToolRegistry:
-        """The tools a task runs with: the hub's list, bound to the agent.
-
-        Bound to the agent's own id, so a tool that reads this agent's store
-        reads the agent's own — which is the same fact as the key being the
-        agent's, seen from the tool side.
-
-        **The hub's whole list, by name.**  A loop's capability is not a reason
-        to special-case the catalogue: this loop has no `_async` (see below), so
-        it will never hand the model a task id, but `check_async` and
-        `cancel_async` are model tools like every other and arrive in the list
-        the hub advertises.  The one exception is the two tools that act on a
-        *live* conversation (`LIVE_CONVERSATION_TOOLS`): their declarations stay
-        — dropping a name a model already knows sends it through
-        `tool_search`/`func_tool_load` for ever — but the function behind each is
-        a refusal, because this loop is not the conversation they mutate.
+        **The hub's whole list, by name, with two bodies replaced.**  A task's
+        opening template is the one place that says what *choices* not to make —
+        `_async` and another task — and the registry is not a second list of the
+        same rules.  But `attach_image` and `_check_new_input` are not choices:
+        they act on a live turn's own message list, and the list the hub's
+        versions would reach is this conversation's *other* turn, in another
+        process.  So their declarations stay the hub's and their bodies are this
+        turn's (`live_tools`), and a by-name call is answered with the same body
+        rather than fetched from the hub (`catalogue_acquire`).
         """
 
-        def refused(name: str):
-            """The declaration a withheld tool keeps, backed by a refusal."""
-
-            async def run(_arguments: dict[str, Any]) -> str:
-                raise ToolFailed(
-                    f"{name} is not available in an agent task: it acts on the "
-                    f"agent's live conversation, and this task is not that "
-                    f"conversation. Say what you need in your answer instead."
-                )
-
-            return run
-
-        def withheld(name: str) -> Tool:
-            """A stub for a by-name call the hub's list did not carry."""
-            return Tool(
-                spec=ToolSpec(name=name, description="", parameters={"type": "object"}),
-                run=refused(name),
-            )
+        tools = await remote_tools(await runtime.hub(), task.identity)
+        local = live_tools(task, turn, tools)
 
         async def catalogue_has(name: str) -> CatalogueAnswer:
             """What the catalogue says about a name outside this request's list."""
-            if name in LIVE_CONVERSATION_TOOLS:
-                # A task has no live conversation for these to act on; the
-                # catalogue has them for the agent, not for this model.
-                return CATALOGUE_MISSING
-            return (await tool_lookup(await hub(), name, task.identity)).answer
+            return (await tool_lookup(await runtime.hub(), name, task.identity)).answer
 
         async def catalogue_acquire(
             name: str, arguments: dict[str, Any]
         ) -> Tool | None:
             """The same name, made runnable when the call fits its current schema."""
             if name in LIVE_CONVERSATION_TOOLS:
-                # **A by-name call is refused, not acquired.**  The registry
-                # would otherwise fetch the real tool from the hub and run it —
-                # the exact action this whole guard exists to prevent.
-                return withheld(name)
-            return await acquire_tool(await hub(), name, arguments, task.identity)
-
-        # **The declaration stays, the behaviour goes.**  The hub advertises
-        # these two to every model, and dropping them here would send a model
-        # that knows their names through `tool_search`/`func_tool_load` in a
-        # loop that can never load them.  A stub keeps the list the hub's own —
-        # and makes the call a refusal the model reads, rather than an action on
-        # somebody else's inbox.
-        tools = [
-            (
-                tool
-                if tool.spec.name not in LIVE_CONVERSATION_TOOLS
-                else Tool(spec=tool.spec, run=refused(tool.spec.name))
+                # **A by-name call is this turn's, not the hub's.**  The
+                # registry would otherwise fetch the agent server's version,
+                # which acts on the conversation's other live turn — the exact
+                # action the local body exists to keep off it.  The hub is still
+                # asked for the declaration and the fit (and does the load), so
+                # the model's next request carries the same tool.
+                found = await acquire_tool(
+                    await runtime.hub(), name, arguments, task.identity
+                )
+                if found is None:
+                    return None
+                return Tool(spec=found.spec, run=live_bodies(task, turn)[name])
+            return await acquire_tool(
+                await runtime.hub(), name, arguments, task.identity
             )
-            for tool in await remote_tools(await hub(), task.identity)
-        ]
-        return ToolRegistry(tools, exists=catalogue_has, acquire=catalogue_acquire)
 
-    async def model_for(task: AgentTask) -> LLMBackend:
-        """A model backend bound to the agent, opened on first use.
+        return ToolRegistry(
+            [local.get(tool.spec.name, tool) for tool in tools],
+            exists=catalogue_has,
+            acquire=catalogue_acquire,
+        )
 
-        The model is what `default:` names — the same reference `model_switch`
-        writes — so the config stays the one place that says which model an
-        agent is on, and a task started after a switch runs on the new one.
+    def live_tools(
+        task: AgentTask, turn: TaskTurn, tools: list[Tool]
+    ) -> dict[str, Tool]:
+        """The live-conversation tools as this turn's, paired with the hub's
+        declarations.
+
+        `registry` passes the advertised list through, so the model reads the
+        agent server's own description and schema; only the body is the task's.
         """
-        if backend is not None:
-            return backend
-        current = live()
-        name, provider, settings = current.resolve("")
-        reference = f"{name}/{settings.model}"
-        found = backends.get(reference)
-        if found is not None:
-            return found.with_key(*task.identity)
-        async with opening:
-            if reference not in backends:
-                url = current.server(provider.api).url
-                if url not in clients:
-                    # One client per *server*, not per provider: a server speaks
-                    # one wire format for every provider that uses it.
-                    client, built = await open_backend(
-                        url,
-                        settings.model,
-                        provider=name,
-                        name=reference,
-                        server_name=API_SERVER_NAMES[provider.api],
+        declared = {tool.spec.name: tool.spec for tool in tools}
+        bodies = live_bodies(task, turn)
+        return {
+            name: Tool(spec=declared[name], run=body)
+            for name, body in bodies.items()
+            if name in declared
+        }
+
+    def live_bodies(task: AgentTask, turn: TaskTurn) -> dict[str, ToolFunc]:
+        """The bodies behind `LIVE_CONVERSATION_TOOLS`, for **this task's own
+        turn**.
+
+        **The four tools are the task's because the list is.**  A task is a single
+        user message and a single turn; `_check_new_input` has no inbox to hand
+        anything over from and no harness cut-in to serve, `attach_image`
+        injects into the task's own message list so the picture is on the task's
+        *next* model call, and `_context_rebuild` edits the task's clone with
+        `publish=False`.  The agent server's versions resolve a loop by the
+        conversation id alone, and a task's id is the maker's — the other live
+        turn on that conversation — so leaving them in the list is the aliasing
+        this body exists to close.
+        """
+
+        async def nothing_waiting(_arguments: dict[str, Any]) -> str:
+            """There is never anything waiting here, and saying so is the whole
+            answer: a task has no queue, and the maker's is not the task's."""
+            return NOTHING_WAITING
+
+        async def attach_image(arguments: dict[str, Any]) -> dict[str, Any]:
+            """Attach images to the task's own single user message."""
+            given = arguments.get("sources")
+            wanted = (
+                [str(source) for source in given if str(source).strip()]
+                if isinstance(given, list)
+                else []
+            )
+            if not wanted:
+                raise ToolFailed(attachments.NO_SOURCE)
+            if not turn.accepts_images:
+                raise ToolFailed(attachments.cannot_read_images(turn.model))
+
+            async def lookup(
+                keys: list[tuple[str, str]],
+            ) -> tuple[list[tuple[str, str]], list[str]]:
+                try:
+                    client = await runtime.cabinet()
+                except Exception as exc:  # noqa: BLE001 - an unreachable cabinet is each key's refusal
+                    return [], [
+                        attachments.cabinet_unreachable(refusal, exc)
+                        for _key, refusal in keys
+                    ]
+
+                async def fetch(key: str) -> str | None:
+                    answer = await client.call_tool(
+                        "image_source",
+                        {"key": key},
+                        # **The task's own home**, kept on the object: this runs
+                        # after the call that started it has returned, and a
+                        # home read from whatever directory the daemon happens
+                        # to be in would ask the wrong cabinet (`AgentTask.home`).
+                        meta=conversation_meta(*task.identity, home=task.home),
+                        timeout=_T.timeouts.work.hub,
                     )
-                    clients[url] = client
-                    backends[reference] = built
-                else:
-                    backends[reference] = MCPBackend(
-                        clients[url],
-                        settings.model,
-                        provider=name,
-                        name=reference,
-                    )
-        return backends[reference].with_key(*task.identity)
+                    payload = tool_payload(answer)
+                    if "url" not in payload:
+                        raise unreadable(
+                            "the cabinet", "return an image source", payload
+                        )
+                    url = payload.get("url")
+                    return url if isinstance(url, str) and url else None
+
+                return await attachments.from_keys(keys, fetch)
+
+            # A model's path is relative to its data directory, exactly as the
+            # agent server resolves it; a key is a key to the maker's cabinet.
+            # The base is the task's kept home rather than the ambient one, for
+            # `fetch`'s reason.
+            pairs, refusals = await attachments.resolve_sources(
+                wanted, base=Path(task.home), lookup=lookup
+            )
+            if pairs and not attachments.inject(
+                turn.messages, [url for _source, url in pairs]
+            ):
+                raise ToolFailed(attachments.NO_MESSAGE)
+            logger.info(
+                "attach_image in agent task %s: %d attached, %d refused",
+                task.name,
+                len(pairs),
+                len(refusals),
+            )
+            return {
+                "attached": [source for source, _url in pairs],
+                "refused": refusals,
+            }
+
+        async def turn_compact(arguments: dict[str, Any]) -> str:
+            """Drop what this task no longer needs from its own model context.
+
+            **The task's own list and the task's own state.**  The agent
+            server's version resolves a loop by the conversation id, which is
+            the maker's — the other live turn on that conversation — so this
+            body exists for the reason `attach_image`'s does: the id alone
+            cannot tell the two loops apart.  A task records nothing, so a
+            compaction here is a projection of `turn.messages` and touches no
+            record at all.
+            """
+            try:
+                result = await runtime.apply_compaction(
+                    task.identity,
+                    turn,
+                    turn.model,
+                    selection=arguments.get("compact"),
+                    context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                    prompt_window=turn.prompt_window,
+                )
+            except compact.Refusal as exc:
+                raise ToolFailed(str(exc)) from None
+            logger.info(
+                "agent task %s: turn_compact seen=%d dropped=%d held=%d "
+                "decision=%s hold=%s",
+                task.name,
+                result.seen,
+                result.dropped,
+                len(result.held),
+                result.decision or "ok",
+                turn.compact_hold,
+            )
+            return compact.report(result, recorded=False)
+
+        async def context_rebuild(arguments: dict[str, Any]) -> str:
+            """Rebuild this task's own clone of the conversation's history.
+
+            **The task's clone, and `publish=False`.**  The task records
+            nothing, so its context decision must not move the conversation it
+            stands in for; the restored list is the snapshot and the rebuild
+            replaces its historical prefix only.  The turn running is carried
+            verbatim, exactly as on the agent server, and the decision is made
+            from the live context — the task's own opening is in it.
+            """
+            try:
+                applied = await runtime.apply_rebuild(
+                    task.identity,
+                    turn,
+                    turn.model,
+                    publish=False,
+                    # The last LLM call: this task's own completed call when one
+                    # returned, otherwise the restored turn's last call.
+                    context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                    prompt_window=turn.prompt_window,
+                    keep=arguments.get("keep"),
+                    recall=arguments.get("recall"),
+                )
+            except ValueError as exc:
+                raise ToolFailed(str(exc)) from None
+            if applied is None:
+                return "This task has no opening message; nothing to rebuild."
+            rebuilt = applied.rebuilt
+            logger.info(
+                "agent task %s: context_rebuild changed=%s kept=%d in_hand=%d "
+                "outside=%d recalled=%d rerank=%s decision=%s",
+                task.name,
+                rebuilt.changed,
+                rebuilt.kept,
+                rebuilt.in_hand,
+                rebuilt.outside,
+                rebuilt.recalled,
+                rebuilt.rerank or "-",
+                rebuilt.decision or "-",
+            )
+            return applied.text
+
+        return {
+            CHECK_NEW_INPUT: nothing_waiting,
+            ATTACH_IMAGE: attach_image,
+            TURN_COMPACT: turn_compact,
+            CONTEXT_REBUILD: context_rebuild,
+        }
 
     # ── the loop ─────────────────────────────────────────────────────────
 
-    def adopt(payload: dict[str, Any]) -> tuple[list[Message], list[int]]:
-        """Take the context plugin's answer as this turn's list, or refuse it.
-
-        Refused rather than ignored, for the reason the agent server gives: a
-        peer that answers with a shape this build cannot read is a system that
-        has come apart — the same rule `slife2.clients.toolclient.remote_tools` applies
-        to a tool list — and quietly keeping the context we had would make an
-        unreadable answer indistinguishable from a decision to keep it.
-
-        **`turn_ids` is read as strictly as `messages`**: an answer that carried
-        messages and no ids is a context whose turns nothing could name, so the
-        task's loop and the store would disagree about what it held from that
-        point on.  A missing or null `turn_ids` is the same damage as a non-list
-        `messages` and is refused the same way (SDD Appendix C: a value that
-        cannot be read is not a value that is absent).
-        """
-        raw = payload.get("messages")
-        if not isinstance(raw, list):
-            raise unreadable("the context store", "return a message list", payload)
-        turn_ids = payload.get("turn_ids")
-        if not isinstance(turn_ids, list):
-            raise unreadable("the context store", "return a turn-id list", payload)
-        return (
-            [Message.from_wire(item) for item in raw],
-            [int(turn_id) for turn_id in turn_ids],
-        )
-
-    async def restore(
-        task: AgentTask, head: list[Message]
-    ) -> tuple[list[Message], list[int], int, int]:
-        """Put the conversation back on the context it had when it last stopped.
-
-        **The agent's conversation, under the agent's key.**  A task starts from
-        what this agent already knows rather than from nothing, which is the
-        whole difference between a task and a stranger.  Called once, when the
-        loop is built, which is the moment the agent server calls it too — and
-        `covered` is every message, since a task has no carried tail.
-
-        The fourth value is the last restored turn's `context_tokens` — the
-        figure the agent's status bar would show, and what the task's
-        `[TURN-PROMPT:]` marker reports.  Zero when no size was measured; a
-        value of another type is read the same way, as a display fact rather
-        than a reason to fail the restore.
-        """
-        payload = tool_payload(
-            await (await memory()).call_tool(
-                "restore",
-                {
-                    "agent": task.agent,
-                    "subagent": task.identity[1],
-                    "messages": [message.to_wire() for message in head],
-                },
-            )
-        )
-        messages, turn_ids = adopt(payload)
-        context_tokens = 0
-        turns = payload.get("turns")
-        if isinstance(turns, list) and turns:
-            last = turns[-1]
-            if isinstance(last, dict):
-                found = last.get("context_tokens")
-                if isinstance(found, int) and not isinstance(found, bool):
-                    context_tokens = found
-        return messages, turn_ids, len(messages), context_tokens
-
-    async def rebuild(
-        task: AgentTask,
-        messages: list[Message],
-        turn_ids: list[int],
-        covered: int,
-        prompt: str,
-        reference: str,
-    ) -> tuple[list[Message], int]:
-        """Decide what this task's turn runs on: keep ∪ recall.
-
-        **Once, and once is exactly right** — a task runs a single turn, so the
-        one call the agent server makes before a turn is the one call a task
-        makes.  *Not* making it is the thing that would be wrong: SDD §5.5's rule is
-        that the context is chosen rather than accumulated, and a turn that ran
-        on whatever happened to be in the list would be the one turn in this
-        system whose context nobody decided.
-
-        It is asked about **the agent's own context**, so the discriminator may
-        recall what this conversation was about and the task's first model call
-        carries the relevant part of a conversation nobody described to it.
-
-        **And it writes only when it changes something.**  A decision that asks
-        for what is in hand rebuilds nothing and touches nothing on disk
-        (SDD §5.5's common case) — which is a saving and **not** a licence: when
-        this call does write, it replaces the conversation's stored list with one
-        built from the snapshot its caller's `restore` read, so a write landing
-        after another writer's leaves the store holding a decision taken against
-        a conversation that has moved — and the next `restore` (an idle reap, a
-        restart, a new terminal) rebuilds from that list, which is a conversation
-        that comes back one turn short, silently
-        (`slife2/plugins/context/server.py`'s own comment on the write).  So the
-        call is made under the conversation's lock, together with the restore it
-        depends on (`run_loop`).
-        """
-        carried = max(len(messages) - covered, 0)
-        payload = tool_payload(
-            await (await memory()).call_tool(
-                "rebuild",
-                {
-                    "agent": task.agent,
-                    "subagent": task.identity[1],
-                    "messages": [message.to_wire() for message in messages],
-                    "turn_ids": list(turn_ids),
-                    # The list this task's `restore` answered with.  A turn of
-                    # the agent's own may be saved while the discriminator runs
-                    # — the two writers are in different processes — and the
-                    # store's compare-and-set is what keeps this decision from
-                    # erasing it (`context.rebuild`'s `expected`).
-                    "expected": list(turn_ids),
-                    "prompt": prompt,
-                    "model": reference,
-                    "carried": carried,
-                },
-            )
-        )
-        rebuilt, _ = adopt(payload)
-        # The ids are dropped rather than carried: the only thing downstream
-        # that reads a live-context list is `record`, and a task does not
-        # record.  They went *in* — a keep-list is read as an intersection with
-        # them — and nothing here needs them back.
-        return rebuilt, len(rebuilt) - carried
-
-    async def run_loop(task: AgentTask) -> TurnResult:
-        """One task's turn: the template as the user message, then the agent's
+    async def run_loop(task: AgentTask, observer: TurnObserver) -> TurnResult:
+        """One task's turn: the template as the user message, then the maker's
         own order around it — restore, rebuild, and the loop.
 
-        **The same logic a turn of the main agent goes through**, and the order
-        is the whole of what this repeats: the head is the agent's system
-        prompt, `restore` puts back the context this conversation had,
-        `rebuild` decides what the turn runs on, and the loop advances it.  What
-        is missing is the inbox, which a task has no use for, and the record,
-        which is argued below.
+        **The steps are the turn runtime's** (`slife2.libs.turn.runtime`),
+        shared with the agent server: the head is the maker's system prompt,
+        `restore` reads the context this conversation had, `rebuild` decides
+        what the turn runs on **privately** — `publish=False`, so the
+        conversation's live-context list is not moved — and the loop advances
+        it.  What is a task's own is the store — a local list — the absence of
+        an inbox, and the absence of a record, which is argued below.
 
-        `opening` travels **beside** the list rather than inside it, exactly as
-        the agent server passes its own prompt: the rebuild replaces the list
-        wholesale, so anything appended before it would be destroyed by it, and
-        `run_turn` is what appends the user message.
+        **The head and the model are the maker's, not the agent's.**  A task
+        stands in for the conversation that asked for it, so an agent's task
+        runs on the operator's `agent.system_prompt` and the default model, and
+        a subagent's task runs on `subagent.j2` and the model its own record
+        names.  The two are the same choice the agent server makes when it opens
+        that conversation, and they are read from `subagent_spec` — the library
+        both servers share — so a prompt or a model changed since the maker's
+        last turn reaches the next task.
+
+        **The observer is the watcher's half**, and it is the same seam the
+        agent server uses: the loop reports every event through it, and the
+        task's `_context_rebuild` pair is in the turn's stream like every other
+        tool's.  A task has no caller progress stream; the observer is the only
+        reader its turn can have.
+
+        `opening` travels **beside** the list rather than inside it, and
+        `run_turn` appends it: the first boundary's `_context_rebuild` then
+        replaces the historical prefix and carries the task's opening verbatim.
 
         **The one step that is missing is the record, and it is missing on
         purpose.**  A task's result reaches the conversation as a message, and
         *that* message is what the agent server records — so storing the task's
         own round trip as well would put the same answer in the transcript
         twice, under a description that is a rendered template rather than anything the
-        person said.  A task reads the agent's context and adds nothing to it:
-        what the conversation gains is the answer, which is the thing it asked
-        for.  The agent server's `Loop.records` is its switch for the opposite
-        case; there is no switch here because there is nothing to switch.
+        person said.  A task reads a clone of the maker's context and adds
+        nothing to it: what the conversation gains is the answer, which is the
+        thing it asked for.  There is no switch here because there is nothing
+        to switch.
         """
-        current = live()
-        name, _, settings = current.resolve("")
-        head = [
-            Message(
-                role="system",
-                content=render_system_prompt(
-                    current.agent.system_prompt, agent_name=task.agent
-                ),
+        current = runtime.current()
+        # **A subagent that is gone has no conversation to stand in for.**  The
+        # record's *existence* is what makes a directory a subagent's, so a name
+        # with none is one that was never made or was removed — and a task that
+        # ran on it anyway would restore a conversation whose store recreates
+        # the directory without a record, blocking the name for both subagent
+        # tools.  The agent server refuses the same name the same way
+        # (`conversation`); a task fails with a message instead of a turn, which
+        # is SDD §5.1's rule one level down.
+        if task.subagent and not subagent_file(task.agent, task.subagent).is_file():
+            raise RuntimeError(
+                f"there is no subagent {task.subagent!r} of {task.agent}'s: it "
+                f"was never made, or it was removed. The task has no "
+                f"conversation to run on."
             )
-        ]
+        # **The maker's own record**: the defaults for the agent's own
+        # conversation, and the role and model a subagent was made with.  A task
+        # of a subagent without this would run the agent's prompt on the agent's
+        # model under the subagent's key — a stand-in for somebody else.  A
+        # record that cannot be read is that same mistake, so this read is
+        # strict and the task fails naming the record.
+        spec = subagent_spec(task.agent, task.subagent, strict=True)
+        name, provider, settings = current.resolve(spec.model)
+        model = ModelRef(f"{name}/{settings.model}", name, provider.api, settings.model)
+        # **The maker's own head, built by the one builder** — including the
+        # claim's `headless` paragraph and the empty-prompt case.  Rendering it
+        # here by hand diverged from `opening_messages` on both: a task of an
+        # unattended agent was told it had a person, and a template that
+        # rendered empty produced a `content: ""` system message where an
+        # ordinary turn sends none.
+        head = opening_messages(task.agent, task.subagent, current, spec)
         opening = render_instruction(
             OPENING_TEMPLATE, name=task.name, description=task.description
         )
 
-        # **The two calls under the conversation's lock**, which is the rule the
-        # agent server states for the same pair: a rebuild's target is built from
-        # the list its own restore read, so a write that lands after the same
-        # conversation's own write is a decision taken against a snapshot that
-        # has moved.  Held here rather than inside `restore`/`rebuild` because
-        # they are one step — the second reads what the first answered.
-        async with conversation(task):
-            messages, turn_ids, covered, context_tokens = await restore(task, head)
-            messages, covered = await rebuild(
-                task,
-                messages,
-                turn_ids,
-                covered,
-                opening,
-                f"{name}/{settings.model}",
-            )
+        # **A clone, not a share.**  `restore` reads the conversation's
+        # live-context list once; the task's own `_context_rebuild` decides on
+        # that snapshot with `publish=False`, so the task's turn runs on a
+        # context of its own and the conversation's list is not moved.  A task
+        # records nothing, and a turn that leaves no record must not change what
+        # the conversation comes back to.  No lock is needed: a read and a
+        # private decision have no write to interleave.
+        restored = await runtime.restore(task.identity, head)
 
-        loop = AgentLoop(
-            await model_for(task),
-            await registry(task),
-            max_iterations=current.agent.max_iterations,
+        # **The live half of the turn**, made before the loop because the list a
+        # tool mutates is the one the rebuild decides on.  The registry closes
+        # over it, so `attach_image` injects into the same list `run_turn`
+        # advances and `_context_rebuild` replaces the same prefix.
+        turn = TaskTurn(
+            messages=restored.messages,
+            model=model.reference,
+            accepts_images=settings.accepts_images,
+            prompt_window=settings.prompt_window,
+            compact_at=current.agent.compact_at,
+            turn_ids=restored.turn_ids,
+            covered=restored.covered,
+            context_tokens=restored.context_tokens,
+        )
+
+        loop = await runtime.make_loop(
+            task.identity,
+            model,
+            partial(registry, task, turn),
             # Asked again before every model call, as the agent server asks it:
             # a tool loaded mid-task is in the next call's list rather than
             # nowhere.
-            refresh=partial(registry, task),
-            # **No `deliver`, and so no `_async` here — a stated limitation**
-            # (SDD §14.2, "Background work inside an agent task").  This loop
-            # runs one turn and has no second one for a background result to
-            # arrive in, so there is nowhere to hand one back to: the loop
-            # therefore *refuses* the mode with a sentence the model can act on
-            # (`BACKGROUND_UNAVAILABLE`) rather than running the call quietly.
-            # The background-call tools are still in the list like every other
-            # model tool; there is simply no task id here for them to answer.
+            refresh=partial(registry, task, turn),
+            max_iterations=current.agent.max_iterations,
+            # **A task has no cabinet writer and records no messages**, so its
+            # tool results are cut to the same byte bound rather than dumped:
+            # the bound is the guarantee, the dump is the agent server's
+            # recovery convenience (`slife2.libs.harness.dumps.cut`).
+            compress=dumps.cut_for(current.tool_result.bytes),
+            # **No `deliver`, so a background result has nowhere to be handed
+            # back.**  The prompt carries the rule instead of the loop: it tells
+            # the model not to use `_async` (SDD §14.2, "Background work inside
+            # an agent task") because a result arriving after this turn would
+            # have nowhere to go.  The mode is not refused; a call the model
+            # backgrounds anyway keeps its result in the async registry, and
+            # `check_async` is in the list like every other model tool.
+            # `agent_task_start` is in the list too — the prompt is what tells
+            # the model not to start another task.
+            # **The task's own view.**  A `_turn_compact` call hides messages
+            # from `turn.hidden`; the list `run_turn` advances is the task's
+            # whole exchange, and the answer the task hands back is its own.
+            present=lambda messages: compact.view(messages, turn.hidden),
         )
+        # **The loop, for the one tool that reads its bill.**  The registry was
+        # built above and closes over `turn`, so the body sees this the moment a
+        # `_turn_compact` call arrives.
+        turn.live = loop
+
+        async def auto_invoke() -> AutoCall | None:
+            """The harness's own move at an iteration boundary.
+
+            **The rebuild first, once** — the task's clone gets the same
+            historical selection the agent server's turn gets, with
+            `publish=False` and no record — then the compaction when due.  The
+            decision is asked here, before the call: the selection is the
+            call's arguments, so the pair never starts as an empty call.  The
+            threshold rule and the two failure sentences are the agent server's
+            (`slife2.libs.turn.compact.due`, `TurnRuntime.compact_arguments`):
+            a task is one turn, so the same rule has to keep it alive.
+            """
+            if call := await runtime.rebuild_call(
+                task.identity,
+                turn,
+                turn.live,
+                turn.model,
+                context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                prompt_window=turn.prompt_window,
+            ):
+                return call
+            # **A task is one turn and records nothing**, so a turn that
+            # overflows has no next turn to recover on: the same threshold rule
+            # as the agent server's is the bound that keeps it alive.
+            return await runtime.compact_call(
+                task.identity,
+                turn,
+                turn.live,
+                turn.model,
+                context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                prompt_window=turn.prompt_window,
+            )
+
         # **The task's prompt marker, and no strip after it.**  A task's messages
         # are not recorded — the answer is what the conversation gains — so
         # there is no row to keep the marker out of; it is prompt text for this
         # one turn and goes out of scope with the task.  The context figure is
-        # the restored conversation's last turn, which is the number the agent's
-        # status bar would have shown when the task started.
-        facts: dict[str, Any] = {"now": now()}
-        usage, _used = context_usage(context_tokens, settings.context_window)
-        if usage:
-            facts["token-usage"] = usage
-        opening = with_lead(opening, turn_prompt_note(facts))
-        result = await loop.run_turn(messages, opening)
+        # not here: `_context_rebuild`'s report carries the turn's own estimate.
+        opening = with_lead(
+            opening,
+            turn_prompt_lead(
+                # A task runs on the maker's own conversation, so it runs on the
+                # same plan: the halfway case — a task that did not see the plan
+                # it could write — would be two answers to one conversation.
+                plan.read(*task.identity),
+            ),
+        )
+        result = await loop.run_turn(
+            turn.messages,
+            opening,
+            observer,
+            auto=auto_invoke,
+        )
         # After the turn and not during it: the tool list goes out with every
         # model call, so dropping the excess mid-turn would take away a tool the
         # model had just loaded and was about to use.
-        await trim_tools(task, messages)
+        await trim_tools(task, turn.messages, observer)
         return result
 
-    async def trim_tools(task: AgentTask, messages: list[Message]) -> None:
+    async def trim_tools(
+        task: AgentTask, messages: list[Message], observer: TurnObserver
+    ) -> None:
         """Bring the model's tool list back within its budget — and say so in the
         turn, rather than doing it behind the model's back.
 
-        **The agent server's step at the agent server's moment**, and it belongs
-        here for a reason that is not symmetry: the loaded set lives in the tool
-        *catalogue* (`slife2-toolhub`), which is one list for the whole system —
-        so a task that loaded tools past the budget has left every other
-        conversation's request longer, and the trim is the harness's call
-        because the harness is what knows the turn is over.
-
-        **What went is written into the turn** as the harness pair
-        `_func_tool_unload` called with no names, so a reader of the record reads
-        that the list shrank and which tools left, rather than reaching for one
-        it still believes it has (SDD §7.4).  Nothing is written when nothing moved:
-        an empty pair would be a record of something that did not happen.
+        **The write is the turn runtime's** (`slife2.libs.turn.runtime.trim`):
+        the pair naming what left, with no await between its halves, is one
+        mechanism for both servers, and so is the note it reports on this
+        task's stream.  What is a task's own is how a skip is reported.
 
         **A skip is a failure, and it is said at `error`.**  A task runs one
         turn and has no next request for a dead hub to make itself heard on, so
@@ -853,16 +1038,15 @@ def build_server(
         one by bookkeeping) and what is added is visibility: the skip is logged
         at `error`, naming the task, because the loaded set is one list for the
         whole system and an untrimmed one leaves every other conversation's
-        request longer (SDD §9.3).  Registered as a fallback in SDD Appendix C: it
-        *skips the trim* when the hub cannot be reached or answers with a shape
-        this build cannot read; it *gives up* the trim for that turn; it *does
-        not cover* a hub that is gone for good — there is no next turn here to
-        surface it on, which is why the skip is said at `error`; the *failure
-        goes* to the log as an error naming the task.
+        request longer (SDD §9.3).  Registered as a fallback in SDD Appendix C:
+        it *skips the trim* when the hub cannot be reached or answers with a
+        shape this build cannot read; it *gives up* the trim for that turn; it
+        *does not cover* a hub that is gone for good — there is no next turn
+        here to surface it on, which is why the skip is said at `error`; the
+        *failure goes* to the log as an error naming the task.
         """
         try:
-            found = await unload_tools(await hub())
-            unloaded, text = trim_answer(found)
+            unloaded = await runtime.trim(messages, observer)
         except Exception as exc:  # noqa: BLE001 - bookkeeping does not fail a turn
             logger.error(
                 "agent task %s: the tool list was not trimmed (%s); the loaded "
@@ -879,20 +1063,6 @@ def build_server(
             len(unloaded),
             ", ".join(unloaded),
         )
-        call = harness_call(FUNC_TOOL_UNLOAD)
-        # **Both halves with nothing awaited between them.**  An interruption in
-        # that gap leaves an assistant message whose call is never answered, and
-        # that is the one history state every provider rejects — the reason the
-        # agent server gives for writing its own pair this way, and the reason
-        # `harness_call` is the only builder of one.
-        messages.append(Message(role="assistant", content=None, tool_calls=[call]))
-        messages.append(
-            Message(
-                role="tool",
-                content=text,
-                tool_call_id=call.id,
-            )
-        )
 
     #: The steps here that are deliberately *not* taken, and why.
     #:
@@ -900,10 +1070,9 @@ def build_server(
     #: message, and *that* message is what the agent server records — so storing
     #: the task's own round trip as well would put the same answer in the
     #: transcript twice, under a description that is a rendered template rather than
-    #: anything the person said.  A task reads the agent's context and adds
+    #: anything the person said.  A task reads the maker's context and adds
     #: nothing to it; what the conversation gains is the answer, which is the
-    #: thing it asked for.  `Loop.records` is the agent server's switch for the
-    #: opposite case, and there is no switch here because there is nothing to
+    #: thing it asked for.  There is no switch here because there is nothing to
     #: switch.
 
     async def run(task: AgentTask) -> None:
@@ -930,31 +1099,54 @@ def build_server(
         frames, and the answer beside them, for as long as the registry
         remembered it.  A task that has stopped holds nothing.
         """
+        outcome = FAILED
         try:
             outcome = FINISHED
-            try:
-                result = await run_loop(task)
-                task.text = (
-                    result.text.strip() or "(the task stopped without saying anything)"
-                )
-                task.finished_at = now()
-            except asyncio.CancelledError:
-                # No await anywhere in this path: SDD §5.6 measured that a plain
-                # `await` in a cancelled scope is cancelled again at its next
-                # checkpoint, so anything awaited here would simply not happen.
-                task.status = CANCELLED
-                task.finished_at = now()
-                raise
-            except Exception as exc:  # noqa: BLE001 - SDD §5.1's rule, one level down
-                logger.warning("agent task %s failed: %s", task.name, exc)
-                task.text = f"The agent task {task.name!r} failed: {exc}"
-                task.status = FAILED
-                task.finished_at = now()
-                outcome = FAILED
+            # **One token for one task turn.**  A task runs a turn of the
+            # maker's conversation from a process beside the agent server's, so
+            # the conversation alone cannot tell this turn's lines — or its
+            # live-list tools — from that server's; the token is what does.  It
+            # covers the turn's failure line as well as its hops.  The delivery
+            # below is outside it on purpose — the agent server mints the token
+            # of the turn that delivery starts.
+            with logcontext.turning(logcontext.new_turn()):
+                try:
+                    result = await run_loop(
+                        task,
+                        WatchPublisher(partial(watching.publish, task.key)),
+                    )
+                    task.text = (
+                        result.text.strip()
+                        or "(the task stopped without saying anything)"
+                    )
+                    task.finished_at = now()
+                except asyncio.CancelledError:
+                    # No await anywhere in this path: SDD §5.6 measured that a
+                    # plain `await` in a cancelled scope is cancelled again at
+                    # its next checkpoint, so anything awaited here would simply
+                    # not happen.
+                    task.status = CANCELLED
+                    task.finished_at = now()
+                    raise
+                except Exception as exc:  # noqa: BLE001 - SDD §5.1's rule, one level down
+                    # **The same words the agent server's failed turn uses**
+                    # (`failure_text`): a task reports a provider's failure with
+                    # the type and message, not the message alone.
+                    logger.warning(
+                        "agent task %s failed: %s", task.name, failure_text(exc)
+                    )
+                    task.text = (
+                        f"The agent task {task.name!r} failed: {failure_text(exc)}"
+                    )
+                    task.status = FAILED
+                    task.finished_at = now()
+                    outcome = FAILED
             # **The answer is the product, so a task is not `finished` until it
             # has reached a window.**  The loop's status stays `running` while
             # the hand-over runs, so a reader that asks in that moment is not
-            # told a completion that may still fail; the marker carries the
+            # told a completion that may still fail — and `report` withholds the
+            # finish time for the same reason: a `running` status beside a
+            # finish time is two contradictory facts.  The marker carries the
             # outcome the answer will have if it lands.
             try:
                 delivered = await deliver(task, status=outcome)
@@ -965,6 +1157,26 @@ def build_server(
             if outcome == FINISHED:
                 task.status = FINISHED if delivered else FAILED
         finally:
+            # **A watcher is told how it ended, and the tap goes with the task.**
+            # The sentence is kept on the object first: a watch that arrives
+            # after this frame has no events to replay, and the status alone
+            # cannot say whether a successful loop failed to deliver.  It is
+            # sent before `retire` and before the answer is let go — a failed
+            # loop's sentence is what the watcher has to show for the failure,
+            # and `task.text` is cleared below.
+            task.ending = closed_reason(task, outcome)
+            # **Close and drop only while the tap is still this task's.**  A
+            # cancelled task's `finally` runs after the cancel call returned,
+            # and the name may already have been started again: the new task's
+            # tap and watchers are under the same key, and ending them by key
+            # alone would tell the new task's watchers the old task's ending
+            # and take the new tap's replay from later joiners
+            # (`WatchHub.drop_if`'s reason).  The check and the two calls are
+            # one synchronous block, so no start can slip between them; a
+            # normal ending reaches here with its own tap still in place.
+            if watching.tap(task.key) is task.tap:
+                watching.close(task.key, task.ending)
+                watching.drop(task.key)
             # **A task is retired when its ending is final** — for a successful
             # loop, after the answer has been handed over.  The cap counts
             # `running`, so a task that is still delivering holds its slot: it is
@@ -972,6 +1184,13 @@ def build_server(
             # the contract saying the same thing.
             retire(task)
             task.handle = None
+            # **The tap goes with the handle.**  Dropping it from the hub is
+            # not enough: this task holds the object, and `Tap.events` keeps
+            # every `TextDelta`, every reasoning delta and every tool preview
+            # the turn produced.  The answer is the part worth megabytes, but
+            # the event stream can be larger still, and 32 retired tasks
+            # outlive it until the cap forgets them.
+            task.tap = None
             # **The answer is let go of here, and this line is the design rather
             # than tidiness.**  A finished task's message list, its loop and its
             # tool registry are locals of `run_loop` and die with it; what
@@ -1015,16 +1234,24 @@ def build_server(
         the product and there is no second copy of it (SDD §9.3), so a task whose
         answer reached no conversation did not finish, however much work it did.
         `run` sets the final status from what this returns; the log says why the
-        answer went nowhere.  `status` is what the marker says the answer is —
+        answer went nowhere.  `status` is what the marker says the answer *is* —
         `finished` for a loop that succeeded, `failed` for one that did not —
         because the object is still `running` while a successful answer is being
         handed over.
 
+        **The window is the agent's, even for a subagent's task.**  A subagent
+        has no window of its own (SDD §4.5), so the only conversation that can
+        take its task's answer is its maker's — the agent whose window is
+        showing, and the one that can act on it.  The channel and the marker
+        name the task the answer came from, and the name is the handle back to
+        it.
+
         Returns whether the answer reached a window.
         """
+        maker = logcontext.describe(task.agent, task.subagent)
         try:
             await hand_over(
-                config,
+                current(),
                 task.agent,
                 f"{marker(task, status=status)} {task.text}",
                 channel_for(task),
@@ -1033,7 +1260,7 @@ def build_server(
             )
         except DeliveryFailed as exc:
             logger.error(
-                "agent task %s for %s was not delivered: %s", task.name, task.agent, exc
+                "agent task %s for %s was not delivered: %s", task.name, maker, exc
             )
             return False
         except Exception as exc:  # noqa: BLE001 — a task has nobody behind it to raise to
@@ -1048,18 +1275,22 @@ def build_server(
                 "agent task %s for %s was not delivered (%s); "
                 "nothing else would report it",
                 task.name,
-                task.agent,
+                maker,
                 exc,
             )
             return False
-        task.delivered = True
         return True
 
     # ── whose task ───────────────────────────────────────────────────────
 
     #: The refusal this plugin says for a call that did not name a
-    #: conversation — its own two words in the one shared sentence.
+    #: conversation — its own two words in the one shared sentence.  The status,
+    #: the list and the cancel address a task by the agent's handle alone; the
+    #: start needs the whole pair, because the task runs on that conversation.
     agent_of = agent_reader("agent whose task it could be", "a task")
+    conversation_of = conversation_reader(
+        "conversation whose task it could be", "a task"
+    )
 
     def running(agent: str) -> int:
         """How many of **this home's** tasks for `agent` are still going.
@@ -1081,33 +1312,30 @@ def build_server(
         )
 
     def find(agent: str, name: str) -> AgentTask | None:
-        found = tasks.get(conversation_key(agent, name))
+        """The task under this home's `(agent, name)` handle, or None.
+
+        **A literal triple, not `conversation_key`.**  The two were the same
+        shape while a task's identity was always the agent's own, and the
+        overload read as if the name were a subagent's.  It is not: the key's
+        third slot is the task's name (`TaskKey`), and a task's maker is
+        `AgentTask.subagent`, which is not part of what this registry is keyed
+        by.
+        """
+        found = tasks.get((home_key(), agent, name))
         return found
 
     # ── the tools ────────────────────────────────────────────────────────
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
-        nonlocal hub_conn, context_conn
         try:
             yield {}
         finally:
-            for client in clients.values():
-                await close_server(client)
-            clients.clear()
-            backends.clear()
-            # Closed *and* forgotten, which is what the clear above is for as
+            # Closed *and* forgotten, which is what the runtime's close does as
             # well: this hook is not the process's lifetime over the in-memory
             # transport, so a client left in place is one the next session is
             # handed already shut — every task of it failing at its first hop.
-            for held, owned in (
-                (hub_conn, hub_owned),
-                (context_conn, context_owned),
-            ):
-                if held is not None and owned:
-                    await close_server(held)
-            hub_conn = None
-            context_conn = None
+            await runtime.close()
             # `tasks` is deliberately **not** cleared here, for the reason the
             # agent server gives about its loop registry: it is state the
             # process owns, and this hook is not the process's lifetime.  A
@@ -1124,7 +1352,7 @@ def build_server(
     async def agent_task_start(
         ctx: Context, name: str, description: str
     ) -> dict[str, Any]:
-        """Start an agent task: one background loop that runs as you.
+        """Start an agent task: one background turn that runs as you.
 
         For work that would hold you — long, or waiting on the home. The call
         returns at once and the answer reaches this conversation on its own: do
@@ -1132,12 +1360,18 @@ def build_server(
         conversation when it stops, the task ends `failed`** — the answer is the
         product and it is not kept, so there is nothing to fetch later.
 
+        A task is one turn: inside it, do not use `_async` or start another
+        task, because there is no later turn to receive their result.
+
         `description` is the task itself. It starts from this conversation's
         stored turns, so **the turn you are answering is not among them** — put
         in what the task needs from the last exchange, and let it read everything
         older for itself. It runs with your prompt, your model and your tools,
         and nobody can answer a question it raises: what it sends when it stops
         is the whole of what comes back.
+
+        A subagent's task runs as that subagent and its answer is delivered to
+        the agent's conversation, because a subagent has no window of its own.
 
         `name` is the handle — how the task is asked about and stopped. This is
         not a way to run a program in the background.
@@ -1147,7 +1381,10 @@ def build_server(
             description: The task itself: what to do, and what "done" looks
                 like. It is the whole of what the task is given.
         """
-        agent = agent_of(ctx)
+        # **The whole pair, because the task runs on this conversation.**  A
+        # subagent that starts one gets a task of its own — its prompt, its
+        # model, its context — not a task of the agent it belongs to.
+        agent, subagent = conversation_of(ctx)
         name = name.strip()
         if not name:
             raise ToolError("an agent task needs a name: it is how you address it.")
@@ -1168,13 +1405,13 @@ def build_server(
         # way.**  The count below is *this home's* — `running` matches on the
         # `(home, agent, name)` key — so the number it is compared against has to
         # be this home's too, or a second home is bounded by a limit an operator
-        # wrote in somebody else's file.  `live()` is the same read the model is
-        # taken with (`model_for`) and the iteration cap with (`run_loop`), and
+        # wrote in somebody else's file.  `current()` is the same read the model
+        # is taken with and the iteration cap with (`run_loop`), and
         # `AgentTaskSettings.max_running` is written for it: the section this key
         # lives in is read by the plugin that enforces it, because the value is a
         # property of the home the caller is in and of the file as it is now —
         # the boot config is a snapshot of the daemon's own directory.
-        limit = live().agent_task.max_running
+        limit = current().agent_task.max_running
         if running(agent) >= limit:
             raise ToolError(
                 f"{limit} agent tasks are already running for this agent "
@@ -1187,18 +1424,40 @@ def build_server(
             name=name,
             description=description,
             started_at=now(),
+            # The maker's conversation — the other half of the identity every
+            # hop the task makes carries, and the one its prompt and model are
+            # read from.
+            subagent=subagent,
             # The home this call came in on, read *here*, at the only moment it
             # is the caller's (`slife2.libs.plugin.audience.conversation_key` explains why
             # the object keeps it rather than asking again later).
             home=home_key(),
         )
         tasks[task.key] = task
+        # **The tap opens with the task, before the loop has produced an
+        # event.**  A watcher may join during the restore or the rebuild, and
+        # the brief is the one frame it could not otherwise see; a tap started
+        # inside `run` would leave that window with nothing to replay.  There is
+        # no await between the registry insert and this line, so a watch call
+        # cannot find the task without the tap.
+        task.tap = watching.start_tap(
+            task.key,
+            TaskBrief(
+                name=task.name,
+                description=task.description,
+                status=task.status,
+            ),
+        )
         # Detached from the call that starts it, which is the whole of what
         # "background" means here: the request that asked returns, and the loop
         # keeps going.  SDD §5.6's rule for a write from a cancelled turn is the same
         # rule — work created outside the cancelled scope does land.
         task.handle = asyncio.create_task(run(task))
-        logger.info("agent task %s started for %s", name, agent)
+        logger.info(
+            "agent task %s started for %s",
+            name,
+            logcontext.describe(agent, subagent),
+        )
         return task.report()
 
     @mcp.tool(name=AGENT_TASK_STATUS, meta=FOR_THE_MODEL)
@@ -1284,6 +1543,102 @@ def build_server(
         logger.info("agent task %s cancelled for %s", task.name, agent)
         return task.report()
 
+    @mcp.tool
+    async def watch(name: str, ctx: Context) -> dict[str, Any]:
+        """Watch a running agent task's turn — read-only, until it stops.
+
+        **Hold this call open for as long as the view is up.**  The first
+        progress notification is a `Snapshot` of the task's opening read — an
+        empty turn list, because a task records nothing, and the agent's plan,
+        because that is what the task runs on.  `TaskBrief` follows with the
+        description the task was given, then the turn events from the task's
+        start (a watcher that joins mid-turn is handed the events already
+        produced), then live events.  The last frame is `Closed`, and the call
+        returns after it.  A cancelled call is the detach.
+
+        **A task that has already stopped is answered, not refused.**  It stays
+        in the registry until the retired cap forgets it, so a watch that
+        arrives a moment late gets the brief with the final status and the
+        sentence its ending carried — the screen says what happened rather than
+        failing to open on a task that ran.  A name this process does not hold
+        is a refusal.
+
+        **Watching is a read.**  It starts no turn, spends no model call, and
+        does not make the task finished: the answer still reaches the
+        conversation by hand-over, and a task whose answer reaches no window is
+        `failed` whether or not somebody watched.
+
+        Args:
+            name: The task's name, as `agent_task_start` was given it.
+
+        Returns:
+            `closed`: true, after `Closed` has been sent.  A cancellation
+                returns nothing — it is a detach.
+        """
+        agent = agent_of(ctx)
+        task = find(agent, name.strip())
+        if task is None:
+            raise ToolError(
+                f"no agent task named {name.strip()!r} is held here; it may have "
+                f"finished and been forgotten. Its answer, if it had one, is in "
+                f"the conversation."
+            )
+
+        count = 0
+
+        async def send(item: WatchItem) -> None:
+            nonlocal count
+            count += 1
+            # **Reported from this handler's own task**, which is what makes the
+            # progress token this call's (the hub's `Watcher` says why).
+            await ctx.report_progress(count, None, encode_watch(item))
+
+        plan_items = plan.read(*task.identity)
+        # **The status read and the registration are one synchronous step.**
+        # `run` sets a final status and closes the watchers without an await
+        # between, so a task seen running here cannot stop under this
+        # registration; a task seen stopped here has no future frames to wait
+        # for and is answered below without a watcher.
+        if task.status == RUNNING:
+            watcher = watching.watch(task.key)
+            replay = watching.replay(task.key)
+        else:
+            watcher = None
+            replay = None
+
+        try:
+            await send(Snapshot([], plan_items))
+            if watcher is None:
+                await send(
+                    TaskBrief(
+                        name=task.name,
+                        description=task.description,
+                        status=task.status,
+                    )
+                )
+                await send(Closed(task.ending or "the task is no longer running"))
+                return {"closed": True}
+            # **A running task always has a tap**, because `agent_task_start`
+            # opens it in the same synchronous step that puts the task in the
+            # registry — so this is the brief and every event the turn has
+            # produced, from its start.  A task's tap has no store id, so there
+            # is no snapshot that could already contain this turn and nothing
+            # to skip.
+            assert replay is not None
+            await send(replay.started)
+            for event in replay.events:
+                await send(event)
+            while True:
+                item = await watcher.queue.get()
+                await send(item)
+                if isinstance(item, Closed):
+                    # The task stopped; the last frame has been written and
+                    # there is nothing after it to wait for.
+                    return {"closed": True}
+        finally:
+            if watcher is not None:
+                watching.unwatch(task.key, watcher)
+
     return mcp
 
 
@@ -1292,7 +1647,9 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        # `load_cached` rather than the config: a task reads the file when it
+        # runs, so a `model_switch` or an edited prompt reaches the next one.
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
     )
 

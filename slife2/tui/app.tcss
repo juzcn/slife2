@@ -78,11 +78,9 @@ ChatView {
 
 /* ── The model picker ───────────────────────────────────────────────────── */
 
-/* The one widget in the transcript that is asking something, and the only one
-   with a drawn edge — which is how it reads as a question rather than as part
-   of the conversation.  It sits in the stream rather than floating over it, and
-   that is v1's arrangement: an answer that was streaming stays above it, and
-   what the switch says appears under it, in the order things happened. */
+/* The question's clothes.  A live picker wears this in the question strip;
+   the drawn edge is how it reads as a question rather than as part of the
+   conversation. */
 .model-picker {
     margin: 0 1 1 1;
     padding: 0 1;
@@ -99,10 +97,10 @@ ChatView {
     border: solid $slife-amber;
 }
 
-/* The subagent picker wears the model picker's clothes: both are questions in
-   the stream, and the drawn edge is what says so.  Same rules, a second class
-   because the two rows say different things and a later change to one should
-   not silently change the other. */
+/* The subagent picker wears the model picker's clothes: both are questions,
+   and the drawn edge is what says so.  Same rules, a second class because the
+   two rows say different things and a later change to one should not silently
+   change the other. */
 .conversation-picker {
     margin: 0 1 1 1;
     padding: 0 1;
@@ -114,6 +112,15 @@ ChatView {
 
 .conversation-picker:focus {
     border: solid $slife-amber;
+}
+
+/* In the fixed strip the picker wears the drawing rules above, with the
+   transcript's bottom gap removed: the strip is flush above the plan.  The
+   cap lives on the strip, not the picker — a capped `Static` does not count
+   its hidden rows in its virtual size, while the scroll container does. */
+#question-strip .model-picker,
+#question-strip .conversation-picker {
+    margin: 0 1;
 }
 
 /* ── The watch screen ───────────────────────────────────────────────────── */
@@ -131,6 +138,21 @@ WatchScreen {
     padding: 0 1;
     background: $slife-panel;
     color: $slife-dim;
+}
+
+/* The task's brief, above its turn.  Hidden until a `TaskBrief` arrives — a
+   subagent watch never has one — and auto height because a description is as
+   long as the model wrote it. */
+#watch-brief {
+    display: none;
+    height: auto;
+    padding: 0 1;
+    background: $slife-panel;
+    color: $slife-text;
+}
+
+#watch-brief.visible {
+    display: block;
 }
 
 /* ── The approval row ───────────────────────────────────────────────────── */
@@ -182,6 +204,50 @@ WatchScreen {
 
 #user-input > .text-area--placeholder {
     color: $slife-border-dim;
+}
+
+/* ── The question strip ─────────────────────────────────────────────────── */
+
+/* A picker is a question, and a question is current state while it asks:
+   mounted in the transcript it scrolls away under the loop that is still
+   writing, and the keys keep reaching it while the list stops being readable.
+   So it waits here, between the transcript and the plan strip, and the plan
+   does not move for it.  Hidden while no question is open.
+
+   The strip is the scroller: a long list is capped here and scrolls inside the
+   question, with the cursor row kept in view (`keep_cursor_visible`). */
+QuestionStrip {
+    height: auto;
+    max-height: 12;
+    display: none;
+    scrollbar-size: 1 2;
+    scrollbar-color: $slife-border-dim;
+    scrollbar-background: $slife-bg;
+}
+
+/* ── The plan strip ─────────────────────────────────────────────────────── */
+
+/* Current state, not history: it sits between the transcript and the prompt and
+   stays put while the conversation scrolls.  A cap plus internal scrolling
+   keeps a long plan from pushing the conversation off the screen; the tool
+   refuses a plan over the cap, so this is a display bound rather than a second
+   rule.  Hidden (`display: none`) when there is no plan. */
+PlanView {
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+    background: $slife-panel;
+    overflow-y: auto;
+    scrollbar-size: 1 2;
+    scrollbar-color: $slife-border-dim;
+    scrollbar-background: $slife-panel;
+}
+
+/* The plan itself, inside the scrolling strip: the same rule the tool panel's
+   body keeps, so a long item wraps at the strip's width rather than widening
+   the child past the viewport. */
+.plan-body {
+    width: 100%;
 }
 
 /* ── The status row ─────────────────────────────────────────────────────── */

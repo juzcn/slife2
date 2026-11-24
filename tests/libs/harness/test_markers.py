@@ -6,11 +6,11 @@ are *one mechanism*: `strip` takes the prefixes the caller knows about and
 removes whichever one it finds, so a third channel is a line in
 `slife2.tui.widgets.MARKERS` and nothing here at all.
 
-The names live with their writers rather than in the leaf, which is what the
-comment in `widgets` argues for: the module that writes a marker is the one that
-knows what it looks like, and a copy drifts into printing the raw marker at
-somebody.  So each constant is asserted **against its own writer**, not against
-a literal here.
+The names live in `slife2.libs.plugin.vocabulary`, which is where a writer and
+a reader meet without either loading the other.  Each server imports its
+constant from there, and these tests pin the writer, the window and the
+vocabulary together — so each constant is asserted **against its own writer**,
+not against a literal here.
 """
 
 from __future__ import annotations
@@ -18,11 +18,37 @@ from __future__ import annotations
 import pytest
 
 from slife2.libs.harness import markers
-from slife2.plugins.agent_task.server import CHANNEL, MARKER_PREFIX
+from slife2.libs.plugin import vocabulary
 from slife2.plugins.wechat import server as wechat
 from slife2.tui.widgets import MARKERS, channel_prefix
 
+CHANNEL = vocabulary.AGENT_TASK_CHANNEL
+MARKER_PREFIX = vocabulary.AGENT_TASK_MARKER
+
 pytestmark = pytest.mark.unit
+
+
+def test_wrap_builds_the_shape_the_reader_scans() -> None:
+    """**The builder and the reader agree by construction.**  What `wrap` writes,
+    `strip` takes back off — including a payload whose own brackets ended a
+    naive marker early, the damage `_marker_end` was rebuilt for.
+    """
+    built = markers.wrap("[Test:", {"name": "parse [draft] config", "n": 1})
+    assert built == '[Test:{"name": "parse [draft] config", "n": 1}]'
+    assert markers.strip(f"{built} the words", "[Test:") == "the words"
+
+
+def test_wrap_keeps_non_ascii_as_itself() -> None:
+    """A marker is content in a conversation rather than a payload on a progress
+    channel: a name that is not ASCII reads as itself in a transcript."""
+    assert "你好" in markers.wrap("[Test:", {"name": "你好"})
+
+
+def test_wrap_takes_a_payload_already_serialised() -> None:
+    """`turn_footnote` is also a screen's reader, so its JSON text is shared
+    rather than serialised twice — the envelope is what `wrap` adds."""
+    payload = '{"turn_id": 12}'
+    assert markers.wrap("[TURN:", payload) == f"[TURN:{payload}]"
 
 
 def test_both_markers_come_off_and_nothing_else_does() -> None:
@@ -91,7 +117,15 @@ def test_a_marker_a_message_only_mentions_is_left_alone() -> None:
 def test_the_window_takes_off_exactly_what_the_plugins_write() -> None:
     """The pair held together across the seam: what a plugin writes is what the
     screen removes, character for character — the same property
-    `tests/plugins/wechat/test_wechat.py` asserts for its own marker."""
+    `tests/plugins/wechat/test_wechat.py` asserts for its own marker.  The two
+    ends meet in `libs.plugin.vocabulary`, so the writers are checked against
+    the same constants the window reads."""
+    from slife2.plugins.agent_task import server as agent_task
+
+    assert agent_task.CHANNEL == CHANNEL
+    assert agent_task.MARKER_PREFIX == MARKER_PREFIX
+    assert wechat.CONFIG_KEY == vocabulary.WECHAT_CHANNEL
+    assert wechat.MARKER_PREFIX == vocabulary.WECHAT_MARKER
     assert wechat.MARKER_PREFIX in MARKERS
     assert MARKER_PREFIX in MARKERS
 

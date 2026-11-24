@@ -32,13 +32,18 @@ from slife2.libs.host.config import ModelSettings, plugin
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
+    THINKING_BUDGET_SHARE,
     Translate,
+    WireParts,
     build_backend_server,
+    content_parts,
+    forced_tool,
     read_int,
     render_tool_result,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
+    system_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,10 +57,6 @@ SERVER_NAME = plugin(API).name
 #: Output cap when a model entry does not set one.  Anthropic requires the
 #: field, so "absent" cannot mean "omit" here the way it does for sampling.
 DEFAULT_MAX_TOKENS = 4096
-
-#: How much of the output budget a thinking model may spend reasoning.  Half,
-#: because the other half is what the answer is made of.
-THINKING_BUDGET_SHARE = 0.5
 
 #: The smallest `budget_tokens` the Messages API accepts.  A floor of the
 #: protocol rather than a preference: a request below it is a 400, so a
@@ -71,51 +72,16 @@ _CACHE_TTLS = {"5m": "5m", "1h": "1h"}
 def to_anthropic_blocks(content: Any) -> list[dict[str, Any]]:
     """Neutral content — a string or OpenAI content parts — as Anthropic blocks.
 
-    The two APIs disagree about images in the usual way: OpenAI nests a data URL
-    under `image_url`, Anthropic wants the media type and the base64 payload as
-    separate fields.  A part this function does not recognise is dropped rather
-    than passed through, because passing an unknown block to the Messages API is
-    a 400 on every call that contains one — and it is *named* when it is dropped,
-    because an attachment or a newer part type that disappears without a word is
-    the failure this module cannot see from inside.  A part that is not a mapping
-    at all is dropped and named the same way, for the same reason.
+    The walk — drop-and-name, and refusing a source the API cannot read — is
+    `server_common.content_parts`.  What is Anthropic's here is only what a
+    block is called and what an image carries: the media type and the base64
+    payload as separate fields rather than one nested data URL.
     """
-    if content is None:
-        return []
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}] if content else []
-
-    blocks: list[dict[str, Any]] = []
-    for part in content:
-        if not isinstance(part, dict):
-            logger.warning(
-                "anthropic: dropping a content part that is %r, not a mapping "
-                "— the Messages API takes block mappings only, so it cannot be "
-                "passed through, but the caller's part is now missing",
-                type(part).__name__,
-            )
-            continue
-        match part.get("type"):
-            case "text":
-                text = part.get("text") or ""
-                if text:
-                    blocks.append({"type": "text", "text": text})
-            case "image_url":
-                source = _image_source(part.get("image_url"))
-                if source is not None:
-                    blocks.append({"type": "image", "source": source})
-            case other:
-                logger.warning(
-                    "anthropic: dropping a content part of type %r — it is not "
-                    "a block the Messages API takes, so it cannot be passed "
-                    "through, but the caller's attachment is now missing",
-                    other,
-                )
-    return blocks
+    return content_parts(content, _WIRE)
 
 
-def _image_source(raw: Any) -> dict[str, Any] | None:
-    """An `image_url` as Anthropic's source: inline data, or a URL.
+def _image_fields(url: str) -> dict[str, Any] | None:
+    """An accepted image URL as the fields of an `image` block's `source`.
 
     **Two forms and neither one is fetched here.**  A `data:` URL becomes a
     base64 source; a remote `http(s)` URL becomes a `url` source, which Anthropic
@@ -127,28 +93,14 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
     was a capability this plugin should not have.  The premise was wrong for this
     form of it: the provider fetches.)
 
-    A url in neither form — a `file:` URL, a bare word — is dropped, because a
-    source the Messages API cannot read is a 400 on every call that carries one.
-    So is a `data:` URL that names a type and carries no payload: there are no
-    bytes to read.  Both are *named* when they are dropped — one by its scheme,
-    the other by the type it claimed — for the reason the unrecognised part type
-    one function up is named: an attachment that vanishes without a word is the
-    failure this module cannot see from inside (SDD Appendix C).
+    A `data:` URL that names a type and carries no payload has no bytes to read
+    as a base64 source, so it is dropped — and *named*, by the type it claimed,
+    for the reason `content_parts` names everything it drops: an attachment
+    that vanishes without a word is the failure this module cannot see from
+    inside (SDD Appendix C).
     """
-    url = (raw or {}).get("url") if isinstance(raw, dict) else None
-    if not isinstance(url, str) or not url:
-        return None
     if url.startswith(("http://", "https://")):
-        return {"type": "url", "url": url}
-    if not url.startswith("data:"):
-        scheme, _, _ = url.partition(":")
-        logger.warning(
-            "anthropic: dropping an image from a %r source — it is neither a "
-            "`data:` URL nor an http(s) one, so the Messages API has no source "
-            "block to read it as, and the caller's attachment goes with it",
-            scheme,
-        )
-        return None
+        return {"source": {"type": "url", "url": url}}
     header, _, data = url.partition(",")
     media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
     if not data:
@@ -159,11 +111,61 @@ def _image_source(raw: Any) -> dict[str, Any] | None:
             media_type,
         )
         return None
-    return {"type": "base64", "media_type": media_type, "data": data}
+    return {"source": {"type": "base64", "media_type": media_type, "data": data}}
+
+
+#: This wire's part names, and the one part field that is its own: what an
+#: `image` block carries beside its type.
+_WIRE = WireParts(
+    server="anthropic", text="text", image="image", image_fields=_image_fields
+)
+
+
+def reasoning_blocks(
+    payload: dict[str, Any] | None, model: str
+) -> list[dict[str, Any]]:
+    """The thinking blocks this wire may replay from a message's opaque payload.
+
+    **Only for the model that produced them.**  A signed thinking block is
+    bound to its model; replaying one to another is a 400, so a conversation
+    moved with `model_switch` keeps its old blocks in the record and sends none
+    of them to the new model.  Empty `model` is the caller saying it does not
+    replay reasoning at all (this model did not ask for thinking).
+
+    Blocks are rebuilt from the fields this wire knows rather than passed
+    through, so an envelope from another build cannot smuggle a key into the
+    request; a block whose shape this build cannot send is named and dropped,
+    because a malformed block is a 400 as surely as a missing one.
+    """
+    if not payload or not model or payload.get("model") != model:
+        return []
+    blocks: list[dict[str, Any]] = []
+    for block in payload.get("blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        kind = block.get("type")
+        if kind == "thinking":
+            text = block.get("thinking")
+            signature = block.get("signature")
+            if isinstance(text, str) and isinstance(signature, str) and signature:
+                blocks.append(
+                    {"type": "thinking", "thinking": text, "signature": signature}
+                )
+                continue
+        elif kind == "redacted_thinking":
+            data = block.get("data")
+            if isinstance(data, str) and data:
+                blocks.append({"type": "redacted_thinking", "data": data})
+                continue
+        logger.warning(
+            "anthropic: dropping a reasoning block this build cannot replay (%r)",
+            kind,
+        )
+    return blocks
 
 
 def to_anthropic_messages(
-    messages: list[Message],
+    messages: list[Message], *, model: str = ""
 ) -> tuple[str, list[dict[str, Any]]]:
     """Convert neutral messages into `(system, messages)`.
 
@@ -176,6 +178,12 @@ def to_anthropic_messages(
     Same-role turns are merged into one.  That is what makes a batch of tool
     results followed by user text a single `user` turn instead of three, which
     strict endpoints require.
+
+    **`model` is what decides whether a turn's thinking blocks go back.**  The
+    API requires them returned unmodified beside the tool results when thinking
+    is on — without them the second call of every tool loop is a 400 — and it
+    rejects blocks signed by another model, so this replays exactly the blocks
+    of the model being called (`reasoning_blocks`).
     """
     system_parts: list[str] = []
     converted: list[dict[str, Any]] = []
@@ -190,35 +198,11 @@ def to_anthropic_messages(
 
     for message in messages:
         if message.role == "system":
-            # The system prompt is a string parameter here, and a system message
-            # carrying content parts is not a thing either API supports — so a
-            # list is taken for the text in it and nothing else.
-            #
-            # **Taken, and not dropped**: reading only `str` content meant a
-            # system turn carrying blocks contributed nothing at all, with no
-            # word anywhere — a prompt the caller wrote left the request
-            # (SDD Appendix C).  The blocks are built by the same converter the
-            # other roles use, so a `str` is one text block and a list is what
-            # it says it is; a block that is not text is dropped with a warning,
-            # because the API has no field to put it in.
-            blocks = to_anthropic_blocks(message.content)
-            text = "".join(
-                str(block.get("text") or "")
-                for block in blocks
-                if block.get("type") == "text"
-            )
-            other = [
-                str(block.get("type"))
-                for block in blocks
-                if block.get("type") != "text"
-            ]
-            if other:
-                logger.warning(
-                    "anthropic: a system turn carries %s, which the system "
-                    "prompt has no field for — the text beside it is kept and "
-                    "these are left out",
-                    ", ".join(other),
-                )
+            # The system prompt is a string parameter here, so a system turn's
+            # parts are taken for the text in them and the rest is named —
+            # `system_text` is the one rule both wires that hoist the prompt
+            # follow, and it says why the text is taken rather than dropped.
+            text = system_text(message.content, _WIRE, "system prompt")
             if text:
                 system_parts.append(text)
             continue
@@ -243,8 +227,19 @@ def to_anthropic_messages(
             continue
 
         if message.role == "assistant":
-            blocks = to_anthropic_blocks(message.content)
+            # **Thinking blocks first**, which is the order the API emitted them
+            # in and the order it requires them back in.
+            blocks = [
+                *reasoning_blocks(message.reasoning, model),
+                *to_anthropic_blocks(message.content),
+            ]
             for call in message.tool_calls:
+                # **A damaged call's original text has no place here.**  This
+                # wire's `input` is an object by protocol, so a call whose
+                # arguments were not one replays as `{}` — the regression the
+                # chat and Responses wires avoid by sending `raw_arguments`.
+                # A tool's error result is text on this wire too, which is the
+                # channel a refusal reaches the agent through.
                 blocks.append(
                     {
                         "type": "tool_use",
@@ -354,10 +349,29 @@ def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
     settings: ModelSettings,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
-    """The request body, containing only what the config asked for."""
-    system, converted = to_anthropic_messages(messages)
+    """The request body, containing only what the config asked for.
+
+    `tool_choice` names the one tool the call must use and `thinking` overrides
+    the model's configured value for this call; the forced-choice guard is
+    `server_common.forced_tool`.
+    """
+    if thinking and settings.reasoning:
+        settings = replace(settings, thinking=thinking)
+    if temperature is not None:
+        settings = replace(settings, temperature=temperature)
+    forced_tool(tools, tool_choice)
     max_tokens = settings.max_tokens or DEFAULT_MAX_TOKENS
+    thinking_block = thinking_parameter(settings, max_tokens)
+    # A model that did not ask for thinking is a model to which a signed block
+    # is not ours to send; the empty model makes `reasoning_blocks` drop them.
+    system, converted = to_anthropic_messages(
+        messages, model=settings.model if thinking_block is not None else ""
+    )
 
     request: dict[str, Any] = {
         "model": settings.model,
@@ -369,6 +383,8 @@ def build_request(
         request["system"] = system
     if tools:
         request["tools"] = to_anthropic_tools(tools)
+        if tool_choice:
+            request["tool_choice"] = {"type": "tool", "name": tool_choice}
 
     # Only what was configured: `None` means say nothing, not "use a default".
     #
@@ -393,9 +409,8 @@ def build_request(
         if value is not None
     }
 
-    thinking = thinking_parameter(settings, max_tokens)
-    if thinking is not None:
-        request["thinking"] = thinking
+    if thinking_block is not None:
+        request["thinking"] = thinking_block
         # A thinking budget must leave room for an answer, and sampling is what
         # this endpoint rejects alongside extended thinking — so it is dropped
         # where it is collected rather than sent and refused.
@@ -410,7 +425,50 @@ def build_request(
     return request
 
 
-def translate(event: Any) -> list[ProviderEvent]:
+class ThinkingBlocks:
+    """One stream's thinking blocks, assembled across its events.
+
+    **A thinking block cannot be built from one event.**  Its text arrives as
+    `thinking_delta`s and its signature arrives afterwards, in a
+    `signature_delta`, and the API accepts the block back only whole — text and
+    signature together, unmodified.  So the pieces are kept here, one entry per
+    content-block index, and the block is emitted at `content_block_stop`.
+
+    A block with no signature is not emitted: a gateway that speaks this wire
+    without signing its thinking cannot have its block replayed, and inventing
+    an unsigned one would be a 400 from the endpoints that check.  Those
+    gateways do not require the replay anyway, so dropping it is exactly the
+    old behaviour rather than a new loss.
+    """
+
+    def __init__(self) -> None:
+        self._text: dict[int, list[str]] = {}
+        self._signature: dict[int, list[str]] = {}
+
+    def open(self, index: int, block: Any) -> None:
+        """Start a block that `close` will finish."""
+        self._text[index] = [getattr(block, "thinking", "") or ""]
+        signature = getattr(block, "signature", "") or ""
+        self._signature[index] = [signature] if signature else []
+
+    def add_text(self, index: int, thinking: str) -> None:
+        self._text.setdefault(index, []).append(thinking)
+
+    def add_signature(self, index: int, signature: str) -> None:
+        self._signature.setdefault(index, []).append(signature)
+
+    def close(self, index: int) -> dict[str, Any] | None:
+        """The finished block, or None when this index is not a signed one."""
+        text = "".join(self._text.pop(index, []))
+        signature = "".join(self._signature.pop(index, []))
+        if not signature:
+            return None
+        return {"type": "thinking", "thinking": text, "signature": signature}
+
+
+def translate(
+    event: Any, reasoning: ThinkingBlocks | None = None
+) -> list[ProviderEvent]:
     """Turn one raw Anthropic stream event into provider events.
 
     Usage is split across two events and each contributes only its own half:
@@ -419,13 +477,30 @@ def translate(event: Any) -> list[ProviderEvent]:
     count the output — `message_start` already reports `output_tokens: 1` for
     the message it just opened — so each half is emitted as a partial `Usage`
     and the accumulator adds them correctly.
+
+    `reasoning` is the per-stream state that assembles thinking blocks
+    (`ThinkingBlocks`); without one — a caller translating a single event — the
+    readable `thinking` still streams and no opaque block is built, which is
+    the old behaviour rather than a silent reading of the wrong thing.
     """
     events: list[ProviderEvent] = []
     kind = getattr(event, "type", "")
 
     if kind == "content_block_start":
         block = getattr(event, "content_block", None)
-        if getattr(block, "type", "") == "tool_use":
+        index = int(getattr(event, "index", 0) or 0)
+        block_type = getattr(block, "type", "")
+        if block_type == "thinking" and reasoning is not None:
+            reasoning.open(index, block)
+        elif block_type == "redacted_thinking":
+            # Complete at start: there is no text and no signature, only the
+            # provider's encrypted blob, which goes back exactly as it came.
+            data = getattr(block, "data", "") or ""
+            if data:
+                events.append(
+                    Chunk(reasoning=({"type": "redacted_thinking", "data": data},))
+                )
+        if block_type == "tool_use":
             # The id and name arrive here; the arguments stream afterwards.
             events.append(
                 Chunk(
@@ -452,7 +527,15 @@ def translate(event: Any) -> list[ProviderEvent]:
             # answer — the two are displayed differently and must not mix.
             thinking = getattr(delta, "thinking", "") or ""
             if thinking:
+                if reasoning is not None:
+                    reasoning.add_text(index, thinking)
                 events.append(Chunk(thinking=thinking))
+        elif delta_type == "signature_delta":
+            # The signature that makes the block replayable; it belongs to the
+            # block, not to the display, so it produces no event of its own.
+            signature = getattr(delta, "signature", "") or ""
+            if signature and reasoning is not None:
+                reasoning.add_signature(index, signature)
         elif delta_type == "input_json_delta":
             events.append(
                 Chunk(
@@ -464,6 +547,12 @@ def translate(event: Any) -> list[ProviderEvent]:
                     )
                 )
             )
+
+    elif kind == "content_block_stop":
+        if reasoning is not None:
+            block = reasoning.close(int(getattr(event, "index", 0) or 0))
+            if block is not None:
+                events.append(Chunk(reasoning=(block,)))
 
     elif kind == "message_start":
         message = getattr(event, "message", None)
@@ -562,12 +651,13 @@ def _make_streamer() -> Streamer:
     """
 
     def make_translator() -> Translate:
-        """One stream's translation, carrying its running output total."""
+        """One stream's translation, carrying its output total and its blocks."""
         produced = 0
+        reasoning = ThinkingBlocks()
 
         def one(event: Any) -> Iterable[ProviderEvent]:
             nonlocal produced
-            for out in translate(event):
+            for out in translate(event, reasoning):
                 # `isinstance`, because one raw event produces *both* kinds:
                 # `message_delta` yields a usage chunk and a `Finish`, and the
                 # second has no `usage` at all — reading it on the union is an

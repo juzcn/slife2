@@ -16,22 +16,22 @@ the same sense:
 * **`TurnFinished`** carries the authoritative answer and the turn's bill.  The
   window reconciles the first with what it streamed and puts the second in the
   status bar; a watched screen closes its turn with the same text and has no bar.
-* **`ToolsCounted`** is the model's list against the catalogue's size, which is
-  the same kind of fact: the window's status bar shows it, and a watched screen
-  has no bar to put it in.  Drawing it would put a line about the tool set in
-  somebody's transcript.
+* **`ToolsCounted`** is the model's list against the catalogue's size, and
+  **`UsageReported`** is how full the context is after one model call.  Both are
+  the window's status bar; a watched screen has no bar, and drawing either would
+  put a fact about the window's chrome in somebody's transcript.
 
-`False` is the whole of what says "this one is yours"; anything left unmatched
-is a vocabulary this build was not taught, and `assert_never` turns that into a
-static error at the next variant rather than a line nobody draws.
+An event left unmatched is a vocabulary this build was not taught, and
+`assert_never` turns that into a static error at the next variant rather than a
+line nobody draws.
 """
 
 from __future__ import annotations
 
 from typing import assert_never
 
+from slife2.libs.harness import notes
 from slife2.libs.turn.events import (
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ThinkingDelta,
@@ -41,41 +41,56 @@ from slife2.libs.turn.events import (
     ToolsCounted,
     TurnEvent,
     TurnFinished,
+    UsageReported,
 )
-from slife2.libs.turn.tools import is_harness
-from slife2.tui import notes
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    FUNC_TOOL_UNLOAD,
+    is_harness,
+    is_harness_call,
+)
 from slife2.tui.widgets import ChatView
 
 
-def draw(chat: ChatView, event: TurnEvent) -> bool:
-    """Draw the display half of *event*; answer whether it was drawn.
+def draw(chat: ChatView, event: TurnEvent) -> None:
+    """Draw the display half of *event*; the window's own events draw nothing.
 
-    `False` means the event belongs to the view that owns the turn — see the
-    module docstring.  A caller that ignores the answer is a caller that has
-    decided it does not own any of them, which is exactly what a watcher is.
+    The three events that belong to the view running the turn are filtered by
+    the callers that own them — the window handles them before reaching here,
+    and the watcher does not ask for them — so an event that arrives anyway is
+    a no-op rather than a second answer.
     """
     match event:
-        case ToolCallStarted(name=name) | ToolCallFinished(name=name) if is_harness(
-            name
+        case ToolCallStarted(call_id=call_id, name=name, arguments=arguments) if (
+            is_harness(name) and is_harness_call(call_id)
         ):
-            # **The harness's own pairs are not tool panels.**  `_check_new_input`
-            # is drawn as the cut-in its `MessageCutIn` event carries, and
-            # `_func_tool_unload` is the budget talking to itself; a panel for
-            # either would be a second line for a call the model did not make.
-            # A rebuilt transcript has always skipped them (`restore._draw_answer`);
-            # this is the live half of the same rule.
-            return True
+            # **The machinery's own pair is the note on its answer.**  The call
+            # id is what tells the two apart: a model's own call to any harness tool —
+            # `_check_new_input` included — falls through to the ordinary panel
+            # below.
+            return
+        case ToolCallFinished(call_id=call_id, name=name, result_preview=text) if (
+            is_harness(name) and is_harness_call(call_id)
+        ):
+            # The machinery's own sentence is a note — the compaction's count,
+            # the trim's five lists as the names that left.  `_check_new_input`
+            # is the one finish that adds nothing: its answer is the delivered
+            # message, and the `MessageCutIn` note is that message's line.
+            if name != CHECK_NEW_INPUT and text:
+                chat.add_note(
+                    notes.unloaded(text) if name == FUNC_TOOL_UNLOAD else text
+                )
+            return
         case MessageCutIn(text=text, channel=channel):
-            # A message that jumped the queue, drawn inside the turn that took
-            # it: the line belongs here and the turn stays open.
-            chat.add_cut_in(text, channel=channel)
-        case ContextChosen(kept=kept, recalled=recalled, rerank=rerank):
-            # The discriminator's decision, which is the only sight of it: the
-            # model call it took is one the conversation never shows.  The
-            # rerank status rides the same event because it is the same
-            # decision's last stage; the view says it once per change.
-            chat.add_note(notes.kept(kept, recalled))
-            chat.note_rerank(rerank)
+            # **A cut-in is a harness note like every other pair's answer.**  The
+            # delivered words are the `_check_new_input` tool's own answer — from
+            # any channel: a person, a peer, a subagent — so the line is the note
+            # rather than a bubble; the channel stays in the record and in the
+            # event (the receipt's reader is the window that submitted it).  It
+            # rides the note so a channel's marker — the model's address, not
+            # the person's words — is taken off exactly where the bubble takes
+            # it off.
+            chat.add_note(text, new_call=True, channel=channel)
         case TextDelta(text=text):
             chat.append_text(text)
         case ThinkingDelta(text=text):
@@ -102,8 +117,9 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
             elapsed_ms=elapsed,
         ):
             chat.add_tool_end(call_id, ok, preview_text, chars, elapsed)
-        case ToolApprovalRequested() | ToolsCounted() | TurnFinished():
-            return False
+        case (
+            ToolApprovalRequested() | ToolsCounted() | UsageReported() | TurnFinished()
+        ):
+            return
         case _:
             assert_never(event)
-    return True

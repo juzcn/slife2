@@ -22,10 +22,14 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.plugin import protocol as protocol_module
-from slife2.libs.turn.watch import Snapshot, TurnStarted
+from slife2.libs.plugin.vocabulary import ATTACH, Handover, encode
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.libs.turn.watch import encode as encode_watch
-from slife2.plugins.tui.server import ATTACH, Handover, encode
-from slife2.tui.client import MCPAgentClient, MCPWindowClient
+from slife2.tui.client import (
+    MCPAgentClient,
+    MCPAgentTaskClient,
+    MCPWindowClient,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -50,6 +54,8 @@ class FakeTransport:
         self.subagents_data: Any = {"subagents": []}
         #: What `model_list` answers with, as the server would.
         self.models_data: Any = {"models": []}
+        #: What `agent_task_list` answers with, as the server would.
+        self.tasks_data: Any = {"tasks": []}
         #: Watch frames the fake's `watch` call reports, already encoded.
         self.watch_items: list[str] = []
 
@@ -81,6 +87,8 @@ class FakeTransport:
             return SimpleNamespace(data=copy.deepcopy(self.subagents_data))
         if name == "model_list":
             return SimpleNamespace(data=copy.deepcopy(self.models_data))
+        if name == "agent_task_list":
+            return SimpleNamespace(data=copy.deepcopy(self.tasks_data))
         if name == "watch":
             # What a held-open call's stream does: report, then return when the
             # server closes the conversation.
@@ -159,6 +167,28 @@ async def test_a_payload_says_nothing_it_does_not_have_to(monkeypatch) -> None:
     # The channel is not optional: this client exists to serve one window, and
     # that is a fact about the caller rather than something it may lack.
     assert arguments["channel"] == "tui"
+
+
+@pytest.mark.asyncio
+async def test_a_turn_streams_with_no_deadline(monkeypatch) -> None:
+    """A turn's events arrive as progress, and its length is its own business.
+
+    Passing a handler is what makes the SDK attach a progress token; without
+    one the server's `report_progress` is a silent no-op and the window shows
+    nothing until the answer lands.  And the call has no clock, because a turn
+    lasts as long as the model takes — not as long as a management ask is
+    allowed to (`_stream_call`).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    await client.run_turn("hi", lambda event: None)
+
+    (options,) = transport.options
+    assert options["progress_handler"] is not None
+    assert options["timeout"] is None
 
 
 @pytest.mark.asyncio
@@ -318,6 +348,83 @@ async def test_a_transcript_without_turns_is_not_an_empty_history(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_a_transcript_carries_the_plan_with_the_turns(monkeypatch) -> None:
+    """One opening read, two fields: the window draws the history and the plan.
+
+    The plan is validated through its own module, so a list this build would not
+    have written is refused rather than drawn as a plan it did.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def with_plan(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(
+                data={
+                    "turns": [],
+                    "plan": [{"text": "read the config", "status": "active"}],
+                }
+            )
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", with_plan)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    conversation = await client.transcript()
+
+    assert conversation.turns == []
+    assert conversation.plan == [{"text": "read the config", "status": "active"}]
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_without_a_plan_is_not_an_empty_plan(monkeypatch) -> None:
+    """A missing `plan` is damage: the server writes one even when it is empty."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def no_plan(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(data={"turns": []})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", no_plan)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError) as raised:
+        await client.transcript()
+
+    assert "plan" in str(raised.value)
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_the_build_would_not_have_written_is_refused(monkeypatch) -> None:
+    """A status outside the four is a plan this client will not draw."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def odd_plan(name, arguments, **kwargs):
+        if name == "transcript":
+            return SimpleNamespace(
+                data={
+                    "turns": [],
+                    "plan": [{"text": "one", "status": "doing"}],
+                }
+            )
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", odd_plan)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError, match="plan"):
+        await client.transcript()
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_switch_answer_is_not_a_successful_switch(
     monkeypatch,
 ) -> None:
@@ -351,6 +458,71 @@ async def test_an_unreadable_switch_answer_is_not_a_successful_switch(
 
 
 @pytest.mark.asyncio
+async def test_an_unreadable_approval_answer_is_not_a_taken_answer(monkeypatch) -> None:
+    """The empty sentence is a real answer, so an unreadable shape is refused.
+
+    `""` means a waiting turn took the answer — a race, not an error.  A
+    payload without a readable `text` read as that empty would present a
+    different build's answer as "the turn moved on", and a non-dict raised
+    `AttributeError` on the way there, reported as a delivery failure.  Both
+    refuse instead, quoting the payload, and the connection stays: the server
+    answered, and it is the answer this build cannot read (SDD Appendix C,
+    invariant 11).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    for payload in ({"answered": True}, ["text"], None):
+
+        async def odd_shape(name, arguments, _payload=payload, **kwargs):
+            if name == "answer_approval":
+                return SimpleNamespace(data=_payload)
+            return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+        monkeypatch.setattr(transport, "call_tool", odd_shape)
+        with pytest.raises(ConnectionError) as raised:
+            await client.answer_approval("call-1", True)
+        assert "answer the approval" in str(raised.value)
+        assert repr(payload) in str(raised.value), (
+            "the answer is quoted, not summarised"
+        )
+        assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_the_approval_answer_keeps_the_servers_sentence(monkeypatch) -> None:
+    """Both outcomes are the server's own: the empty when a turn took it, the
+    sentence when nothing was waiting — read verbatim, not coerced."""
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    async def taken(name, arguments, **kwargs):
+        if name == "answer_approval":
+            return SimpleNamespace(data={"answered": True, "text": ""})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", taken)
+    assert await client.answer_approval("call-1", True) == ""
+
+    async def overtaken(name, arguments, **kwargs):
+        if name == "answer_approval":
+            return SimpleNamespace(
+                data={"answered": False, "text": "Nothing is waiting for an answer"}
+            )
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", overtaken)
+    assert (
+        await client.answer_approval("call-1", False)
+        == "Nothing is waiting for an answer"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     monkeypatch,
 ) -> None:
@@ -359,7 +531,7 @@ async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     All three are ordinary asks of our own daemon, and each used to spell the
     same `try`/`except` out for itself — three copies of one rule, each a place
     the next caller could get it subtly wrong.  So the rule is pinned through one
-    of them (`_call_tool`): a `ToolError` is the server *answering* and the link
+    of them (`_call`): a `ToolError` is the server *answering* and the link
     stays; anything else is the transport itself, and dropping the client is what
     lets the app's lazy retry reconnect instead of believing it is connected to a
     server nothing is talking to.
@@ -385,6 +557,42 @@ async def test_a_management_call_drops_the_link_only_when_the_transport_does(
     monkeypatch.setattr(transport, "call_tool", die)
     with pytest.raises(ConnectionError, match="socket"):
         await client.transcript()
+    assert not client.connected, "the transport is gone; so is the client"
+
+
+@pytest.mark.asyncio
+async def test_a_streaming_call_drops_the_link_only_when_the_transport_does(
+    monkeypatch,
+) -> None:
+    """The same rule on a held-open call.
+
+    A stream has no answer to keep the link for, but a `ToolError` is still the
+    server refusing *on a live connection* — reconnecting would only repeat the
+    refusal — while anything else means the stream's own transport is gone.
+    Pinned through the agent's watch, which is the shape every streaming caller
+    now shares (`_stream_call` → `_call`).
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    async def refuse(name, arguments, **kwargs):
+        if name == "watch":
+            raise ToolError("that conversation is not watchable")
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", refuse)
+    with pytest.raises(ToolError, match="not watchable"):
+        await client.watch(lambda item: None)
+    assert client.connected, "the server answered; the connection stays"
+
+    async def die(name, arguments, **kwargs):
+        raise ConnectionError("the socket went away")
+
+    monkeypatch.setattr(transport, "call_tool", die)
+    with pytest.raises(ConnectionError, match="socket"):
+        await client.watch(lambda item: None)
     assert not client.connected, "the transport is gone; so is the client"
 
 
@@ -443,7 +651,7 @@ async def test_the_subagent_list_is_read_for_the_window_s_own_agent(
     install(monkeypatch, transport)
     transport.subagents_data = {
         "subagents": [
-            {"name": "scout", "model": "", "role": "subagent", "fork": False},
+            {"name": "scout", "model": "", "role": "subagent"},
         ]
     }
     client = MCPAgentClient("http://test/mcp", agent="jack")
@@ -452,7 +660,7 @@ async def test_the_subagent_list_is_read_for_the_window_s_own_agent(
     found = await client.subagents()
 
     assert sent(transport, "subagents") == [{"agent": "jack"}]
-    assert found == [{"name": "scout", "model": "", "role": "subagent", "fork": False}]
+    assert found == [{"name": "scout", "model": "", "role": "subagent"}]
 
 
 @pytest.mark.asyncio
@@ -653,3 +861,73 @@ async def test_an_inbox_that_is_not_ours_is_refused(monkeypatch) -> None:
 
     with pytest.raises(ConnectionError, match="not slife2-tui"):
         await client.connect()
+
+
+@pytest.mark.asyncio
+async def test_the_task_list_is_read_from_the_task_server(monkeypatch) -> None:
+    """The picker's list is the agent-task server's, with the caller's identity.
+
+    The server cannot guess whose tasks a shared process is being asked about,
+    so the conversation id rides in `_meta`; the list itself is the server's
+    rows, passed through to the picker.
+    """
+    transport = FakeTransport(tools=("agent_task_list",))
+    transport.tasks_data = {"tasks": [{"name": "research", "status": "running"}]}
+    install(monkeypatch, transport)
+    client = MCPAgentTaskClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    rows = await client.tasks()
+
+    assert rows == [{"name": "research", "status": "running"}]
+    (arguments,) = sent(transport, "agent_task_list")
+    assert arguments == {}
+    assert transport.options[-1]["meta"]["slife2/client"]["agent"] == "jack"
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_task_watch_streams_its_brief_and_has_no_deadline(monkeypatch) -> None:
+    """The watch call is the screen's lifetime, so it is the one with no clock.
+
+    The progress handler is what makes the SDK attach a token; without one the
+    server's `report_progress` is a silent no-op and the screen would be handed
+    nothing.
+    """
+    transport = FakeTransport(tools=("agent_task_list", "watch"))
+    transport.watch_items = [
+        encode_watch(Snapshot([])),
+        encode_watch(TaskBrief("research", "find it", "running")),
+        encode_watch(Closed("the task finished")),
+    ]
+    install(monkeypatch, transport)
+    client = MCPAgentTaskClient("http://test/mcp", agent="jack", name="research")
+    seen: list[Any] = []
+
+    await client.connect()
+    await client.watch(seen.append)
+
+    assert seen == [
+        Snapshot([]),
+        TaskBrief("research", "find it", "running"),
+        Closed("the task finished"),
+    ]
+    (arguments,) = sent(transport, "watch")
+    assert arguments == {"name": "research"}
+    options = transport.options[-1]
+    assert options["timeout"] is None
+    assert callable(options["progress_handler"])
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_task_list_this_build_cannot_read_raises(monkeypatch) -> None:
+    """A row with no name is damage, not an empty list."""
+    transport = FakeTransport(tools=("agent_task_list",))
+    transport.tasks_data = {"tasks": [{"status": "running"}]}
+    install(monkeypatch, transport)
+    client = MCPAgentTaskClient("http://test/mcp", agent="jack")
+
+    await client.connect()
+    with pytest.raises(ConnectionError, match="agent-task server did not return"):
+        await client.tasks()

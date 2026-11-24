@@ -11,28 +11,33 @@ report anything).
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import logging
 import os
 import sys
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
 
+from slife2 import __version__
 from slife2.libs.host import paths
-from slife2.libs.host.config import ServerSettings
+from slife2.libs.host.config import ConfigError, ServerSettings, default_config
 from slife2.libs.host.runtime import ServerRecord, read_record, write_record
 from slife2.libs.plugin import protocol as protocol_module
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     close_server,
+    describe,
     house_server,
     identifies,
     open_server,
@@ -42,11 +47,29 @@ from slife2.libs.plugin.protocol import (
 pytestmark = pytest.mark.unit
 
 
+def test_describe_is_the_trace_spelling() -> None:
+    """**One sentence for one conversation**, in a log trace and in a message
+    subject.  The two were copies, and a change to either could name one
+    conversation two ways."""
+    from slife2.helpers import logcontext
+
+    for conversation in (("jack", ""), ("jack", "echo")):
+        assert describe(conversation) == logcontext.describe(*conversation)
+
+
 class CountingClient:
     """A client that records whether the tool list was asked for."""
 
-    def __init__(self, *, name: str | None, tools: tuple[str, ...] = ()) -> None:
-        self.server_info = SimpleNamespace(name=name) if name else None
+    def __init__(
+        self,
+        *,
+        name: str | None,
+        version: str | None = None,
+        tools: tuple[str, ...] = (),
+    ) -> None:
+        #: `version=None` is a server whose identity carries no build — the
+        #: same unreadable case a name-less identity is, so the name decides.
+        self.server_info = SimpleNamespace(name=name, version=version) if name else None
         self.tools = list(tools)
         self.list_calls = 0
 
@@ -79,7 +102,9 @@ async def test_a_matching_name_is_enough_and_costs_no_round_trip() -> None:
 
     The tool list is deliberately empty — if the name decides, a client that
     exposes nothing still identifies, and `list_tools` is never called.  That
-    `list_calls == 0` is the point of the test, not a detail.
+    `list_calls == 0` is the point of the test, not a detail.  An identity with
+    no version is this test's case on purpose: the build is compared only when
+    the server reports one.
     """
     client = CountingClient(name="slife2-context")
     assert await identifies(client, "slife2-context", fallback_tool="remember")
@@ -97,6 +122,24 @@ async def test_a_server_calling_itself_something_else_is_not_ours() -> None:
     client = CountingClient(name="someone-else", tools=("remember",))
     assert not await identifies(client, "slife2-context", fallback_tool="remember")
     assert client.list_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_server_from_another_build_is_not_ours() -> None:
+    """The name is half the identity; the build is the other half.
+
+    A daemon left by a previous build advertises the same name and answers MCP
+    correctly, and its old tool signatures then fail every turn.  The handshake
+    carries the build (`house_server` passes this package's version), and a
+    mismatch is the same answer as a foreign name — without asking for the tool
+    list, which would only say what the wrong build happens to expose.
+    """
+    client = CountingClient(name="slife2-context", version="0.3.0")
+    assert not await identifies(client, "slife2-context", fallback_tool="remember")
+    assert client.list_calls == 0
+
+    same_build = CountingClient(name="slife2-context", version=__version__)
+    assert await identifies(same_build, "slife2-context", fallback_tool="remember")
 
 
 @pytest.mark.asyncio
@@ -118,10 +161,14 @@ async def test_a_real_server_reports_the_name_it_was_built_with() -> None:
 
     `identifies` reads `Client.server_info`, which is populated from the
     handshake the client performs as part of connecting.  A fake can be told to
-    report a name; only a real server shows that one is actually there.
+    report a name; only a real server shows that one is actually there — and
+    that the version is this build's rather than FastMCP's own, which would be
+    the same for every build of this system and compare equal across them.
     """
     mcp = house_server("slife2-context", instructions="Keep what was said.")
     async with Client(mcp) as client:
+        assert client.server_info is not None
+        assert client.server_info.version == __version__
         assert await identifies(client, "slife2-context", fallback_tool="remember")
         assert not await identifies(client, "slife2-agent", fallback_tool="remember")
 
@@ -298,10 +345,43 @@ async def test_a_result_with_no_structured_content_is_read_from_its_text() -> No
 
     assert result.data is None, "the premise: nothing but the text block has it"
     assert tool_payload(result) == {"tools": []}
-    # The fallback reads *JSON* and does not invent a payload: prose is not one,
-    # and the empty mapping is how a caller is told the shape is wrong.
+    # The reader reads *JSON* and does not invent a payload: prose is not one,
+    # and the refusal is how a caller is told the shape is wrong.
     prose = SimpleNamespace(data=None, content=[SimpleNamespace(text="all fine")])
-    assert tool_payload(prose) == {}
+    with pytest.raises(UnreadableAnswer, match="answer with a mapping"):
+        tool_payload(prose)
+
+
+def test_an_answer_that_is_not_a_mapping_is_refused() -> None:
+    """**The empty mapping is not a stand-in for a shape this build cannot read.**
+
+    Prose, a scalar, a truncated object and nothing at all are different
+    failures, and each is the same fact to the reader: it has no mapping to
+    hand on.  Reading any of them as `{}` would make a build mismatch look like
+    an honest empty answer, the confident negative SDD Appendix C forbids.
+    """
+    broken = SimpleNamespace(data=None, content=[SimpleNamespace(text='{"tools": [')])
+    listed = SimpleNamespace(data=None, content=[SimpleNamespace(text='["a"]')])
+    scalar = SimpleNamespace(data="just words", content=[])
+    empty = SimpleNamespace(data=None, content=[])
+
+    for result in (broken, listed, scalar, empty):
+        with pytest.raises(UnreadableAnswer, match="answer with a mapping"):
+            tool_payload(result)
+
+
+def test_the_job_reader_keeps_prose_as_an_empty_mapping() -> None:
+    """The one lenient reader, for the job runtime's direct `call`.
+
+    A job may reach a tool that answers in prose (`skill_use` is the shape), so
+    its reader asks for the empty mapping and reads the text blocks itself.
+    Every other hop uses `tool_payload`, which refuses.
+    """
+    prose = SimpleNamespace(data=None, content=[SimpleNamespace(text="all fine")])
+    assert protocol_module.tool_payload_or_empty(prose) == {}
+    assert protocol_module.tool_payload_or_empty(
+        SimpleNamespace(data={"text": "done"}, content=[])
+    ) == {"text": "done"}
 
 
 # --- connecting: the rule every client follows -------------------------------
@@ -310,8 +390,14 @@ async def test_a_result_with_no_structured_content_is_read_from_its_text() -> No
 class StubTransport:
     """The MCP client `open_server` would have built."""
 
-    def __init__(self, *, name: str | None = None, tools: tuple[str, ...] = ()) -> None:
-        self.server_info = SimpleNamespace(name=name) if name else None
+    def __init__(
+        self,
+        *,
+        name: str | None = None,
+        version: str | None = None,
+        tools: tuple[str, ...] = (),
+    ) -> None:
+        self.server_info = SimpleNamespace(name=name, version=version) if name else None
         self.tools = list(tools)
         self.closed = False
 
@@ -382,9 +468,30 @@ async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
 
 
 @pytest.mark.asyncio
+async def test_a_server_from_another_build_is_refused_with_the_remedy(
+    monkeypatch,
+) -> None:
+    """The refusal says *which* build answered and what to do about it.
+
+    Reporting this as "not slife2-context" would be false — it is that server,
+    from another build — and would send the reader looking for a stranger on
+    the port instead of running the one command that replaces the daemon.
+    """
+    transport = StubTransport(name="slife2-context", version="0.3.0")
+    stub(monkeypatch, transport)
+
+    with pytest.raises(
+        ConnectionError, match=r"build 0\.3\.0, not this build .*`slife2 down`"
+    ):
+        await open_server("http://test/mcp", name="slife2-context")
+
+    assert transport.closed, "a client we are not keeping has to be released"
+
+
+@pytest.mark.asyncio
 async def test_a_server_we_recognise_is_handed_back_still_open(monkeypatch) -> None:
     """The other half: what comes back is the caller's to keep and to close."""
-    transport = StubTransport(name="slife2-context")
+    transport = StubTransport(name="slife2-context", version=__version__)
     stub(monkeypatch, transport)
 
     client = await open_server("http://test/mcp", name="slife2-context")
@@ -533,6 +640,46 @@ async def test_a_home_spelled_on_another_platform_is_refused(
     assert paths.Path(after.data) == mine, "the refusal is this call's, not a wedge"
 
 
+# --- the turn a call belongs to ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_peer_call_carries_the_ambient_turn_and_the_far_side_logs_it() -> None:
+    """**The token is how one turn's lines are joined across processes.**
+
+    The conversation is in the arguments; the turn is not — one process serves
+    every turn of every conversation — so it travels in `_meta`
+    (`slife2.libs.plugin.audience.TURN`), and the receiving `TraceMiddleware`
+    puts it on every line it writes.  Driven through the real `Peer` and the
+    real middleware, so the test proves both halves of the hop rather than a
+    stub agreeing with this end.
+    """
+    from slife2.helpers import logcontext
+    from slife2.libs.plugin.audience import request_meta, turn_of
+    from slife2.libs.plugin.protocol import Peer
+
+    server = house_server("slife2-turn-test")
+
+    @server.tool
+    async def turn_seen(
+        ctx: Context, agent: str = "", subagent: str = ""
+    ) -> dict[str, Any]:
+        return {
+            "carried": turn_of(request_meta(ctx)),
+            "logged": logcontext.current_turn(),
+        }
+
+    async with Peer(server) as client:
+        with logcontext.turning("t0k"):
+            during = await client.call_tool("turn_seen", {"agent": "jack"})
+        after = await client.call_tool("turn_seen", {"agent": "jack"})
+
+    assert during.data == {"carried": "t0k", "logged": "t0k"}
+    assert after.data == {"carried": "", "logged": ""}, (
+        "a call made outside a turn says nothing about one"
+    )
+
+
 # --- the record a server leaves behind ---------------------------------------
 
 #: The address the tests below serve on.  Nothing is bound on it: `serve` writes
@@ -582,6 +729,30 @@ def test_a_second_process_leaves_the_running_servers_record_alone() -> None:
 
     # `RefusingMCP.run` raises, so returning is the proof the newcomer never
     # tried to bind: a live owner means that process is serving, not this one.
+    serve_once()
+
+    assert read_record(URL) == live, "the running server's record is not ours"
+
+
+def test_a_token_that_cannot_be_read_now_is_not_a_recycled_pid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**"Could not prove" is not "not ours"** on the record-claiming side.
+
+    `same_process` answers False for an unreadable token on purpose, because
+    the question there is "may I signal it?" and leaving it alone is safe.  The
+    question here is "may I overwrite its record?", and the safe answer is the
+    opposite: treating an unreadable token as a mismatch let a second start
+    overwrite, then delete, a live daemon's record — leaving the daemon running
+    with nothing that could find or stop it.
+    """
+    live = ServerRecord.now(
+        name="slife2-agent", url=URL, pid=os.getpid(), config="", version=""
+    )
+    assert live.start_token, "the platform this runs on has no start token to test"
+    write_record(live)
+    monkeypatch.setattr(protocol_module, "process_start_token", lambda _pid: None)
+
     serve_once()
 
     assert read_record(URL) == live, "the running server's record is not ours"
@@ -839,6 +1010,117 @@ def test_a_server_that_never_served_takes_its_own_record_back() -> None:
     assert read_record(URL) is None
 
 
+def test_a_server_accepts_a_path_override() -> None:
+    """The parent pins the path with the host and port; the parser has to read
+    it, or the child binds the file's path while the launcher probes its own."""
+    args = protocol_module.parse_serve_args(["--path", "/custom"], "slife2-agent")
+    assert args.path == "/custom"
+
+
+def test_serve_refuses_a_host_beyond_loopback() -> None:
+    """**The bind is the last place the boundary can be held.**
+
+    The config field is refused at load, but `--host` overrides it after the
+    load — so `serve` itself refuses a non-loopback address, before it writes a
+    record or binds: every server here is unauthenticated, and a bind on
+    `0.0.0.0` would let the network call its tools with no credential.
+    """
+    with pytest.raises(ConfigError, match="loopback"):
+        protocol_module.serve(
+            RefusingMCP(),
+            ServerSettings(port=24000),
+            SimpleNamespace(host="0.0.0.0", port=None),
+            name="slife2-agent",
+        )
+
+    assert read_record("http://0.0.0.0:24000/mcp") is None, (
+        "the refusal is before the record, not after the bind"
+    )
+
+
+def test_a_hand_started_server_refuses_a_host_beyond_loopback(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--host 0.0.0.0` is a configuration answer, not a bind.
+
+    `serve_plugin` is the one main every server shares, so the refusal is said
+    here once: a sentence on stderr and exit 2, the same shape as a missing
+    config — and before the start-up line, which must not say "serving" about
+    a server that refused to start.
+    """
+    monkeypatch.setattr(
+        protocol_module, "find_config_path", lambda: Path("slife2.yaml")
+    )
+    monkeypatch.setattr(protocol_module, "load", default_config)
+    # The subject is the refusal, not the logging setup — and installing a
+    # logging configuration over the test process is what `_root_handler`
+    # exists to avoid.
+    monkeypatch.setattr(protocol_module, "configure_logging", lambda: None)
+
+    code = protocol_module.serve_plugin(
+        ["--host", "0.0.0.0"],
+        server_name="slife2-agent",
+        config_key="agent",
+        build=lambda _config: house_server("slife2-agent"),
+        logger=logging.getLogger("slife2-test"),
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "loopback" in err and "0.0.0.0" in err
+    assert "serving" not in err, "a refusal must not log a start-up line"
+
+
+#: The three calls a hand-rolled `main` makes — the scaffold's own steps.
+_START_CALLS = frozenset({"parse_serve_args", "configure_logging", "serve"})
+
+
+def _start_call_names(tree: ast.Module) -> tuple[set[str], set[str]]:
+    """The names under which this file can reach the scaffold's three steps.
+
+    Returns the **bare** names (the three, plus any alias a
+    `from ...protocol import serve as s` bound) and the **module** names an
+    attribute call may spell (`protocol`, `p`, or the full dotted path after
+    `import slife2.libs.plugin.protocol`).  A method on another object is
+    neither, which is the distinction the gate needs.
+    """
+    bare = set(_START_CALLS)
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "slife2.libs.plugin.protocol"
+        ):
+            for alias in node.names:
+                if alias.name in _START_CALLS:
+                    bare.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "slife2.libs.plugin.protocol":
+                    # `import a.b.c` binds `a`; `import a.b.c as p` binds `p`.
+                    modules.add(alias.asname or alias.name.split(".")[0])
+                    if alias.asname is None:
+                        modules.add(alias.name)
+    return bare, modules
+
+
+def _start_call(node: ast.Call, bare: set[str], modules: set[str]) -> str:
+    """The scaffold call *node* names, or `""` when it is some other `serve`.
+
+    A bare name is the hand-rolled `main`'s shape; an attribute call is the
+    scaffold only through the module this file imported it from.  Everything
+    else named `serve` is somebody's method, which is not this gate's business.
+    """
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id if func.id in bare else ""
+    if not isinstance(func, ast.Attribute) or func.attr not in _START_CALLS:
+        return ""
+    if isinstance(func.value, ast.Name):
+        return func.attr if func.value.id in modules else ""
+    return func.attr if ast.unparse(func.value) in modules else ""
+
+
 def test_no_server_starts_itself() -> None:
     """**The gate: `serve_plugin` is the only way a server in this system starts.**
 
@@ -851,10 +1133,17 @@ def test_no_server_starts_itself() -> None:
     the count of *shapes* was one, held together by nothing.
 
     What this refuses is the next copy.  The three names below are the ones a
-    hand-rolled `main` needs and nothing else in the tree has any use for, so a
-    plugin module that reaches for one is a server that has started spelling the
-    eleven lines out again.  Scanning imports would not do: the copy that
-    existed imported exactly these and the test that would have caught it did not.
+    hand-rolled `main` needs, so a plugin module that reaches for one **by its
+    own name** is a server that has started spelling the eleven lines out
+    again.  Scanning imports would not do: the copy that existed imported
+    exactly these and the test that would have caught it did not.
+
+    **A method that happens to share the name is not this call.**  The file
+    tunnel runs a second uvicorn listener, and `uvicorn.Server.serve` is a
+    method on that object rather than the scaffold's `serve` — so an attribute
+    call is read as the copy only when its receiver is the protocol module
+    (bare calls, the shape the two hand-rolled servers had, are always the
+    copy).
 
     **The one exemption is `protocol.py` itself**, which is where the single
     implementation lives — and the three model backends, which go through
@@ -862,22 +1151,18 @@ def test_no_server_starts_itself() -> None:
     same function and not a second copy of it, which is why it names none of
     these either.
     """
-    import ast
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[3]
     offenders: list[str] = []
     for path in sorted((root / "slife2" / "plugins").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        bare, modules = _start_call_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            name = (
-                node.func.id
-                if isinstance(node.func, ast.Name)
-                else getattr(node.func, "attr", "")
-            )
-            if name in ("parse_serve_args", "configure_logging", "serve"):
+            name = _start_call(node, bare, modules)
+            if name:
                 offenders.append(f"{path.relative_to(root)}:{node.lineno} calls {name}")
 
     assert not offenders, (

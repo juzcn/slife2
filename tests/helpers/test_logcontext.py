@@ -54,6 +54,55 @@ def test_the_filter_marks_only_the_records_inside_a_call() -> None:
     assert inside.slife_trace == " [jack/echo]"
 
 
+def test_the_filter_prints_the_turn_beside_the_conversation() -> None:
+    """The one value every process's lines for one turn share.
+
+    The conversation is not enough: two turns of one conversation run in
+    different processes (an agent and its task), and two homes' `jack` are one
+    name.  The token is what a reader greps to read one turn across the daemon
+    logs.
+    """
+
+    def record() -> logging.LogRecord:
+        return logging.LogRecord("x", logging.INFO, __file__, 1, "hello", None, None)
+
+    with logcontext.tracing("jack", "echo"), logcontext.turning("t0k"):
+        named = record()
+        logcontext.TraceFilter().filter(named)
+    assert named.slife_trace == " [jack/echo turn=t0k]"
+
+    with logcontext.turning("t0k"):
+        alone = record()
+        logcontext.TraceFilter().filter(alone)
+    assert alone.slife_trace == " [turn=t0k]", (
+        "a call may carry a turn without naming a conversation"
+    )
+
+
+def test_an_empty_turn_leaves_the_callers_turn_alone() -> None:
+    """A call that names no turn keeps the one its caller is running."""
+    with logcontext.turning("outer"):
+        with logcontext.turning(""):
+            assert logcontext.current_turn() == "outer"
+        assert logcontext.current_turn() == "outer"
+    assert logcontext.current_turn() == ""
+
+
+def test_begin_turn_mints_a_token_and_end_turn_restores_the_previous_one() -> None:
+    """The pair form, for a turn whose scope crosses a lock boundary."""
+    with logcontext.turning("outer"):
+        token, handle = logcontext.begin_turn()
+        assert token
+        assert logcontext.current_turn() == token
+        logcontext.end_turn(handle)
+        assert logcontext.current_turn() == "outer"
+    assert logcontext.current_turn() == ""
+
+
+def test_every_turn_gets_its_own_token() -> None:
+    assert logcontext.new_turn() != logcontext.new_turn()
+
+
 @pytest.mark.asyncio
 async def test_a_tool_call_reads_the_conversation_from_its_arguments() -> None:
     """The middleware is the one place that knows a call's identity.

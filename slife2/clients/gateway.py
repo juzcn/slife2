@@ -82,6 +82,7 @@ from fastmcp import Client
 from fastmcp.client.messages import MessageHandler
 from fastmcp.client.transports import StdioTransport
 from mcp import MCPError
+from mcp.types import CONNECTION_CLOSED
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import SEPARATOR
@@ -91,9 +92,8 @@ from slife2.libs.plugin.audience import with_home
 
 logger = logging.getLogger(__name__)
 
-#: The SDK's JSON-RPC `CONNECTION_CLOSED` code, spelled rather than imported:
-#: `mcp_types` has the constant and `mcp` does not re-export it, and this build
-#: does not depend on `mcp_types` by name.
+#: The SDK's JSON-RPC code for a link that is gone, read from `mcp.types`
+#: where the SDK states it rather than spelled again here.
 #:
 #: **It says the link is gone.  It says nothing about how far a request got**,
 #: and reading it as "nothing was asked" is what would run a model's tool twice.
@@ -106,7 +106,7 @@ logger = logging.getLogger(__name__)
 #: and never a reason to run the call again.  `REQUEST_TIMEOUT` is outside the
 #: class for the same reason: a call that timed out went out, and may still be
 #: running.
-LINK_DOWN_CODE = -32000
+LINK_DOWN_CODE = CONNECTION_CLOSED
 
 
 def _link_is_down(exc: BaseException) -> bool:
@@ -412,6 +412,11 @@ class Connection:
         #: same as "never", which is what a source that has not listed yet is.
         self._listed_at = 0.0
         self._lock = asyncio.Lock()
+        #: How many times the peer has said its listing changed.  Read across
+        #: the handover: a notification that lands while the merge awaits means
+        #: the listing being recorded is already known to be wrong, and the
+        #: refresh must not mark the source ready on it.
+        self._invalidations = 0
         #: The attempt in flight, if any.  Held so that a caller can wait for it
         #: and so that a second one is never started alongside it.
         self._attempt: asyncio.Task[None] | None = None
@@ -504,8 +509,21 @@ class Connection:
             # Shielded because another caller may be waiting on the same task,
             # and a cancellation here is about *this* caller giving up rather
             # than about the connection being unwanted.
-            with contextlib.suppress(Exception):
+            try:
                 await asyncio.shield(attempt)
+            except asyncio.CancelledError:
+                # **The shared attempt was cancelled, not this caller.**  A
+                # management call that reconfigures or releases the entry closes
+                # the connection, which cancels the one attempt every waiter
+                # shares — and `shield` raises that cancellation in each waiter.
+                # Re-raising it cancelled the model's tool call for something it
+                # did not do.  A waiter that is itself being cancelled has
+                # `cancelling()` non-zero and still propagates.
+                me = asyncio.current_task()
+                if me is not None and me.cancelling():
+                    raise
+            except Exception:  # noqa: BLE001 — the attempt records the reason
+                pass
         return self._ready
 
     async def _establish(self) -> None:
@@ -583,6 +601,14 @@ class Connection:
         client = self._client
         if client is None:  # pragma: no cover - only reachable after `fail`
             return
+        # **The count is taken before the request, not after it.**  The peer can
+        # say its listing changed while the request is in flight, and the
+        # notification is processed on the client's own receive path: if the
+        # continuation resumes after that, a snapshot taken here would already
+        # contain the increment and the stale answer would be marked ready —
+        # the race `invalidate` exists to close.  Asking "did an invalidation
+        # land since this ask began" makes the answer about the whole request.
+        invalidations = self._invalidations
         try:
             async with asyncio.timeout(_T.timeouts.ready.connect_tools):
                 listed = await client.list_tools()
@@ -601,12 +627,27 @@ class Connection:
         # last thing this source said.  For a re-list the old listing stayed
         # usable throughout, which is the point: it was already recorded, and
         # only a refusal may take it away.
+        #
+        # **And a notification that was believed is believed wherever it
+        # landed.**  The listing being recorded was answered before the peer
+        # said it changed — whether the notification arrived during the merge
+        # or while the request was still in flight — so it is known to be
+        # wrong: recomputing readiness from it would serve the stale rows for
+        # up to `relist_after`.  Leaving `_ready` false makes the next ask
+        # re-list.
         if self._failures == failures and self._client is not None:
             self._error = ""
-        self._ready = not self._error and self._client is not None
+        self._ready = (
+            self._invalidations == invalidations
+            and not self._error
+            and self._client is not None
+        )
 
     def invalidate(self) -> None:
         """Forget the tool list, keeping the connection.
+
+        **Counted, not merely flagged**, because a refresh can be in the middle
+        of recording a listing when this lands: see `_refresh`.
 
         Called from the peer's own `tools/list_changed`, and from there only: a
         call that failed at the transport takes `disconnect` instead, because
@@ -623,6 +664,7 @@ class Connection:
         listing may be, this makes it zero — which is all a legacy server, whose
         notifications still arrive, gets out of having sent one.
         """
+        self._invalidations += 1
         if self._ready:
             self._ready = False
 

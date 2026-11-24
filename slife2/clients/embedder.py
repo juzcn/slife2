@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx2
 from fastmcp import Client
+from mcp import MCPError
+from mcp.types import CONNECTION_CLOSED
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import EMBEDDINGS_SERVER_NAME, plugin
@@ -37,6 +40,82 @@ logger = logging.getLogger(__name__)
 #: now the registry's, and a client that spells one is a fourth place for it.
 EMBEDDINGS_KEY = plugin("embeddings").key
 
+#: The SDK's JSON-RPC code for a link that is gone, read from `mcp.types` where
+#: the SDK states it rather than spelled again here.
+LINK_DOWN_CODE = CONNECTION_CLOSED
+
+
+def _link_was_lost(exc: BaseException) -> bool:
+    """Whether a failed call died with its connection rather than being answered.
+
+    **Two shapes reach the caller, and which one is a race.**  Measured against
+    mcp 2.3.0 / fastmcp 4.2.0: a request on a connection the server has closed
+    dies inside the transport's POST task, which tears the whole MCP session
+    down; the pending waiter is woken with `MCPError(CONNECTION_CLOSED)`, and
+    when the session task wins instead, its own `ReadError` is what
+    `_await_with_session_monitoring` raises.  Groups are unwrapped because a
+    task group is how such a death travels in some timings — the caller must
+    not depend on which branch won.
+
+    **This is not "the peer refused".**  A tool error, a timeout or a malformed
+    answer is the far end's answer and reaches the caller unchanged; only a
+    link this process no longer has is worth opening again.
+    """
+    if isinstance(exc, MCPError):
+        return getattr(exc, "code", None) == LINK_DOWN_CODE
+    if isinstance(exc, (httpx2.ReadError, httpx2.RemoteProtocolError)):
+        return True
+    if isinstance(exc, BaseExceptionGroup):
+        return any(_link_was_lost(one) for one in exc.exceptions)
+    return False
+
+
+#: How a dead connection is replaced.  The connection owns the opening policy —
+#: which URL, name and timeout — so it is handed the embedder to re-point and
+#: the client that died, and it validates the description it comes back with.
+Reopen = Callable[["RemoteEmbedder", Client], Awaitable[None]]
+
+
+def _described_facts(described: dict[str, Any]) -> tuple[str, int, int, str]:
+    """The four facts a description must carry, or a refusal naming the hole.
+
+    **Read once and compared on every reconnect.**  `identity` is the endpoint
+    and the model, and deliberately not the model alone: two endpoints can
+    serve one model id and mean different weights, so a repointed `base_url`
+    has to count as a different model.  The alternative is a table holding two
+    models' vectors, ranked against each other, with nothing able to say why
+    the numbers went strange.
+
+    All three identity fields are required: a `""` slot makes a changed model
+    or a repointed endpoint invisible in the identity, and the identity is the
+    lever that turns either into a rebuild (SDD §5.5) — the same argument the
+    width and input limit are refused on.  An empty `rerank_model` is a real
+    answer (an endpoint with no cross-encoder); a missing key is another build.
+    """
+    fields = ("provider", "model", "base_url")
+    if not all(str(described.get(field) or "") for field in fields):
+        raise RuntimeError(
+            f"the embeddings server described itself without a provider, a "
+            f"model or a base_url ({described!r}), so a changed model or a "
+            f"repointed endpoint would not be a different index"
+        )
+    identity = "|".join(str(described[field]) for field in fields)
+    dimension = int(described.get("dimension") or 0)
+    max_chars = int(described.get("max_chars") or 0)
+    rerank_model = described.get("rerank_model")
+    if not isinstance(rerank_model, str):
+        raise RuntimeError(
+            f"the embeddings server described itself without a rerank_model "
+            f"({described!r}); an empty value is its answer for an endpoint "
+            f"with no cross-encoder"
+        )
+    if not dimension or not max_chars:
+        raise RuntimeError(
+            f"the embeddings server described itself without a width or an "
+            f"input limit ({described!r}), so no index can be built for it"
+        )
+    return identity, dimension, max_chars, rerank_model
+
 
 class RemoteEmbedder:
     """The near side's view of the embeddings server: three facts, one call.
@@ -44,47 +123,49 @@ class RemoteEmbedder:
     Read once, because they cannot change while that server runs — it is what
     would change them, and changing one means a restart, which is exactly when an
     index asks whether it is still the right index.
-
-    `identity` is the endpoint and the model, and deliberately not the model
-    alone: two endpoints can serve one model id and mean different weights, so a
-    repointed `base_url` has to count as a different model.  The alternative is a
-    table holding two models' vectors, ranked against each other, with nothing
-    able to say why the numbers went strange.
     """
 
-    def __init__(self, client: Client, described: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        client: Client,
+        described: dict[str, Any],
+        *,
+        reopen: Reopen | None = None,
+    ) -> None:
         self._client = client
-        #: The three fields that say *which* endpoint this is.  All are
-        #: required: a `""` slot makes a changed model or a repointed endpoint
-        #: invisible in the identity, and the identity is the lever that turns
-        #: either into a rebuild (SDD §5.5) — the same argument the width
-        #: and input limit are refused on below.
-        fields = ("provider", "model", "base_url")
-        if not all(str(described.get(field) or "") for field in fields):
+        #: How a dead connection is replaced, or `None` when the caller owns the
+        #: client outright (a test's double, or the identity tests' `None`).
+        self._reopen = reopen
+        (
+            self._identity,
+            self._dimension,
+            self._max_chars,
+            self._rerank_model,
+        ) = _described_facts(described)
+
+    def _adopt(self, client: Client, described: dict[str, Any]) -> None:
+        """Take a reopened connection for this embedder, or refuse what changed.
+
+        **A reconnect must not repoint a live index at another model.**  Every
+        store built its index against `identity` and `dimension`, and vectors
+        from two models cannot be ranked against each other (SDD §8.4), so
+        adopting a server whose description differs would make the mismatch
+        silent.  The change is a failure the caller sees instead, and a restart
+        — which rebuilds the index — is the fix.
+        """
+        facts = _described_facts(described)
+        if facts != (
+            self._identity,
+            self._dimension,
+            self._max_chars,
+            self._rerank_model,
+        ):
             raise RuntimeError(
-                f"the embeddings server described itself without a provider, a "
-                f"model or a base_url ({described!r}), so a changed model or a "
-                f"repointed endpoint would not be a different index"
+                f"the embeddings server came back as {facts[0]!r} ({facts[1]} "
+                f"wide), not as {self._identity!r} ({self._dimension} wide), "
+                f"which is what this index was built for; restart to rebuild it"
             )
-        self._identity = "|".join(str(described[field]) for field in fields)
-        self._dimension = int(described.get("dimension") or 0)
-        self._max_chars = int(described.get("max_chars") or 0)
-        #: Empty means the endpoint serves no cross-encoder; the recall then
-        #: keeps its fused order and says nothing failed.  The key itself is
-        #: required: `describe` always writes it, so a hole is another build.
-        rerank_model = described.get("rerank_model")
-        if not isinstance(rerank_model, str):
-            raise RuntimeError(
-                f"the embeddings server described itself without a rerank_model "
-                f"({described!r}); an empty value is its answer for an endpoint "
-                f"with no cross-encoder"
-            )
-        self._rerank_model = rerank_model
-        if not self._dimension or not self._max_chars:
-            raise RuntimeError(
-                f"the embeddings server described itself without a width or an "
-                f"input limit ({described!r}), so no index can be built for it"
-            )
+        self._client = client
 
     @property
     def identity(self) -> str:
@@ -102,6 +183,48 @@ class RemoteEmbedder:
     def rerank_model(self) -> str:
         return self._rerank_model
 
+    async def _call(
+        self, tool: str, args: dict[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        """One tool call, repeated once across a connection that died.
+
+        **The repeat reopens the connection, because that is the whole
+        recovery.**  A keep-alive the server closed surfaces as a dead MCP
+        session, not as a bad socket a pool can silently replace: asking the
+        same client again answers `CONNECTION_CLOSED` (measured; see
+        :func:`_link_was_lost`).  So the connection is opened again — a new
+        session, and a new `describe` that must agree about the model — and the
+        call is made once more.  Embedding and reranking are idempotent, which
+        is what makes the second send safe; a second failure is a server that
+        is really gone and reaches the caller.
+        """
+        dead = self._client
+        try:
+            return await self._once(tool, args, timeout=timeout)
+        except BaseException as exc:
+            # `BaseException`, not `Exception`, because a group carrying the
+            # transport's death can hold either kind.  Everything the predicate
+            # does not name — a cancellation included — is re-raised unchanged.
+            # A cancel that rides with a death is still a cancel: the caller
+            # asked this process to stop, and a retry would outlive the ask.
+            if isinstance(exc, BaseExceptionGroup) and (
+                exc.subgroup(asyncio.CancelledError) is not None
+            ):
+                raise
+            if self._reopen is None or not _link_was_lost(exc):
+                raise
+        logger.info(
+            "the embeddings connection died under %s; reconnecting and asking once",
+            tool,
+        )
+        await self._reopen(self, dead)
+        return await self._once(tool, args, timeout=timeout)
+
+    async def _once(
+        self, tool: str, args: dict[str, Any], *, timeout: float | None = None
+    ) -> dict[str, Any]:
+        return tool_payload(await self._client.call_tool(tool, args, timeout=timeout))
+
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """One request to the far side, with the shape of the answer checked.
 
@@ -110,25 +233,19 @@ class RemoteEmbedder:
         in the index would be silent.  The count is the part a caller cannot
         recover from, so it is the part that fails.
 
-        **A read on an already-closed connection is retried once.**  The client
-        keeps its connection for the life of the process, and the server is free
-        to close an idle keep-alive connection between two catalogue merges —
-        which is what a busy start-up produces: the first listings embed while
-        the connection is fresh, then `agent-task` and `schedule` start (they
-        wait for the hub), and their listings are the first request after an
-        idle gap.  The failure is a `ReadError` with an empty message; the
-        client discards the dead connection, so the retry opens a new one.
-        Embedding is idempotent, which is what makes the repeat safe.  A second
-        failure is a server that is really gone and reaches the caller as before.
+        **A call on a connection the server closed while it was idle is
+        repeated once.**  The client keeps its MCP session for the life of the
+        process, and the server is free to close an idle keep-alive connection
+        between two catalogue merges — which is what a busy start-up produces:
+        the first listings embed while the connection is fresh, then
+        `agent-task` and `schedule` start (they wait for the hub), and their
+        listings are the first request after an idle gap.  The death reaches
+        this call as `MCPError(CONNECTION_CLOSED)`, and `_call` reopens the
+        connection and asks again.  Embedding is idempotent, which is what
+        makes the repeat safe; a second failure is a server that is really
+        gone and reaches the caller as before.
         """
-        try:
-            payload = tool_payload(
-                await self._client.call_tool("embed", {"texts": texts})
-            )
-        except (httpx2.ReadError, httpx2.RemoteProtocolError):
-            payload = tool_payload(
-                await self._client.call_tool("embed", {"texts": texts})
-            )
+        payload = await self._call("embed", {"texts": texts})
         vectors = payload.get("vectors")
         if not isinstance(vectors, list) or len(vectors) != len(texts):
             answered = len(vectors) if isinstance(vectors, list) else "no"
@@ -160,18 +277,7 @@ class RemoteEmbedder:
         args: dict[str, Any] = {"query": query, "documents": documents}
         if top_n is not None:
             args["top_n"] = top_n
-        try:
-            payload = tool_payload(
-                await self._client.call_tool(
-                    "rerank", args, timeout=_T.timeouts.transport.rerank
-                )
-            )
-        except (httpx2.ReadError, httpx2.RemoteProtocolError):
-            payload = tool_payload(
-                await self._client.call_tool(
-                    "rerank", args, timeout=_T.timeouts.transport.rerank
-                )
-            )
+        payload = await self._call("rerank", args, timeout=_T.timeouts.transport.rerank)
         results = payload.get("results")
         if not isinstance(results, list):
             raise RuntimeError(
@@ -233,27 +339,67 @@ class EmbedderConnection:
         self._client: Client | None = None
         self._opening = asyncio.Lock()
 
+    async def _connect(self) -> tuple[Client, dict[str, Any]]:
+        """One entered client, and the server's own description of itself."""
+        client: Client = await open_server(
+            self._config.server(EMBEDDINGS_KEY).url,
+            name=EMBEDDINGS_SERVER_NAME,
+            fallback_tool="embed",
+            timeout=_T.timeouts.transport.embed,
+        )
+        try:
+            described = tool_payload(await client.call_tool("describe", {}))
+        except BaseException:
+            # A describe that fails (an unreachable provider) must not leave
+            # the entered client behind: the next get() would open another and
+            # overwrite this one, leaking it for the life of the process.
+            # Close it and let the failure stand.
+            await close_server(client)
+            raise
+        return client, described
+
     async def get(self) -> Embedder:
-        if self._embedder is not None:
-            return self._embedder
+        embedder = self._embedder
+        if embedder is not None:
+            return embedder
         async with self._opening:
-            if self._embedder is None:
-                client: Client = await open_server(
-                    self._config.server(EMBEDDINGS_KEY).url,
-                    name=EMBEDDINGS_SERVER_NAME,
-                    fallback_tool="embed",
-                    timeout=_T.timeouts.transport.embed,
-                )
+            embedder = self._embedder
+            if embedder is None:
+                client, described = await self._connect()
+                embedder = RemoteEmbedder(client, described, reopen=self._reopen)
                 self._client = client
-                described = tool_payload(await client.call_tool("describe", {}))
-                self._embedder = RemoteEmbedder(client, described)
+                self._embedder = embedder
                 logger.info(
                     "embedding with %s (%s wide)",
-                    self._embedder.identity,
-                    self._embedder.dimension,
+                    embedder.identity,
+                    embedder.dimension,
                 )
-            assert self._embedder is not None
-            return self._embedder
+            return embedder
+
+    async def _reopen(self, embedder: RemoteEmbedder, dead: Client) -> None:
+        """Replace the connection behind `embedder` after its session died.
+
+        **Once per dead connection, however many calls noticed it.**  Callers
+        in flight on the same connection fail together; the first under the
+        lock opens a replacement and the rest find it already adopted — the
+        embedder is one shared object, so re-pointing it is all they need.
+
+        The replacement is described before it is adopted: a server that came
+        back as another model must not be used for an index built for the old
+        one (`RemoteEmbedder._adopt`).
+        """
+        async with self._opening:
+            current = self._client
+            if current is not None and current is not dead:
+                return
+            client, described = await self._connect()
+            try:
+                embedder._adopt(client, described)
+            except BaseException:
+                await close_server(client)
+                raise
+            self._client = client
+            await close_server(dead)
 
     async def rerank(
         self, query: str, documents: list[str], top_n: int | None = None

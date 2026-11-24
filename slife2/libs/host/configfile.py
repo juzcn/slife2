@@ -21,10 +21,12 @@ document in round-trip mode and edits it *as a document*: a key added under
 `mcp:` is a key added to the mapping that is already there, and every comment
 around it stays where the operator put it.
 
-**A write is validated by the reader before it counts.**  After the swap, the
-whole file goes back through `slife2.libs.host.config.load`, and a file it refuses is
-rolled back to what was there and the caller gets the error.  The alternative —
-trusting the edit — fails one process later, at the next start, in a process
+**A write is validated by the reader before it counts.** The rendered document
+is staged beside the file and the whole staged copy goes back through
+`slife2.libs.host.config.load`; only a candidate the loader accepts is renamed
+onto the path.  A file it refuses is never published, so there is nothing to
+roll back and no window in which a refused config is on disk.  The alternative
+— trusting the edit — fails one process later, at the next start, in a process
 that has no idea an edit happened; and the entry that produced it (a `mcp:`
 entry with neither `command` nor `url`, say) would be one the tool reported as
 written.
@@ -37,21 +39,22 @@ whether a lock is stale — see `exclusive`'s own docstring for why that matters
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
-import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from io import StringIO
 from pathlib import Path
 from typing import Any, cast
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-from ruamel.yaml.error import YAMLError
+from ruamel.yaml.error import StringMark, YAMLError
 from ruamel.yaml.tokens import CommentToken
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import Config, ConfigError, find_config_path, load
+from slife2.libs.host.paths import replace_file, stage
 from slife2.libs.host.runtime import config_key, exclusive
 
 logger = logging.getLogger(__name__)
@@ -113,53 +116,115 @@ def _render(document: CommentedMap) -> str:
     return stream.getvalue()
 
 
-def _swap(path: Path, text: str) -> None:
-    """Put *text* at *path*, atomically, keeping the file's mode.
+def _stage(path: Path, text: str) -> Path:
+    """Write *text* beside *path*, flushed and with the file's mode; answer it.
 
-    A temp file in the same directory and `os.replace`, so a reader sees the old
-    file or the new one and never a half-written one.  The mode is copied from
-    the file being replaced because `mkstemp` creates `0600`, which would
-    silently tighten a config somebody had made group-readable.
+    A temp file in the same directory, so the rename that follows is atomic on
+    the filesystem the file lives on and a reader sees the old document or the
+    new one.  The write itself is `slife2.libs.host.paths.stage`'s; what is this
+    caller's is the mode, copied from the file being replaced because `mkstemp`
+    creates `0600`, which would silently tighten a config somebody had made
+    group-readable.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if path.exists():
-            try:
-                os.chmod(tmp, path.stat().st_mode & 0o7777)
-            except OSError as exc:
-                # **Said out loud, because the mode is a promise this makes.**
-                # SDD §11.8 states the swap as preserving the file's mode;
-                # swallowing this left the config at `mkstemp`'s `0600`, which
-                # *tightens* a file somebody had made group-readable — an
-                # unreadable config for another user of the same machine, and
-                # nothing anywhere to say why (SDD Appendix C).
-                logger.warning("%s: the file's mode was not kept: %s", path, exc)
-        os.replace(tmp, path)
-    except BaseException:
+    tmp = stage(path, text)
+    if path.exists():
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        except OSError as exc:
+            # **Said out loud, because the mode is a promise this makes.**
+            # SDD §11.8 states the swap as preserving the file's mode;
+            # swallowing this left the config at `mkstemp`'s `0600`, which
+            # *tightens* a file somebody had made group-readable — an
+            # unreadable config for another user of the same machine, and
+            # nothing anywhere to say why (SDD Appendix C).
+            logger.warning("%s: the file's mode was not kept: %s", path, exc)
+    return tmp
+
+
+def _edit(
+    path: Path,
+    mutate: Callable[[CommentedMap], None],
+    check: Callable[[Config], None] | None = None,
+) -> None:
+    """One locked, validated read-modify-write of the config file.
+
+    Everything that writes goes through here, so the four properties a config
+    edit needs — held across processes, comment-preserving, atomic, and refused
+    by the loader if it produced nonsense — are stated once.
+
+    `check` is the caller's own judge, run on the parsed config *inside the
+    lock* and before the write counts.  `load` alone accepts things that are
+    only wrong in the light of a section's meaning — a `default:` naming no
+    model is a valid string — so a caller that knows its value passes a
+    predicate here, and it must raise `ConfigError` to refuse.
+
+    **The candidate is judged before it is published.**  The file used to be
+    swapped in first and rolled back when the loader refused it, which put the
+    refused document on disk for the window between the two swaps — and on
+    Windows the rollback itself could be refused by a reader holding the file
+    it was restoring.  Instead the rendered text is staged beside the file, the
+    staged copy is loaded — same directory, so `config_dir` and every relative
+    resolution are the ones the installed file would get — and only a candidate
+    the loader (and `check`) accept is renamed onto the path.  A refused edit
+    therefore never touches the file at all.
+    """
+    with exclusive(config_key(path), timeout=_T.timeouts.storage.filelock):
+        before = path.read_text(encoding="utf-8") if path.exists() else ""
+        document = _document(before, path)
+        mutate(document)
+        text = _render(document)
+        if text == before:
+            # An edit that found nothing to change — a `remove` of an entry that
+            # was not there — is not a write.  Rewriting the same bytes would
+            # only move the file's mtime and make a reader think something
+            # happened.
+            return
+        staged = _stage(path, text)
+        try:
+            # The reader is the judge: an entry this refuses is one the next
+            # `slife2` would fail to start on, so it must never be published.
+            config = load(staged)
+            if check is not None:
+                check(config)
+        except Exception as exc:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            # The judge can refuse with more than `ConfigError`: `load` resolves
+            # a `skills:` entry's environment eagerly, and a keyring that refuses
+            # mid-session raises its own error.  Whatever the refusal, an edit
+            # that did not validate is not an edit that happened — and the file
+            # it would have replaced is still exactly as it was.
+            if isinstance(exc, ConfigError):
+                raise ConfigError(f"refused, so nothing was written: {exc}") from exc
+            raise
+        try:
+            replace_file(staged, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                staged.unlink()
+            raise
 
 
 def read_section(
-    section: str, *, path: Path | None = None
+    section: str,
+    *,
+    skip: Collection[str] = (),
+    path: Path | None = None,
 ) -> dict[str, dict[str, Any]]:
     """One section as the *file* has it, as plain Python, secrets unresolved.
 
+    **`skip` names the section's scalars, not its entries.**  `providers:` has
+    one — `default:` — and it sits beside the provider entries it chooses
+    between; reading it as an entry would refuse a perfectly good section.
+    The entries themselves are still mappings, and a value that is not one is
+    still refused.
+
     **The listing tools read this rather than the settings they hold**, and the
-    difference is a leak: `ToolServerSettings.env` may hold a resolved secret —
-    a `keyring:` reference is resolved at load, and `resolved_env` materialises
-    every ``${VAR}`` when a connection is made — so an answer built from the
-    settings could print the operator's credential into the conversation and
-    the transcript.  What a person wrote is `${SERPER_API_KEY}`, and that is
-    what a listing shows.
+    difference is a leak: `ToolServerSettings.env` may hold a literal secret, and
+    `resolved_env` materialises every ``${VAR}`` when a connection is made — so
+    an answer built from the settings could print the operator's credential
+    into the conversation and the transcript.  What a person wrote is
+    `${SERPER_API_KEY}`, and that is what a listing shows.
 
     Plain Python and not a round-trip document because this is a *read*: nothing
     here is written back, and a caller returning it from a tool needs something
@@ -188,6 +253,8 @@ def read_section(
         )
     entries: dict[str, dict[str, Any]] = {}
     for name, entry in values.items():
+        if str(name) in skip:
+            continue
         if not isinstance(entry, dict):
             raise ConfigError(
                 f"{target}: `{section}.{name}:` is not a mapping. Reading it as "
@@ -195,6 +262,11 @@ def read_section(
             )
         entries[str(name)] = dict(entry)
     return entries
+
+
+def read_providers(*, path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """The `providers:` entries — `default` is the section's scalar, not one."""
+    return read_section("providers", skip=("default",), path=path)
 
 
 def config_path() -> Path:
@@ -243,51 +315,6 @@ def _section(
     return current
 
 
-def _edit(
-    path: Path,
-    mutate: Callable[[CommentedMap], None],
-    check: Callable[[Config], None] | None = None,
-) -> None:
-    """One locked, validated read-modify-write of the config file.
-
-    Everything that writes goes through here, so the four properties a config
-    edit needs — held across processes, comment-preserving, atomic, and refused
-    by the loader if it produced nonsense — are stated once.
-
-    `check` is the caller's own judge, run on the parsed config *inside the
-    lock* and before the write counts.  `load` alone accepts things that are
-    only wrong in the light of a section's meaning — a `default:` naming no
-    model is a valid string — so a caller that knows its value passes a
-    predicate here, and it must raise `ConfigError` to refuse, which rolls the
-    file back exactly as the loader's own refusal does.
-    """
-    with exclusive(config_key(path), timeout=_T.timeouts.storage.filelock):
-        existed = path.exists()
-        before = path.read_text(encoding="utf-8") if existed else ""
-        document = _document(before, path)
-        mutate(document)
-        text = _render(document)
-        if text == before:
-            # An edit that found nothing to change — a `remove` of an entry that
-            # was not there — is not a write.  Rewriting the same bytes would
-            # only move the file's mtime and make a reader think something
-            # happened.
-            return
-        _swap(path, text)
-        try:
-            # The reader is the judge: an entry this refuses is one the next
-            # `slife2` would fail to start on, so it must not be left on disk.
-            config = load(path)
-            if check is not None:
-                check(config)
-        except ConfigError as exc:
-            if existed:
-                _swap(path, before)
-            else:
-                path.unlink(missing_ok=True)
-            raise ConfigError(f"refused, so nothing was written: {exc}") from exc
-
-
 def _without_empties(entry: Mapping[str, Any]) -> dict[str, Any]:
     """Drop the fields that say nothing.
 
@@ -333,9 +360,7 @@ def upsert(
         values = _without_empties(entry)
         if values.get("enabled") is True:
             values.pop("enabled")
-        current = _section(document, section)
-        if current is None:  # unreachable while `create=True`; kept honest
-            return
+        current = cast(CommentedMap, _section(document, section))
         # A fresh mapping rather than an update of the one that is there: what
         # is written is exactly what was handed in, and nothing the caller did
         # not name survives from whatever the entry used to say.
@@ -447,16 +472,111 @@ def _take_intro(container: CommentedMap, name: str) -> Any:
 
 
 def _put_intro(container: CommentedMap, name: str, block: Any) -> None:
-    """Hang *block* off `name`, where the entry that follows it will read it."""
+    """Hang *block* off `name`, where the entry that follows it will read it.
+
+    **The entry's own inline comment is kept.**  ruamel merges the comment on
+    an entry's last line (`command: a  # keep me`) and the block introducing
+    the *next* entry into one token, so overwriting the slot wholesale deleted
+    a survivor's inline comment along with the doomed entry's introduction —
+    even when there was no block to move at all.  The head is the token's first
+    line when it does not begin with a newline; the block remainder is what
+    this write replaces.
+    """
     holder, key, at = _tail_of(container, name)
     slot = holder.ca.items.setdefault(key, [None, None, None, None])
     while len(slot) <= at:
         slot.append(None)
-    slot[at] = block
+    existing = slot[at]
+    head = ""
+    if existing is not None:
+        value = str(existing.value)
+        if not value.startswith("\n"):
+            head = value.split("\n", 1)[0] + "\n"
+    if block is None:
+        slot[at] = (
+            CommentToken(head, existing.start_mark, existing.end_mark, existing.column)
+            if head and existing is not None
+            else None
+        )
+        return
+    if head and existing is not None:
+        # The block's leading newline separates it from the value above; after
+        # an inline head, the head's own newline is that separator.
+        value = str(block.value)
+        merged = head + (value[1:] if value.startswith("\n") else value)
+        slot[at] = CommentToken(
+            merged, existing.start_mark, existing.end_mark, existing.column
+        )
+    else:
+        slot[at] = block
 
 
-def _as_pending(block: Any) -> Any:
-    """*block*, in the shape a mapping's pending slot holds.
+def _inline_head(block: Any) -> Any:
+    """The inline comment a trailing token opens with, or `None`.
+
+    ruamel merges "the comment on this line" and "the block introducing the
+    next entry" into one token; a token that begins with a newline has no
+    inline head.  `_put_intro` splits it the same way when it writes.
+    """
+    if block is None:
+        return None
+    value = str(block.value)
+    if value.startswith("\n"):
+        return None
+    return CommentToken(
+        value.split("\n", 1)[0] + "\n",
+        block.start_mark,
+        block.end_mark,
+        block.column,
+    )
+
+
+def _still_holds(holder: Any, key: Any) -> bool:
+    """Whether the slot's node survived the mutation in `_move_intro`."""
+    if isinstance(holder, CommentedMap):
+        return key in holder
+    if isinstance(holder, CommentedSeq):
+        return isinstance(key, int) and 0 <= key < len(holder)
+    return False
+
+
+def _move_intro(container: CommentedMap, name: str, change: Callable[[], None]) -> None:
+    """Run *change* on one entry and keep the block introducing the next one after it.
+
+    **`set_enabled` changes which key is last**, and ruamel keeps the next
+    entry's comment trailing the old last value.  Adding `enabled: false` after
+    an `args:`-ending entry left that comment between the sequence and the new
+    switch — inside the entry, describing nothing — and removing a last
+    `enabled:` key took it away with the key.  So the token is lifted, the
+    change runs, and the token is re-hung where the entry now ends.
+
+    **The inline comment is not the block.**  If the old last value carried
+    `# keep me` on its line and survives the change, that head goes back where
+    it was; only the block moves.  A last key that *is* removed takes its inline
+    comment with it, exactly as `_drop_entry` says.
+    """
+    holder, key, at = _tail_of(container, name)
+    slot = holder.ca.items.get(key)
+    taken = None
+    if slot is not None and len(slot) > at:
+        taken = slot[at]
+        slot[at] = None
+    change()
+    if taken is None:
+        return
+    head = _inline_head(taken)
+    if head is not None and _still_holds(holder, key):
+        slot = holder.ca.items.setdefault(key, [None, None, None, None])
+        while len(slot) <= at:
+            slot.append(None)
+        slot[at] = head
+    block = _without_inline(taken)
+    if block is not None:
+        _put_intro(container, name, block)
+
+
+def _as_pending(block: Any, column: int) -> Any:
+    """*block*, in the shape a mapping's pending slot holds, at *column*.
 
     **The two slots do not hold the same shape**, and the difference is
     invisible until it is wrong.  What ruamel keeps *after* an entry's value
@@ -465,13 +585,23 @@ def _as_pending(block: Any) -> Any:
     (`"# a\\n  # b\\n"`) — there the renderer supplies the first line's indent
     itself and writes every later line verbatim.  Moved across unchanged, a
     comment renders as a blank line or lands at column zero.
+
+    **`column` is the first key's own column, not the token's old one.**  A block
+    that trailed a list item was marked at that item's column (13 in the shape
+    `mcp:` writes); the pending renderer writes the first line at the mark's
+    column, so a block moved to the first key has to be re-marked where that key
+    begins or it prints indented to the middle of nowhere.
     """
     value = str(block.value)
     if value.startswith("\n"):
         value = value[1:]
         indent = len(value) - len(value.lstrip(" "))
         value = value[indent:]
-    return CommentToken(value, block.start_mark, block.end_mark, block.column)
+    mark = block.start_mark
+    start = StringMark(
+        mark.name, mark.index, mark.line, column, mark.buffer, mark.pointer
+    )
+    return CommentToken(value, start, block.end_mark, column)
 
 
 def _put_first(
@@ -488,12 +618,45 @@ def _put_first(
     one writes it.  Setting only one leaves the comment that was already there,
     which is the bug this is here to fix.
     """
-    token = None if block is None else _as_pending(block)
+    token = None
+    if block is not None:
+        # **The first key's own column**, which is where the comment belongs;
+        # the block's old mark points at whatever entry it used to trail.
+        first = next(iter(current), None)
+        column = current.lc.key(first)[1] if first is not None else 2
+        token = _as_pending(block, column)
     current.ca.comment = [None, [token] if token is not None else None]
     slot = document.ca.items.setdefault(section, [None, None, None, None])
     while len(slot) < 4:
         slot.append(None)
     slot[3] = [token] if token is not None else None
+
+
+def _without_inline(block: Any) -> Any:
+    """*block* minus the inline comment of the entry that is going.
+
+    ruamel stores an entry's last-line comment and the block introducing the
+    entry *below* it as one trailing token: a merged value is
+    ``"# inline\\n  # introduces next\\n"``, and a block-only value begins with
+    a newline.  A removal moves the block and drops the inline — the comment
+    describes a line that is about to cease to exist — so the token is split
+    back into the standalone block ruamel would have stored.  A token that was
+    only the inline answers `None`: there is nothing to move.
+
+    **A replacement keeps both** (`_swap_entry`): the entry survives, and its
+    own inline comment still sits on the line it describes.
+    """
+    if block is None:
+        return None
+    value = str(block.value)
+    if value.startswith("\n"):
+        return block
+    remainder = value.partition("\n")[2]
+    if not remainder.strip():
+        return None
+    return CommentToken(
+        "\n" + remainder, block.start_mark, block.end_mark, block.column
+    )
 
 
 def _drop_entry(
@@ -520,7 +683,11 @@ def _drop_entry(
     """
     names = list(current)
     index = names.index(name)
-    survivor = _take_intro(current, name)
+    # **The entry's own inline comment dies with it.**  `_take_intro` lifts the
+    # merged token — the inline head and the block introducing the next entry —
+    # and only the block moves; carrying the whole token re-hung the deleted
+    # entry's comment on its predecessor (`_without_inline`).
+    survivor = _without_inline(_take_intro(current, name))
     del current[name]
     if not current:
         _empty_section(document, section)
@@ -529,6 +696,25 @@ def _drop_entry(
         _put_first(document, section, current, survivor)
     else:
         _put_intro(current, names[index - 1], survivor)
+
+
+def _commented(value: Any) -> Any:
+    """*value* as ruamel nodes, so a comment can be hung off its last item.
+
+    **A plain `list` or `dict` stops the walk in `_tail_of`.**  `upsert` and
+    `update_entry` hand `_swap_entry` plain Python values, and ruamel renders
+    them but keeps no comment slots for them: `_put_intro` then wrote the block
+    introducing the *next* entry onto the edited entry's last key, and the
+    renderer printed it at the head of that plain container — inside `args:`,
+    above its first item, where it describes nothing.  A later `remove` of the
+    entry took it with the container.  The conversion is recursive for the same
+    reason: the last value may itself be a list of mappings (`models:`).
+    """
+    if isinstance(value, Mapping):
+        return CommentedMap((key, _commented(one)) for key, one in value.items())
+    if isinstance(value, (list, tuple)):
+        return CommentedSeq(_commented(one) for one in value)
+    return value
 
 
 def _swap_entry(current: CommentedMap, name: str, values: Mapping[str, Any]) -> None:
@@ -544,11 +730,15 @@ def _swap_entry(current: CommentedMap, name: str, values: Mapping[str, Any]) -> 
     the entry being replaced, write the new one, and hang the block back where
     the entry it introduces now begins.
 
+    **The new value is commented all the way down** (`_commented`): the walk
+    that hangs the block needs a node with comment slots, and the caller's
+    plain lists and mappings have none.
+
     Nothing is lifted when the name is not there yet — a fresh entry has no
     comment of its own to lose, and `_tail_of` needs the key to exist.
     """
     survivor = _take_intro(current, name) if name in current else None
-    current[name] = CommentedMap(_without_empties(values))
+    current[name] = _commented(_without_empties(values))
     if survivor is not None:
         _put_intro(current, name, survivor)
 
@@ -599,10 +789,14 @@ def set_enabled(
                 f"`{section}.{name}:` is not a mapping, so there is no entry to "
                 "switch. Fix the entry, or take it out."
             )
-        if enabled:
-            entry.pop("enabled", None)
-        else:
+
+        def switch_off() -> None:
             entry["enabled"] = False
+
+        def switch_on() -> None:
+            entry.pop("enabled", None)
+
+        _move_intro(current, name, switch_on if enabled else switch_off)
         found = True
 
     _edit(target, mutate)
@@ -638,9 +832,7 @@ def update_entry(
 
     def mutate(document: CommentedMap) -> None:
         nonlocal existed
-        values = _section(document, section)
-        if values is None:  # unreachable while `create=True`; kept honest
-            return
+        values = cast(CommentedMap, _section(document, section))
         existed = name in values
         raw = values.get(name)
         if raw is not None and not isinstance(raw, dict):
@@ -667,46 +859,42 @@ def update_entry(
     return existed
 
 
-def set_scalar(
-    name: str,
-    value: Any,
+def read_default(*, path: Path | None = None) -> str:
+    """The default model: `providers.default`, beside the providers it chooses.
+
+    A value that is not a string is refused — it is a config the next start
+    would refuse, not a value this reader may flatten.  An absent key is `""`,
+    which `first_reference` reads as the first provider's first model.
+    """
+    target = path or config_path()
+    document = _read(target)
+    providers = document.get("providers")
+    if not isinstance(providers, dict):
+        return ""
+    nested = providers.get("default")
+    if nested is None:
+        return ""
+    if not isinstance(nested, str):
+        raise ConfigError("providers.default: expected a `provider/model` reference")
+    return nested.strip()
+
+
+def set_default(
+    value: str,
     *,
     check: Callable[[Config], None] | None = None,
     path: Path | None = None,
 ) -> None:
-    """Write a top-level scalar — `name: value` — replacing what is there.
-
-    **The one thing a section writer cannot do.**  `upsert` and the rest edit
-    `section → name → mapping`, and `default:` is neither a section nor a
-    mapping: it is the `provider/model` the agent starts a conversation on.  So
-    this is the narrow writer for a top-level scalar, and the document edit is
-    one assignment, which is what keeps every comment around it.
-
-    `check` is the judge for a value `load` alone would accept — `default:` is a
-    plain string to the loader and a reference only to `Config.resolve`, so a
-    caller that knows its value passes `lambda c: c.resolve(ref)` and an edit
-    naming no model is rolled back rather than left for the next conversation to
-    trip over.
-    """
+    """Write `providers.default`, the model a new conversation starts on."""
     target = path or config_path()
 
     def mutate(document: CommentedMap) -> None:
-        document[name] = value
+        providers = _section(document, "providers")
+        assert providers is not None
+        providers["default"] = value
 
     _edit(target, mutate, check=check)
-    logger.info("config_set_scalar name=%s", name)
-
-
-def read_scalar(name: str, *, default: str = "", path: Path | None = None) -> str:
-    """A top-level scalar as the file has it, or *default* when it is absent.
-
-    A read like `read_section`, and safe for the same reason: nothing here is
-    resolved, and the one scalar anybody reads — `default:` — is a model
-    reference rather than a secret.
-    """
-    target = path or config_path()
-    value = _read(target).get(name)
-    return default if value is None else str(value)
+    logger.info("config_set_default value=%s", value)
 
 
 def _read(target: Path) -> dict[str, Any]:
@@ -723,9 +911,15 @@ def _read(target: Path) -> dict[str, Any]:
     """
     text = target.read_text(encoding="utf-8")
     try:
-        document = YAML(typ="safe").load(text) or {}
+        # **Only a null document is empty.**  `or {}` read `[]`, `""`, `false`
+        # and `0` as an empty file, so a listing answered `{}` for a file the
+        # loader refuses — the "a section that has four entries reported as
+        # one that has none" disagreement this reader exists to prevent.
+        document = YAML(typ="safe").load(text)
     except YAMLError as exc:
         raise ConfigError(f"{target} is not YAML: {exc}") from exc
+    if document is None:
+        document = {}
     if not isinstance(document, dict):
         raise ConfigError(f"{target} is not a mapping, so it has no sections")
     return document

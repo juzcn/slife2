@@ -1,6 +1,6 @@
 [project]
 name = "slife2"
-version = "0.4.0"
+version = "0.5.0"
 description = "Terminal-based AI agent"
 readme = "README.md"
 license = { text = "MIT" }
@@ -15,11 +15,17 @@ dependencies = [
     # does not accept.
     "fastmcp>=4.1.1",
     "starlette>=1.7.0",
+    # The file tunnel's share listener is its own loopback server; the MCP
+    # servers' uvicorn is FastMCP's private copy.  Declared for that reason.
+    "uvicorn>=0.54.0",
     "textual>=8.2.8",
     "httpx2>=2.13.1",
     "qrcode>=8.0",
     "ruamel.yaml>=0.19.0",
-    "credstore>=0.10.5",
+    # 0.11.3 is the floor: it stores every credential under one
+    # `service:key` target; earlier versions use the WinVault two-layout
+    # scheme, which cannot read those entries.
+    "credstore>=0.11.3",
     # Injects the OS trust store over certifi at package import.
     "truststore>=0.10.5",
     "openai>=2.46.0",
@@ -38,8 +44,8 @@ dependencies = [
     # a payload still arriving no longer trips the keepalive.  Both apply to
     # the mesh's long-lived connections.
     "paho-mqtt>=2.2.0",
-    # The vocabulary is fetched on first use; a failed fetch degrades to the
-    # script measure.
+    # The vocabulary ships in slife2/libs/turn/tiktoken_cache; a failure to
+    # read it degrades to the script measure.
     "tiktoken>=0.14.0",
     "griffelib>=2.0.0",
     # The job authoring loop's checks; nothing imports them.

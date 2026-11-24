@@ -25,13 +25,16 @@ and so drop it, which reaches the same result from the other side.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import Any
 
 from slife2.libs.host.config import ModelSettings, plugin
 from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolCallDelta
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
+    THINKING_BUDGET_SHARE,
     build_backend_server,
+    forced_tool,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
@@ -44,12 +47,6 @@ logger = logging.getLogger(__name__)
 API = "openai-completions"
 
 SERVER_NAME = plugin(API).name
-
-#: How much of the output budget a thinking model may spend reasoning, when
-#: `compat.thinking: enabled` asks for it.  Half, because the other half is what
-#: the answer is made of and a model that spends everything thinking returns
-#: nothing.
-THINKING_BUDGET_SHARE = 0.5
 
 
 def thinking_parameter(settings: ModelSettings) -> dict[str, Any] | None:
@@ -131,6 +128,9 @@ def to_provider_messages(
     for message in messages:
         wire = message.to_wire()
         thinking = wire.pop("thinking", "")
+        # The chat-completions wire has no name for another wire's reasoning
+        # blocks either; they are replayed by the adapters that wrote them.
+        wire.pop("reasoning", None)
         if thinking:
             wire["reasoning_content"] = thinking
         elif reasoning and message.role == "assistant":
@@ -144,14 +144,44 @@ def build_request(
     tools: list[ToolSpec],
     settings: ModelSettings,
     *,
-    stream_usage: bool,
+    tool_choice: str = "",
+    thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     """The request body, containing only what the config asked for.
 
     Separated from the call so the whole parameter surface can be asserted on
     without a network: which fields are present matters as much as their values,
     and "absent" is a real choice here rather than an oversight.
+
+    `tool_choice` names the one tool the call must use; a forced choice with no
+    tool list is refused by `server_common.forced_tool`.  `thinking` overrides
+    the model's configured `compat.thinking` for this call alone — the decision
+    calls disable it — and leaves the config's value on every ordinary turn.
+
+    **The override applies when the model reasons natively or asks for thinking
+    explicitly**, and on this wire that is either flag: `reasoning: true` asks
+    a model that thinks natively, and `compat.thinking: enabled` asks
+    explicitly whatever `reasoning` says (`thinking_parameter` reads the field,
+    not the flag).  Keying on `reasoning` alone left an explicitly-enabled
+    model sending `thinking` **and** a forced `tool_choice`, which a thinking
+    endpoint answers 400 to — the decision calls' one job.  **`compat.thinking:
+    omit` is respected**: the operator has said this gateway rejects the field,
+    and a per-call override has no business reopening a hatch they closed.  A
+    model that reasons natively with no `compat.thinking` does get an explicit
+    `disabled` — that is how a thinking endpoint is told not to think for a
+    forced call — and one that neither reasons nor asks for thinking is sent no
+    field at all.
     """
+    if (
+        thinking
+        and settings.thinking != "omit"
+        and (settings.reasoning or settings.thinking == "enabled")
+    ):
+        settings = replace(settings, thinking=thinking)
+    if temperature is not None:
+        settings = replace(settings, temperature=temperature)
+    forced_tool(tools, tool_choice)
     request: dict[str, Any] = {
         "model": settings.model,
         "messages": to_provider_messages(messages, reasoning=settings.reasoning),
@@ -159,7 +189,12 @@ def build_request(
     }
     if tools:
         request["tools"] = [t.to_wire() for t in tools]
-    if stream_usage and settings.stream_usage != "omit":
+        if tool_choice:
+            request["tool_choice"] = {
+                "type": "function",
+                "function": {"name": tool_choice},
+            }
+    if settings.stream_usage != "omit":
         # An OpenAI extension.  Some compatible servers reject it with a 400,
         # and `compat.stream_usage: omit` is the switch for those — per model,
         # because whether the field is accepted is a fact about the endpoint and
@@ -177,8 +212,8 @@ def build_request(
     if settings.max_tokens is not None:
         request["max_tokens"] = settings.max_tokens
 
-    thinking = thinking_parameter(settings)
-    if thinking is not None:
+    thinking_block = thinking_parameter(settings)
+    if thinking_block is not None:
         # **`extra_body`, because the SDK's typed surface has no `thinking`.**
         # `chat.completions.create` accepts no such keyword, so passing it at the
         # top level raises a `TypeError` here before anything is sent — on every
@@ -186,7 +221,7 @@ def build_request(
         # Through `extra_body` the configured value reaches the wire: a gateway
         # that accepts the field gets it, and one that does not answers in its own
         # words.  The Anthropic adapter routes `sampling` the same way.
-        request["extra_body"] = {"thinking": thinking}
+        request["extra_body"] = {"thinking": thinking_block}
     return request
 
 
@@ -260,6 +295,15 @@ def translate(event: Any) -> list[ProviderEvent]:
         )
 
     text = getattr(delta, "content", None) or ""
+    # **A refusal is the model's answer here.**  The chat-completions protocol
+    # carries it on `delta.refusal` with `content` null, and reading only the
+    # content made a refusal an empty answer — the loop fails the turn saying
+    # the provider said nothing, which is the confident negative SDD §6.3
+    # forbids.  Appended rather than replaced: a provider that streams both
+    # has spoken the answer in two channels.
+    refusal = getattr(delta, "refusal", None)
+    if isinstance(refusal, str) and refusal:
+        text += refusal
     if text or deltas:
         events.append(Chunk(text=text, tool_call_deltas=tuple(deltas)))
 
@@ -354,7 +398,7 @@ def _usage(raw: Any) -> Usage | None:
     )
 
 
-def _make_streamer(*, stream_usage: bool = True) -> Streamer:
+def _make_streamer() -> Streamer:
     """The adapter for one process — every provider that speaks this wire.
 
     **It reads the config on every call**, through `LiveProviders`, so a
@@ -364,18 +408,11 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     keyring, and constructing a client outside a running event loop is not
     always safe.
     """
-
-    def build(
-        messages: list[Message], tools: list[ToolSpec], settings: ModelSettings
-    ) -> dict[str, Any]:
-        """The body, with the one flag this wire has to close over."""
-        return build_request(messages, tools, settings, stream_usage=stream_usage)
-
     return sdk_streamer(
         api=API,
         server_name=SERVER_NAME,
         sdk_client=sdk_client_factory("openai", "AsyncOpenAI"),
-        build_request=build,
+        build_request=build_request,
         start=lambda client, request: client.chat.completions.create(**request),
         # `translate` is a pure function of one event on this wire, so the
         # factory hands back the same callable every time.
@@ -383,12 +420,10 @@ def _make_streamer(*, stream_usage: bool = True) -> Streamer:
     )
 
 
-def build_server(*, streamer: Streamer | None = None, stream_usage: bool = True):
+def build_server(*, streamer: Streamer | None = None):
     """Build the MCP server.  `streamer` is injectable for tests."""
     return build_backend_server(
-        name=SERVER_NAME,
-        streamer=streamer,
-        make=lambda: _make_streamer(stream_usage=stream_usage),
+        name=SERVER_NAME, streamer=streamer, make=_make_streamer
     )
 
 

@@ -44,6 +44,7 @@ from typing import Any
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.helpers.threads import off_loop
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     CLI_SERVER_NAME,
@@ -148,7 +149,7 @@ def rows(entries: Mapping[str, CliToolSettings]) -> list[dict[str, Any]]:
 # actually on this machine.
 
 
-def _prepare(name: str, config: CliConfig) -> CliToolSettings:
+async def _prepare(name: str, config: CliConfig) -> CliToolSettings:
     """Validate a `cli:` entry and write it, or raise why it cannot be.
 
     **Raised, not returned**, which is the contract `skill_set` and `skill_use`
@@ -187,7 +188,9 @@ def _prepare(name: str, config: CliConfig) -> CliToolSettings:
     entry = cli_entry(config)
     try:
         settings = _cli_tool(entry, name)
-        configfile.upsert(SECTION, name, entry)
+        # The write takes the cross-process config lock — blocking work on the
+        # loop that serves every conversation this plugin holds, so it hops.
+        await off_loop(configfile.upsert, SECTION, name, entry)
     except ConfigError as exc:
         raise ToolError(str(exc)) from exc
     return settings
@@ -217,13 +220,18 @@ def _missing_program(command: str) -> str:
     `python -m mytool` is a program plus its arguments and the program is what
     has to exist.  Running the line is the shell's, not this split's.
 
-    **The split cannot fail here**, and there is deliberately no `try` for it:
-    `_prepare` has already refused a line `shlex` cannot take apart, so the only
-    caller that reaches this has one that splits.  The `except ValueError` this
-    used to carry answered `""` — the same silence as "the program is on PATH" —
-    for a failure that by then could not happen.
+    **The split can fail on a hand-written line.**  `_prepare` refuses an
+    unbalanced quote at the moment an entry is *written*, but `cli_list` and
+    `cli_get` read entries straight from the file — and a person's edit can
+    carry one.  An untried `shlex.split` made one such entry raise out of the
+    whole listing, so every healthy row beside it was lost.  The split answers
+    `""` there: the row still shows the command it cannot parse, and the next
+    `cli_set` is where the line is refused with the loader's words.
     """
-    words = shlex.split(command, posix=False)
+    try:
+        words = shlex.split(command, posix=False)
+    except ValueError:
+        return ""
     program = words[0].strip("\"'") if words else ""
     if not program or shutil.which(program):
         return ""
@@ -306,9 +314,14 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     would be whichever home this process happened to be started in.
     """
 
-    def entry_of(name: str) -> CliConfig:
-        """One entry's canonical object, or this family's miss."""
-        raw = configfile.read_section(SECTION).get(name)
+    async def entry_of(name: str) -> CliConfig:
+        """One entry's canonical object, or this family's miss.
+
+        The file read hops, for `cli_set`'s reason: a full YAML parse on the one
+        loop this plugin serves every conversation from stalls turns that have
+        nothing to do with the command list.
+        """
+        raw = (await off_loop(configfile.read_section, SECTION)).get(name)
         if not isinstance(raw, dict):
             raise ToolError(
                 f"'{name}' is not recorded under `cli:` — `cli_set` records "
@@ -338,7 +351,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             and `total`, `limit` and `offset`, so
             `offset + len(commands) < total` says whether more remain.
         """
-        written = configfile.read_section(SECTION)
+        written = await off_loop(configfile.read_section, SECTION)
         rows = [_describe(name, raw) for name, raw in written.items()]
         return listed(rows, "commands", limit, offset, cap=LIST_PAGE)
 
@@ -354,7 +367,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         Args:
             name: The key it is recorded under.
         """
-        config = entry_of(name)
+        config = await entry_of(name)
         answer: dict[str, Any] = {
             "name": name,
             "config": config.model_dump(),
@@ -383,7 +396,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             name: The key it is recorded under.
             config: The whole entry — the `config` object `cli_get` returned.
         """
-        settings = _prepare(name, config)
+        settings = await _prepare(name, config)
         homes.current().entries[name] = settings
         logger.info("cli_set name=%s", name)
         answer: dict[str, Any] = {
@@ -408,13 +421,13 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         Returns:
             `name` and `removed`, which a success makes true.
         """
-        if name not in configfile.read_section(SECTION):
+        if name not in await off_loop(configfile.read_section, SECTION):
             # **Refused by raising, for `cli_set`'s reason**: returned as
             # ordinary text this arrives with `ok` true and reads as a removal
             # that happened.  Nothing was written, so the call is a failure the
             # caller can see.
             raise ToolError(f"'{name}' is not recorded under `cli:` — see `cli_list`.")
-        configfile.remove(SECTION, name)
+        await off_loop(configfile.remove, SECTION, name)
         homes.current().forgotten(name)
         logger.info("cli_removed name=%s", name)
         return {"name": name, "removed": True}
@@ -432,7 +445,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             `name`, `enabled`, and `state` — `on` or `off` — which is the same
             word the listing's rows carry.
         """
-        if name not in configfile.read_section(SECTION):
+        if name not in await off_loop(configfile.read_section, SECTION):
             # The same refusal as `cli_remove`'s, and for the same reason: a
             # switch answered as ordinary text arrives with `ok` true and reads
             # as one that was set.
@@ -440,7 +453,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                 f"'{name}' is not recorded under `cli:` — `cli_set` records one, "
                 f"`cli_list` shows what is there."
             )
-        configfile.set_enabled(SECTION, name, enabled)
+        await off_loop(configfile.set_enabled, SECTION, name, enabled)
         # No `make`: an entry this process is not holding is one another instance
         # wrote, and it is the file's answer that counts until the next start.
         homes.current().switched(name, enabled)

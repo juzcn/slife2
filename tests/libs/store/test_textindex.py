@@ -130,6 +130,18 @@ def test_an_operator_word_is_a_word_and_not_an_operator() -> None:
     assert match_expression("NEAR") == '"near"'
 
 
+@pytest.mark.parametrize("word", ["µ", "ª", "²", "½", "々", "〇", "〡"])
+def test_an_alphanumeric_latin1_or_ideographic_mark_is_a_token(word: str) -> None:
+    """**The separator class cuts exactly what `unicode61` cuts.**
+
+    `{-¿` treated `ª ² ³ µ ¹ º ¼ ½ ¾` as punctuation, and `　-〿` treated the
+    ideographic letters/numbers the same way.  The index holds each as a token,
+    so a query made only of one was refused as empty and `5µm` became the terms
+    `5` and `m` — a search that matched nothing for a word the text contains.
+    """
+    assert terms(word) == [normalize(word)]
+
+
 @pytest.mark.parametrize("query", ["", "   ", "*", "((", "，。", "---", "***"])
 def test_a_query_with_no_term_is_refused(query: str) -> None:
     """Refused, not answered: an empty MATCH pattern matches every row."""

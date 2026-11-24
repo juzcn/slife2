@@ -348,6 +348,56 @@ def test_a_bound_at_the_edge_of_the_calendar_is_a_refusal(
     assert timeutil.can_place(value, role=role) is False
 
 
+def test_a_moment_the_local_zone_cannot_write_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The offset rewrite's other platform spelling of the same overflow.**
+
+    `at` reaches the C library through `astimezone` to restate a bound in the
+    local zone.  A bound carried past the calendar's end is the case
+    `normalize_bound` names as unplaceable, and the C library may report it as
+    `OverflowError` or as `OSError` — measured here on Windows in a UTC+8 zone,
+    where `9999-12-31T23:59:59+00:00` raised `OSError [Errno 22]` and
+    `can_place` with it.
+
+    The predicate is the one that must not raise: `slife2.libs.turn.context`
+    asks it about a decision model's `since`/`until` while a bad bound is still
+    something it can drop, and an `OSError` out of there failed the turn the
+    refusal exists to keep.  `at` is replaced here so the claim is the same on
+    every runner; the platform's own spelling is what the fix reads.
+    """
+
+    def unrepresentable(moment: datetime) -> str:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(timeutil, "at", unrepresentable)
+    value = "9999-12-31T23:59:59+00:00"
+    with pytest.raises(InvalidTimeBound):
+        normalize_bound(value, role="since")
+    assert timeutil.can_place(value) is False
+
+
+def test_a_date_only_bound_the_platform_cannot_place_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The same edge, on the axis the string form hides.**
+
+    A date-only bound stays `YYYY-MM-DD` for its text readers, and the instant
+    readers give it a local offset later — so `4000-01-01` passed `can_place`
+    and then raised `OSError` out of the query on a platform whose calendar
+    conversion stops earlier.  The conversion is asked here, where the answer is
+    still a refusal, so the decision model's bad bound can still be dropped.
+    """
+
+    def unrepresentable(moment: datetime) -> str:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(timeutil, "at", unrepresentable)
+    assert timeutil.can_place("4000-01-01") is False
+    with pytest.raises(InvalidTimeBound):
+        normalize_bound("4000-01-01", role="since")
+
+
 def test_the_error_says_what_the_grammar_is() -> None:
     with pytest.raises(InvalidTimeBound, match="until bound"):
         normalize_bound("whenever", role="until")

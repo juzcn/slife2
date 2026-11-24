@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp import MCPError
 
@@ -43,18 +43,24 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import catalogue_db, in_home
 from slife2.libs.host.paths import home as home_dir
-from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    conversation_meta,
+    conversation_of,
+    request_meta,
+    turn_of,
+    with_turn,
+)
 from slife2.libs.plugin.family import Family, Link, Links
 from slife2.libs.plugin.protocol import LIST_SOURCES
+from slife2.libs.store.answer import MATCH_FLOOR, WEAK_FLOOR, confidence
 from slife2.libs.store.catalogue import DEFAULT_TOOL_PAGE, LOADED, UNLOADED, ToolStore
 from slife2.plugins.cli.server import build_server as build_cli
 from slife2.plugins.toolhub.server import (
-    MATCH_FLOOR,
     MAX_LOAD_NAMES,
     PLUGIN,
-    WEAK_FLOOR,
+    SEARCH_LIMIT,
     Catalogue,
-    _confidence,
     _page_answer,
     _parameters,
     configured_sources,
@@ -78,7 +84,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    models: [{model: big}]
+    models: [{model: big, context_window: 1000}]
 embeddings:
   providers:
     local:
@@ -1168,6 +1174,39 @@ async def test_a_plugins_tool_is_the_models_only_when_it_says_so() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_rides_beside_a_call_the_hub_routes() -> None:
+    """**The turn is forwarded with the conversation, and it is a separate key.**
+
+    A live-conversation tool resolves a loop by `(agent, subagent)`, and that id
+    alone cannot tell the agent server's own turn from an agent task standing in
+    for the same conversation.  The token the caller's broker minted is the
+    what tells them apart, and a proxy has to pass it on: the hub forwards it to the
+    plugin that runs the tool, beside — not inside — the conversation identity.
+    """
+    seen: dict[str, Any] = {}
+
+    server = FastMCP("plugin")
+
+    @server.tool(meta=FOR_THE_MODEL)
+    def digest(ctx: Context) -> str:
+        """What was said, newest first."""
+        seen.update(request_meta(ctx) or {})
+        return "ok"
+
+    async with Client(
+        hub_for(connected={"agent": lambda settings: server}, autoload=("digest",))
+    ) as hub:
+        await hub.call_tool(
+            "call_tool",
+            {"name": "digest", "arguments": {}},
+            meta=with_turn(conversation_meta("jack"), "t0k"),
+        )
+
+    assert turn_of(seen) == "t0k"
+    assert conversation_of(seen) == ("jack", "")
+
+
+@pytest.mark.asyncio
 async def test_an_upstream_tool_is_named_for_its_server() -> None:
     """`{server}__{tool}`, and the description says whose it is.
 
@@ -1484,6 +1523,26 @@ async def test_a_search_with_nothing_to_look_for_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_nested_list_in_a_term_list_is_read_as_text_not_a_crash() -> None:
+    """A local tool's schema is shown to a model, not enforced for it.
+
+    `_listed` coerces and dedupes the terms, and it hashed the raw element
+    before the `str()` the comprehension returned — so `keywords: [["echo"]]`
+    raised `TypeError: unhashable type: 'list'`, and the tool answered with
+    that type name (plus an ERROR traceback) instead of a page.  Reading each
+    element as the text it was already going to be is the same answer without
+    the internal error.
+    """
+    async with Client(hub_for()) as hub:
+        answer = await call(
+            hub, "tool_search", {"keywords": [["echo"]], "sentences": []}
+        )
+
+    assert answer["ok"] is True, answer["text"]
+    assert "unhashable" not in answer["text"]
+
+
+@pytest.mark.asyncio
 async def test_the_two_inputs_go_to_the_two_legs() -> None:
     """Words are matched exactly, sentences by meaning, and a row both found wins.
 
@@ -1571,6 +1630,8 @@ async def test_a_search_says_how_sure_it_is_and_numbers_its_rows() -> None:
     answer = json.loads(found["text"])
     assert answer["confidence"] == "sure", answer
     assert answer["best"] == 1.0
+    assert answer["browsed"] is False, "a search is not a browse"
+    assert answer["limit"] == SEARCH_LIMIT
 
     assert json.loads(nothing["text"])["confidence"] == "none", nothing["text"]
 
@@ -1757,24 +1818,27 @@ def test_a_listing_that_cannot_be_read_is_not_an_empty_catalogue() -> None:
 def test_the_confidence_is_the_judgement_the_model_cannot_make_itself() -> None:
     """Three words, pinned where the floors are.
 
-    `_confidence` is called with the page and its best number, so the verdict can
-    be asserted without a catalogue — and it has to be *this* function's, because
-    the floors are this system's: `best` is a cosine, and what counts as a
-    match is not something a reading model can derive from the number.
+    `confidence` is called with the page's best number and the word evidence, so
+    the verdict can be asserted without a catalogue — and it has to be *this*
+    function's, because the floors are this system's: `best` is a cosine, and
+    what counts as a match is not something a reading model can derive from the
+    number.  The judgement lives in `slife2.libs.store.answer` now, because all
+    three searches present it.
 
     The middle case is the one that is easy to get wrong.  The caller's own words
     reaching a row is evidence — certain, where a cosine is graded — so a page
     whose only evidence is that says `weak` rather than `none`, whatever the
     numbers say.
     """
-    worded = [{"matched_in": "line"}]
-    plain = [{}]
-
-    assert _confidence(plain, 0.7) == "sure"
-    assert _confidence(plain, MATCH_FLOOR) == "sure", "the floor is inclusive"
-    assert _confidence(plain, 0.2) == "none"
-    assert _confidence(worded, 0.2) == "weak", "the words are evidence"
-    assert _confidence(plain, WEAK_FLOOR) == "weak", "and so is a close-ish number"
+    assert confidence(0.7, worded=False) == "sure"
+    assert confidence(MATCH_FLOOR, worded=False) == "sure", "the floor is inclusive"
+    assert confidence(0.2, worded=False) == "none"
+    assert confidence(0.2, worded=True) == "weak", "the words are evidence"
+    assert confidence(WEAK_FLOOR, worded=False) == "weak", (
+        "and so is a close-ish number"
+    )
+    assert confidence(None, worded=True) == "weak", "a word-only page is measured none"
+    assert confidence(None, worded=False) == "none", "not measured is not a zero"
 
 
 @pytest.mark.asyncio
@@ -1939,6 +2003,63 @@ async def test_a_plugin_that_stops_answering_keeps_the_rows_it_declared() -> Non
 
 
 @pytest.mark.asyncio
+async def test_a_plugin_whose_declaration_fails_keeps_its_address_book_entry() -> None:
+    """**A failed report is not a removal.**  The rows stay in the catalogue, and
+    the source must stay in the hub's address book with them.
+
+    A plugin that is up but still installing the external servers it holds
+    cannot answer `list_sources` inside the connect budget.  The refresh keeps
+    its rows — and, before this, replaced the address book with only the
+    answers that arrived, so the source left `live_sources`: the model's next
+    list silently lost every loaded tool it held, and a call by name answered
+    "no plugin is declaring it right now".  The previous entries are carried
+    forward for the plugin whose ask failed, and only for that plugin.
+    """
+
+    class BreaksAfterFirst:
+        """Declares once, then fails the way a cold container does."""
+
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def server(self) -> FastMCP:
+            server = FastMCP("declaring")
+
+            @server.tool(name=LIST_SOURCES)
+            def list_sources() -> dict[str, Any]:
+                self.attempts += 1
+                if self.attempts > 1:
+                    raise RuntimeError("still installing the servers it holds")
+                return one_source(
+                    category="mcp",
+                    rows=[
+                        {
+                            "name": "somewhere__thing",
+                            "description": "d",
+                            "status": "enabled",
+                        }
+                    ],
+                )
+
+            return server
+
+    flaky = BreaksAfterFirst()
+    async with Client(
+        hub_for(connected={"cli-server": lambda settings: flaky.server()})
+    ) as hub:
+        assert "somewhere__thing" in await found(hub, "somewhere__thing")
+        # A search is a refresh, so this second search is the second ask.
+        assert "somewhere__thing" in await found(hub, "somewhere__thing")
+        answer = await call(hub, "somewhere__thing")
+
+    assert answer["ok"] is False, "the fake plugin has no such tool, so it refused"
+    assert "Unknown tool" in answer["text"], (
+        "the call did not reach the plugin that declares the source — its "
+        "address-book entry was dropped because one report was late"
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> None:
     """**The row is real, so the answer may not say the config is what is wrong.**
 
@@ -1947,7 +2068,7 @@ async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> Non
     answer for a call to one of them named the two shapes that *cannot* be
     reached: a switched-off entry is still declared, and refused by its plugin
     instead, and an entry whose plugin did answer has had its rows deleted
-    (`Upstream.declare`'s `forget_source`).  So the sentence was false about the
+    (`Upstream.record`'s `forget_source`).  So the sentence was false about the
     one case it is reached in — the config still names `fake`, and the thing to
     go and look at is the plugin — which is a wrong diagnosis handed to whoever
     reads it, and the reason the hub may not answer a routing failure with a
@@ -1972,7 +2093,9 @@ async def test_a_call_to_a_source_whose_plugin_is_down_says_which_it_is() -> Non
     assert answer["ok"] is False
     assert "not a server this hub is configured with any more" not in answer["text"]
     assert "'fake'" in answer["text"], "the answer names what the call belongs to"
-    assert "`servers`" in answer["text"], "and where the plugin's health is reported"
+    assert "`tool_list`" in answer["text"], (
+        "and where the model can read the row's status"
+    )
 
 
 @pytest.mark.asyncio
@@ -2596,7 +2719,13 @@ async def test_the_waiting_ask_re_asks_a_dial_that_failed_while_it_waited(
     of refusing it, where the hub's dial to `schedule` (made before the
     launcher starts that plugin) is still running when the catalogue is built.
     """
-    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 0.5)
+    # The real bound is five seconds.  It is compressed here so the test does
+    # not spend them, but the third dial still has to finish inside this
+    # window — and a full suite running `-n auto` can spend a second on the
+    # catalogue write alone.  Two seconds is the compression that stays one
+    # without turning scheduling jitter into a failure; the slow dial below is
+    # still 1.5× it, so it still outlasts the wait it must.
+    monkeypatch.setattr(_T.timeouts.ready, "list_settle", 2.0)
     attempts = 0
 
     class SlowFailure(FakeClient):
@@ -3910,6 +4039,58 @@ async def test_a_verdict_is_written_into_every_homes_catalogue(
 
     assert status(mine) == "error"
     assert status(theirs) == "error", "the other home still reads that tool as up"
+
+
+@pytest.mark.asyncio
+async def test_a_fan_out_failure_that_later_heals_is_forgotten(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A transient verdict write must not fail a home for the process's life.**
+
+    `_write` clears its failure after any successful merge; `source_state` only
+    recorded one.  A source that is down never merges, so the only write that
+    could heal the entry was the one that did not — every later `list_tools` in
+    that home raised "the tool catalogue is not working".
+    """
+    from slife2.plugins.toolhub.server import Catalogue
+
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+
+    async def open_store() -> ToolStore:
+        return ToolStore(catalogue_db(), threshold=100)
+
+    async def embedder() -> Any:
+        return StubEmbedder()
+
+    catalogue = Catalogue(open_store, embedder)
+    rows = [{"name": "serper__search", "description": "Search the web."}]
+    for home in (mine, theirs):
+        with in_home(home):
+            await catalogue.store()
+            await catalogue.merge("serper", "mcp", rows)
+
+    with in_home(theirs):
+        their_store = await catalogue.store()
+    real_write = their_store.set_source_state
+    broken = {"on": True}
+
+    def flaky(source: str, state: str, **kwargs: Any) -> Any:
+        if broken["on"]:
+            raise RuntimeError("their disk hiccup")
+        return real_write(source, state, **kwargs)
+
+    monkeypatch.setattr(their_store, "set_source_state", flaky)
+    with in_home(mine):
+        await catalogue.source_state("serper", "error")
+    with in_home(theirs):
+        assert "their disk hiccup" in catalogue.failure
+
+    broken["on"] = False
+    with in_home(mine):
+        await catalogue.source_state("serper", "enabled")
+    with in_home(theirs):
+        assert catalogue.failure == "", "a later successful verdict heals that home"
 
 
 @pytest.mark.asyncio

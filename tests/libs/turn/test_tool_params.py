@@ -33,7 +33,7 @@ from slife2.libs.harness.async_tasks import (
     marker,
 )
 from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
-from slife2.libs.turn.loop import BACKGROUND_UNAVAILABLE, DENIED, AgentLoop
+from slife2.libs.turn.loop import DENIED, AgentLoop
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolCall, ToolSpec
 from slife2.libs.turn.tools import (
     Tool,
@@ -333,12 +333,71 @@ async def test_a_background_result_is_handed_back_to_the_conversation() -> None:
     assert fields["task_id"] == task_id
     assert "the answer" in delivered[0]
 
+    # **The raw output is released with the delivery.**  `asyncio` keeps a
+    # task's return value on the task object, and `Task.handle` is held in the
+    # registry until the model polls — so returning the result kept a *pre-fit*
+    # copy of every delivered answer alive for the process, defeating the
+    # release `hand_back` had just made.
+    held = async_tasks._tasks[task_id]
+    for _ in range(50):
+        if held.handle.done():
+            break
+        await asyncio.sleep(0)
+    assert held.result == ""
+    assert held.handle.result() == "", "the delivered output is still reachable"
+
     # And the status query says so, without repeating the result: it was already
     # delivered, and a result read twice is a result the model keeps paying for.
     answer = await check_async({"task_id": task_id})
     assert answer["status"] == FINISHED
     assert answer["call_id"] == "call-1" and answer["tool"] == "slow"
     assert "result" not in answer, "the answer was already handed over"
+
+
+@pytest.mark.asyncio
+async def test_a_background_task_is_readable_only_in_its_conversation() -> None:
+    """**A task id is not a capability.**
+
+    The registry is the process's, so one agent's model can name another
+    conversation's id if it learns or guesses it.  The task carries the
+    conversation it was scheduled in, and both tools answer only there — the
+    wrong-conversation refusal is the same sentence as an unknown id, so it
+    cannot confirm that the id exists either.  It must also refuse without
+    touching the work.
+    """
+    released = asyncio.Event()
+
+    async def slow(_arguments: dict[str, Any]) -> str:
+        await released.wait()
+        return "the answer"
+
+    call = ToolCall(id="call-scope", name="slow", arguments={"_async": True})
+    messages: list[Message] = []
+    home_scope = ("home", "jack", "")
+    loop = one(call, [a_tool("slow", slow)], background_scope=home_scope)
+    await loop.run_turn(messages, "hi")
+    task_id = marker_fields(tool_message(messages))["task_id"]
+    task = async_tasks._get_task(task_id)
+    assert task is not None
+
+    foreign = ("home", "jill", "")
+    with pytest.raises(ToolFailed):
+        await check_async({"task_id": task_id}, scope=foreign)
+    with pytest.raises(ToolFailed):
+        await cancel_async({"task_id": task_id}, scope=foreign)
+
+    answer = await check_async({"task_id": task_id}, scope=home_scope)
+    assert answer["status"] == RUNNING, "a foreign cancel must not stop the work"
+
+    released.set()
+    for _ in range(50):
+        if task.handle.done():
+            break
+        await asyncio.sleep(0)
+    # A caller that names no conversation — the library's own — still reads it.
+    answer = await check_async({"task_id": task_id})
+    assert answer["status"] == FINISHED
+    assert answer["result"] == "the answer"
 
 
 @pytest.mark.asyncio
@@ -413,6 +472,36 @@ async def test_the_cap_drops_a_delivered_result_before_an_undelivered_one(
 
     assert async_tasks._get_task(first) is not None, "the unread result stayed"
     assert async_tasks._get_task(second) is None, "the delivered one made room"
+
+
+@pytest.mark.asyncio
+async def test_the_cap_may_take_an_unread_result_and_the_refusal_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The memory bound wins eventually, and the sentence stays true.**  When
+    only undelivered finished tasks are left, the prune's second pass drops the
+    oldest — a result nobody read.  The refusal both tools answer with names
+    that third cause, rather than claiming the result was read already.
+    """
+
+    async def done() -> tuple[str, bool]:
+        return "the answer nobody read", True
+
+    monkeypatch.setattr(async_tasks, "MAX_ASYNC_TASKS", 1)
+
+    first = async_tasks.schedule(done(), call_id="c", tool="t")
+    for _ in range(50):
+        task = async_tasks._get_task(first)  # noqa: SLF001 - the registry under test
+        if task is not None and task.handle.done():
+            break
+        await asyncio.sleep(0)
+
+    async_tasks.schedule(done(), call_id="c", tool="t")  # over the cap
+    assert async_tasks._get_task(first) is None, "the unread result was dropped"
+
+    with pytest.raises(ToolFailed) as raised:
+        await check_async({"task_id": first})
+    assert "dropped to bound memory" in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -503,28 +592,6 @@ async def test_a_background_timeout_says_which_call_and_which_bound() -> None:
     assert handed, "the timed-out call was never handed back"
     assert "Error: Tool 'hangs' timed out (0.05s)." in handed[0]
     assert "TimeoutError" not in handed[0]
-
-
-@pytest.mark.asyncio
-async def test_a_background_call_is_refused_where_nothing_can_be_handed_back() -> None:
-    """No `deliver` means the mode is refused, in a sentence that can be acted on.
-
-    An agent task's loop is that case (SDD §14.2): it runs one turn and has no
-    second one for a result to arrive in, so a task id would be a promise nothing
-    could keep.  The refusal says which one line fixes it.
-    """
-    seen: list[str] = []
-
-    async def slow(_arguments: dict[str, Any]) -> str:
-        seen.append("ran")
-        return "the answer"
-
-    call = ToolCall(id="1", name="slow", arguments={"_async": True})
-    messages: list[Message] = []
-    await one(call, [a_tool("slow", slow)]).run_turn(messages, "hi")
-
-    assert tool_message(messages) == BACKGROUND_UNAVAILABLE
-    assert seen == []
 
 
 @pytest.mark.asyncio
@@ -753,6 +820,27 @@ def test_the_two_tools_keep_the_names_the_prompt_uses() -> None:
     assert 'check_async(task_id="' in async_tasks.started("deadbeef", "c", "t")
 
 
+def test_a_timeout_written_as_text_is_refused_too() -> None:
+    """**A number-shaped string is still text**, and the contract says text
+    fails (SDD §7.7).
+
+    `float("5")` succeeds, so the old reading honoured `_timeout: "5"` as five
+    seconds while refusing `_timeout: "soon"` — the same wrong shape answered
+    two ways.  A model that wrote an object's spelling of a number is a call
+    the harness cannot know it meant, and the refusal is the answer.
+    """
+    for value in ("5", "1.5", " 5 ", "soon"):
+        seconds, error = read_timeout(value)
+        assert seconds is None
+        assert error is not None and "positive, finite" in error
+
+    spec = ToolSpec(name="render", description="", parameters={"properties": {}})
+    arguments: dict[str, Any] = {"timeout": "5"}
+    bound, error = bind_timeout(arguments, spec, None)
+    assert bound is None and error is not None
+    assert "timeout" not in arguments
+
+
 def test_an_endless_timeout_is_refused_like_any_other_bad_number() -> None:
     """**`1e999` is valid JSON and is not a duration anyone can honour.**
 
@@ -773,6 +861,44 @@ def test_an_endless_timeout_is_refused_like_any_other_bad_number() -> None:
     bound, error = bind_timeout(arguments, spec, None)
     assert bound is None and error is not None
     assert "timeout" not in arguments
+
+
+def test_a_timeout_beyond_float_range_is_refused_not_crashed() -> None:
+    """**A 310-digit integer is valid JSON and overflows `float`.**
+
+    `1e999` arrives as `inf`, but an integer literal past float range arrives as
+    an `int`, and `float(int)` raises `OverflowError` — which used to escape the
+    refusal path and die the turn.  It is the same unreadable duration in the
+    integer spelling, refused like every other.
+    """
+    huge = 10**309
+    for value in (huge, -huge):
+        seconds, error = read_timeout(value)
+        assert seconds is None
+        assert error is not None and "positive, finite" in error
+
+    # The bare key on a tool that does not declare one.
+    spec = ToolSpec(name="render", description="", parameters={"properties": {}})
+    arguments: dict[str, Any] = {"timeout": huge}
+    bound, error = bind_timeout(arguments, spec, None)
+    assert bound is None and error is not None
+    assert "timeout" not in arguments
+
+    # And on a tool that declares its own `timeout`: the binder reads the bare
+    # value only to decide whether to drop it.  A huge positive one is kept (the
+    # tool reads the original argument); a huge negative one is dropped.  Neither
+    # may crash the turn.
+    declaring = ToolSpec(
+        name="render", description="", parameters={"properties": {"timeout": {}}}
+    )
+    kept: dict[str, Any] = {"timeout": huge}
+    bound, error = bind_timeout(kept, declaring, None)
+    assert bound is None and error is None
+    assert kept["timeout"] == huge
+    dropped: dict[str, Any] = {"timeout": -huge}
+    bound, error = bind_timeout(dropped, declaring, None)
+    assert bound is None and error is None
+    assert "timeout" not in dropped
 
 
 @pytest.mark.asyncio

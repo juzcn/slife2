@@ -57,7 +57,7 @@ import logging
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from fastmcp.exceptions import ToolError
 from textual.app import App, ComposeResult
@@ -67,19 +67,23 @@ from textual.worker import Worker
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import ToolCounts
-from slife2.libs.host.config import DEFAULT_AGENT
+from slife2.libs.harness import notes
+from slife2.libs.harness.i18n import t
+from slife2.libs.host.config import DEFAULT_AGENT, prompt_budget
+from slife2.libs.plugin.vocabulary import NOTE, RUNNING, Handover
 from slife2.libs.turn.events import (
     MessageCutIn,
     ToolApprovalRequested,
     ToolsCounted,
     TurnEvent,
     TurnFinished,
+    UsageReported,
 )
-from slife2.plugins.tui.server import NOTE, Handover
-from slife2.tui import notes
 from slife2.tui.client import (
     AgentClient,
+    AgentTaskClient,
     MCPAgentClient,
+    MCPAgentTaskClient,
     MCPMeshClient,
     MCPWindowClient,
     MeshClient,
@@ -88,7 +92,6 @@ from slife2.tui.client import (
     WindowClient,
 )
 from slife2.tui.draw import draw
-from slife2.tui.i18n import t
 from slife2.tui.restore import restore
 from slife2.tui.theme import css_variables
 from slife2.tui.watch import WatchScreen
@@ -100,7 +103,10 @@ from slife2.tui.widgets import (
     HistoryInput,
     ModelChoice,
     ModelPicker,
+    PlanView,
+    QuestionStrip,
     StatusBar,
+    WatchChoice,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +132,21 @@ class EventsFlushed(TextualMessage):
 
     def __init__(self, done: asyncio.Future[None]) -> None:
         self.done = done
+        super().__init__()
+
+
+class InboxMessage(TextualMessage):
+    """One hand-over, carried from the inbox's push into Textual's handling.
+
+    **A note is a widget write, and a widget write outside this pump is out of
+    order.**  The push arrives on the MCP client's task; drawn from there, a note
+    about a peer arriving could land above a `TextDelta` already queued, so the
+    transcript showed text streamed before the line it preceded.  Carrying it in
+    a message is the same road `_on_event` takes for every turn event.
+    """
+
+    def __init__(self, handover: Handover) -> None:
+        self.handover = handover
         super().__init__()
 
 
@@ -157,10 +178,10 @@ def context_of(turns: Sequence[Mapping[str, Any]]) -> int:
     """How large the conversation was, from the turns a window has just drawn.
 
     **The same quantity a live turn reports, and the only place it can come from
-    on a window that has run no turn.**  `_context_tokens` is set from
-    `TurnFinished`'s `last_usage`, so a window that has only restored keeps its
-    initial zero — a rebuilt conversation would show `0 (0.0%)` directly under a
-    note saying its turns had come back.
+    on a window that has run no turn.**  `_context_tokens` is set from the
+    stream's `UsageReported` (and settled by `TurnFinished`), so a window that
+    has only restored keeps its initial zero — a rebuilt conversation would show
+    `0 (0.0%)` directly under a note saying its turns had come back.
 
     `TurnRecord.context_tokens` is documented as exactly this question ("how
     large the conversation had become by the end of it — the number the *next*
@@ -210,11 +231,20 @@ def model_choices(rows: Sequence[Mapping[str, Any]]) -> list[ModelChoice]:
                 ref=str(row.get("ref") or ""),
                 label="" if name == model else name,
                 context_window=int(row.get("context_window") or 0),
+                prompt_window=prompt_budget(
+                    int(row.get("context_window") or 0),
+                    int(row.get("max_tokens") or 0),
+                ),
                 thinking="reasoning" in marks,
                 vision="image" in marks,
             )
         )
     return choices
+
+
+#: What a picker's future resolves to — `ModelChoice` or `WatchChoice`.  The
+#: question strip's helper is the one shape both keys share.
+_Choice = TypeVar("_Choice")
 
 
 class SlifeApp(App[None]):
@@ -244,11 +274,12 @@ class SlifeApp(App[None]):
         # rather than two that can drift apart.
         Binding("ctrl+s", "switch_model", "Switch model", show=False),
         # The conversation switcher: `Ctrl+O` opens the list of this agent's
-        # subagents, and choosing one pushes a read-only screen that watches it
-        # (`slife2.tui.watch`).  `o` for open; not a tab bar, because a subagent
-        # is a place to look rather than a second prompt to type into, and a
-        # screen leaves the window's own conversation running underneath it.
-        Binding("ctrl+o", "watch_subagent", "Watch a subagent", show=False),
+        # subagents and its running agent tasks, and choosing one pushes a
+        # read-only screen that watches it (`slife2.tui.watch`).  `o` for open;
+        # not a tab bar, because a subagent or a task is a place to look rather
+        # than a second prompt to type into, and a screen leaves the window's
+        # own conversation running underneath it.
+        Binding("ctrl+o", "watch", "Watch a subagent or task", show=False),
         # Home/End go to the transcript rather than to the draft, and
         # `priority` is what makes that true: the priority pass runs *before*
         # the focused widget, and the focused widget is the prompt, whose
@@ -260,6 +291,14 @@ class SlifeApp(App[None]):
         # itself, because `TextArea` claims them and nothing else can.
         Binding("home", "scroll_home", "Scroll to top", priority=True),
         Binding("end", "scroll_end", "Scroll to bottom", priority=True),
+        # The approval row's answers, kept here so they survive a blur: every
+        # printable key moves the focus to the prompt (`redirect_printable`),
+        # and a row-scoped binding is then no longer in the chain — the person
+        # presses `y` or `n` and types it instead.  `check_action` leaves both
+        # disabled while no call is waiting, so an ordinary draft still gets its
+        # `y` and its `n`; while one is, the answer wins wherever focus is.
+        Binding("y", "approve_request", "Approve", show=False, priority=True),
+        Binding("n", "deny_request", "Deny", show=False, priority=True),
     ]
 
     def __init__(
@@ -275,10 +314,13 @@ class SlifeApp(App[None]):
         tool_counts: ToolCounts | None = None,
         control_url: str = "",
         mesh_url: str = "",
+        task_url: str = "",
         client_factory: Callable[[], AgentClient] | None = None,
         window_factory: Callable[[], WindowClient] | None = None,
         mesh_factory: Callable[[], MeshClient] | None = None,
         watch_client_factory: Callable[[str], WatchClient] | None = None,
+        task_client_factory: Callable[[], AgentTaskClient] | None = None,
+        task_watch_client_factory: Callable[[str], WatchClient] | None = None,
     ) -> None:
         # `App.__init__` takes no title, so it is assigned after the fact; the
         # attribute is reactive and the header picks it up.
@@ -294,9 +336,11 @@ class SlifeApp(App[None]):
         self._agent = agent
         self._model = model
         self._model_label = model_label or model
-        #: The model's budget, from its config, for the percentage in the status
-        #: bar.  Zero when the config does not say, and then no percentage is
-        #: shown rather than one against a number somebody invented.
+        #: The model's **prompt budget**, from its config, for the percentage in
+        #: the status bar: the window minus the completion request, because a
+        #: provider counts both against one window.  Zero when the config does
+        #: not say, and then no percentage is shown rather than one against a
+        #: number somebody invented.
         self._context_window = context_window
         #: The model's own two capabilities, also from its config: it reasons
         #: natively, and it can be shown a picture.  Both are facts about the
@@ -327,6 +371,17 @@ class SlifeApp(App[None]):
         #: refuse the call it was holding: the loop is parked on that future, and
         #: a prompt nothing ever answers would keep the turn from ending.
         self._approval: ApprovalPrompt | None = None
+        #: What the row is asking, kept beside it: `(name, arguments, future)`,
+        #: so a prompt whose screen goes away can be mounted again on the one
+        #: that is showing.  The verdict is the future, so a second widget is a
+        #: second view of one question rather than a second question.
+        self._approval_question: (
+            tuple[str, dict[str, Any], asyncio.Future[bool]] | None
+        ) = None
+        #: Set while a cancelled or failed turn's queued events are being
+        #: flushed.  The turn is gone, so an approval among them has nobody left
+        #: to answer it — `_apply` drops it rather than mounting the row.
+        self._turn_over = False
         #: Where this window *attaches* so a message arriving on another channel
         #: can be handed to it (`slife2.plugins.tui.server`) — the plugin's address, and
         #: the window is its client.  Empty means no inbox, which is what a test
@@ -360,6 +415,23 @@ class SlifeApp(App[None]):
         self._watch_client_factory = watch_client_factory or (
             lambda name: MCPAgentClient(url, agent=agent, subagent=name)
         )
+        #: The task half of the same key, and **the fifth and sixth connections**
+        #: for the same reason as the fourth: the list is read on one short-lived
+        #: client and the screen gets another, so a watch that drops cannot take
+        #: the list with it.  Empty `task_url` is a machine whose config has no
+        #: agent-task server: the picker then offers subagents only, and there is
+        #: no key that looks broken because a plugin is not there.
+        self._task_client_factory = task_client_factory
+        self._task_watch_client_factory = task_watch_client_factory
+        if task_url:
+            if self._task_client_factory is None:
+                self._task_client_factory = lambda: MCPAgentTaskClient(
+                    task_url, agent=agent
+                )
+            if self._task_watch_client_factory is None:
+                self._task_watch_client_factory = lambda name: MCPAgentTaskClient(
+                    task_url, agent=agent, name=name
+                )
         self._client: AgentClient | None = None
         self._window: WindowClient | None = None
         self._mesh: MeshClient | None = None
@@ -372,7 +444,7 @@ class SlifeApp(App[None]):
         #: What the status bar says when there is no connection.  **Resolved in
         #: the interface's language where it is set**, rather than stored as a
         #: state and translated at render time: the language is decided once
-        #: before this window exists (`slife2.tui.i18n`), so the two are the same
+        #: before this window exists (`slife2.libs.harness.i18n`), so the two are the same
         #: answer and the second spelling is one more thing `_refresh_status`
         #: would have to know.
         self._connection_text = t("connection_connecting")
@@ -440,6 +512,15 @@ class SlifeApp(App[None]):
         # The transcript signs its messages with the agent name, so a
         # conversation reads `You> ...` / `jack> ...` on both sides.
         yield ChatView(self._agent)
+        # A question is current state while it asks, so it waits here, out of
+        # the transcript's scroll — and stacked above the plan strip, which
+        # stays the strip directly above the prompt.  Hidden until a question
+        # opens (`QuestionStrip`).
+        yield QuestionStrip(id="question-strip")
+        # The plan sits between the question and the prompt: it is current
+        # state rather than history, so it stays put while the transcript
+        # scrolls.  Hidden until there is a plan (`PlanView`).
+        yield PlanView()
         yield HistoryInput(
             # The agent's name, not the program's: the prompt is addressed to
             # whoever this instance is, and it is the one place the name is
@@ -505,7 +586,8 @@ class SlifeApp(App[None]):
 
         A worker of its own, because the call does not return while the window is
         up: `attach` *is* the session (`slife2.plugins.tui.server`), and what arrives on
-        it goes through `deliver` — the same method the person's own typing goes
+        it is posted into the message pump — where a note is drawn and a message
+        goes through `deliver`, the same method the person's own typing goes
         through, which is the whole of the pass-through.
 
         Retried rather than fatal, for `_connect`'s reason: a plugin that is not
@@ -545,12 +627,12 @@ class SlifeApp(App[None]):
         is killed is reported to every peer as `✗ offline` without anything being
         sent.
 
-        **The agent's own `⚡ online` line is the plugin's, not this worker's.**
-        There is nothing here to draw it from: the call succeeds by *not
-        returning*, so a window that waited for a return to draw a line would
-        report a successful join as a silence.  The plugin draws it — the same
-        function that draws every peer's arrival — and this worker's business is
-        only what went wrong.
+        **A successful join draws nothing, on purpose.**  The call succeeds by
+        *not returning*, so a window that waited for a return to draw a line
+        would report a successful join as a silence.  And the agent's own
+        arrival is not news to its own window (`join`: `⚡ jack online` in
+        jack's window would be the harness telling somebody what they already
+        are).  What this worker draws is what went wrong.
 
         Retried rather than fatal, for `_connect`'s reason: a plugin that is not
         answering must not make the window unusable, and what is lost while it is
@@ -560,7 +642,12 @@ class SlifeApp(App[None]):
         would otherwise write the same line every two seconds.
         """
         assert self._mesh is not None
-        complained = False
+        #: A transport failure and a refusal are two different facts: an early
+        #: connection error used to set the one flag a later refusal was gated
+        #: on, so the line a person could act on — a name taken, a broker that
+        #: is not there — was only logged at debug.
+        unreachable = False
+        refusal_said = False
         while True:
             try:
                 await self._mesh.connect()
@@ -572,42 +659,37 @@ class SlifeApp(App[None]):
                 # because it is the one failure the person can act on — a name
                 # another instance is holding, a broker that is not running —
                 # and because the window would otherwise look exactly like one
-                # on a mesh that is working.
-                if not complained:
+                # on a mesh that is working.  Said once: the reason does not
+                # change between attempts.
+                if not refusal_said:
                     self._transcript.add_note(notes.not_on_the_mesh(str(exc)))
-                    complained = True
+                    refusal_said = True
                 else:
                     logger.debug("A2A mesh still refusing %s: %s", self._agent, exc)
                 await self._mesh.close()
                 await asyncio.sleep(_T.timeouts.pacing.reconnect)
             except Exception as exc:  # noqa: BLE001 - a missing mesh is operational
-                (logger.debug if complained else logger.warning)(
+                (logger.debug if unreachable else logger.warning)(
                     "A2A mesh unavailable: %s", exc
                 )
-                complained = True
+                unreachable = True
                 await self._mesh.close()
                 await asyncio.sleep(_T.timeouts.pacing.reconnect)
             else:
                 return
 
     def _take(self, handover: Handover) -> None:
-        """Take one hand-over, from the plugin's push.
+        """Take one hand-over, from the plugin's push.  Does not touch widgets.
 
         A method of its own rather than `deliver` passed straight through,
         because the two say different things: this is the wire's shape arriving
         (`slife2.plugins.tui.server`), and `deliver` is the window's one way in.
 
-        **And this is where the two kinds part.**  A message becomes a turn and
-        joins the queue, so it is drawn when its turn starts like anything the
-        person typed.  A note is drawn *now*, because that is what it is: a line
-        about the moment it describes — a peer arriving, most of them — and one
-        that waited behind a running turn would be telling the person about a
-        peer who has since left.
+        **The branch happens in the pump** (`on_inbox_message`): a note is a
+        widget write, and this callback runs on the MCP client's task, where a
+        note could jump ahead of deltas already queued for the same screen.
         """
-        if handover.kind == NOTE:
-            self._transcript.add_note(handover.text)
-            return
-        self.deliver(handover.text, handover.channel)
+        self.post_message(InboxMessage(handover))
 
     def deliver(self, text: str, channel: str) -> None:
         """Take a message from another channel, to run as if it were typed.
@@ -728,7 +810,7 @@ class SlifeApp(App[None]):
         """Connect, restore, and raise when a server still cannot be reached.
 
         `_ensure_connected` plus the check it leaves to its caller, written once:
-        `_send`, `_switch_model`, `_finish_approval` and `_choose_subagent` all
+        `_send`, `_switch_model`, `_finish_approval` and `_choose_watch` all
         need the same two statements, and the sentence the raise carries is a
         fact about this window rather than about any one of them — so it is
         stated here once, with the reason the caller wants it: a turn, a switch,
@@ -765,7 +847,7 @@ class SlifeApp(App[None]):
                 return
             assert self._client is not None
             try:
-                turns = await self._client.transcript()
+                conversation = await self._client.transcript()
             except Exception as exc:  # noqa: BLE001 - a window is not worth losing
                 # Given back (the flag stays unset) because this is the retry
                 # path: a read that failed because the servers were still coming
@@ -778,14 +860,20 @@ class SlifeApp(App[None]):
                 self._connection_text = t("connection_disconnected", err=exc)
                 self._refresh_status()
                 return
-            restore(self._transcript, turns)
+            restore(self._transcript, conversation.turns)
+            # **The plan comes with the history, once.**  A live write reaches
+            # the strip through the turn events (`_apply`); this is the other
+            # half, the state a window that has just opened was not there to
+            # see.  It is set from the same opening read for the watcher's
+            # reason: a window and a watcher opened together draw one plan.
+            self.query_one(PlanView).set_plan(conversation.plan)
             # Set only now, so it reports what has actually happened.  `restore`
             # cannot raise on its own data — it drops a row it cannot read — so
             # the only failure left outside the `try` is the transport's, above.
             self._restored = True
         # The bar is the one part of the window that would not otherwise know
         # the conversation had come back — see `context_of`.
-        self._context_tokens = context_of(turns)
+        self._context_tokens = context_of(conversation.turns)
         self._refresh_status()
 
     # --- the queue of turns --------------------------------------------------
@@ -895,10 +983,10 @@ class SlifeApp(App[None]):
                     # the turn is declared over.**  A cancelled turn's ticket is
                     # retired below, so an event still in the pump would be
                     # dropped — and `[interrupted]` is the last thing it is owed.
+                    # The turn is gone, though, so an approval waiting in that
+                    # queue is a question nobody can answer (`_turn_over`).
+                    self._turn_over = True
                     await self._flush_events()
-                    if not entry.drawn:
-                        self._transcript.add_user(entry.prompt, channel=entry.channel)
-                        entry.drawn = True
                     # `append_text` is guarded by `_turn_open`, which the
                     # `ends_turn` below clears, but `add_tool_start` is guarded
                     # by neither: a late `ToolCallStarted` would mount a panel
@@ -913,14 +1001,32 @@ class SlifeApp(App[None]):
                     # the same reason: a turn that is over must not mount
                     # anything later, and the ticket is retired before the line
                     # below so no event can arrive under it.
+                    #
+                    # **A prompt whose turn died is settled first.**  This is
+                    # the third ending that owes an approval an answer, beside
+                    # `TurnFinished` and the cancel path: a transport that
+                    # drops while the turn is parked arrives here and never as
+                    # a finish, and a row left `pending` keeps y/n writing to a
+                    # turn that is gone and keeps Ctrl+O refused.  `_turn_over`
+                    # is set before the deny so a request still in the flush
+                    # below cannot mount a replacement.
+                    self._turn_over = True
+                    if self._approval is not None and self._approval.pending:
+                        self._approval.action_deny()
                     await self._flush_events()
                     self._finish_entry(ticket)
-                    # A turn that died before its first event still had a
-                    # message; draw it now so the error has a subject.
-                    if not entry.drawn:
-                        self._transcript.add_user(entry.prompt, channel=entry.channel)
-                        entry.drawn = True
                     self._transcript.add_error(str(exc))
+                    # **A transport that died is the bar's news too.**  The
+                    # turn's failure is in the transcript, but the bar is the
+                    # part that says whether the window still has a server —
+                    # and the client's own flag, not the exception, is what
+                    # tells a dropped link from a server that answered with a
+                    # failure.  `_ensure_connected` reconnects on the next
+                    # send; until then the bar says what is true.
+                    if self._client is not None and not self._client.connected:
+                        self._connected = False
+                        self._connecting = False
+                        self._connection_text = t("connection_disconnected", err=exc)
                 else:
                     # **The reply is the authority on whether this message ran a
                     # turn of its own.**  A folded message produces no events at
@@ -938,6 +1044,7 @@ class SlifeApp(App[None]):
                     )
                 finally:
                     self._interrupting = False
+                    self._turn_over = False
                     self._turn = None
                     # **Whatever the turn was still waiting on has no ending
                     # coming.**  A tool call ends through `ToolCallFinished`, and
@@ -945,8 +1052,11 @@ class SlifeApp(App[None]):
                     # and a transport that died mid-call — all leave the panel
                     # that opened for it claiming to be running.  Done here rather
                     # than in the two branches because it is a fact about *every*
-                    # ending, including the next one somebody adds.
+                    # ending, including the next one somebody adds.  The plan
+                    # strip parks writes the same way and settles at the same
+                    # seam (`PlanView.settle`).
                     self._transcript.settle_tools()
+                    self.query_one(PlanView).settle()
                     if ticket in self._submissions:
                         self._finish_entry(ticket)
                     self._refresh_status()
@@ -1044,6 +1154,24 @@ class SlifeApp(App[None]):
         if not message.done.done():
             message.done.set_result(None)
 
+    def on_inbox_message(self, message: InboxMessage) -> None:
+        """One hand-over, applied inside the pump — the display's ordering seam.
+
+        **The two kinds part here.**  A message becomes a turn and joins the
+        queue, so it is drawn when its turn starts like anything the person
+        typed.  A note is drawn now, because that is what it is: a line about
+        the moment it describes — a peer arriving, most of them — and one that
+        waited behind a running turn would be telling the person about a peer
+        who has since left.  Being drawn *now* is a position in the pump's FIFO
+        queue, not a position on the wire: text streamed before the note was
+        posted is above it.
+        """
+        handover = message.handover
+        if handover.kind == NOTE:
+            self._transcript.add_note(handover.text)
+            return
+        self.deliver(handover.text, handover.channel)
+
     def on_turn_event_message(self, message: TurnEventMessage) -> None:
         # Late fragments of a turn that is over.  Dropping them is what keeps
         # one turn's tail out of the next turn's block — see the module
@@ -1065,10 +1193,14 @@ class SlifeApp(App[None]):
         **The display half is `slife2.tui.draw.draw`'s**, shared with the screen
         that watches a conversation the window is not running, so a watched turn
         and a typed one cannot render differently.  The events that are the
-        *window's* — the approval prompt, the bill in the status bar, and the
-        catalogue's size — are handled here, because they are facts about this
-        view rather than about the conversation.
+        *window's* — the approval prompt, the bill in the status bar, the
+        catalogue's size and the plan strip — are handled here, because they are
+        facts about this view rather than about the conversation.
         """
+        # **The plan's live half.**  The opening read sets the plan the window
+        # was not there to see; every turn after it reaches the strip through
+        # this call, and a successful `plan_write` is what changes it.
+        self.query_one(PlanView).observe(event)
         if isinstance(event, ToolsCounted):
             # The hub's answer to the ask this model call was built from: the
             # pair the bar shows, both halves from the same ask
@@ -1076,12 +1208,37 @@ class SlifeApp(App[None]):
             self._tool_counts = ToolCounts(loaded=event.loaded, total=event.total)
             self._refresh_status()
             return
+        # A per-call report of the conversation's size.  **This is what makes
+        # the bar move during a turn**: a turn that calls tools makes several
+        # model calls, and waiting for `TurnFinished` showed the previous turn's
+        # figure until the whole turn was over.  `TurnFinished` reports the last
+        # call's size again, which is what repairs a report the stream dropped.
+        if isinstance(event, UsageReported):
+            self._context_tokens = event.last_usage.total_tokens
+            self._refresh_status()
+            return
         if isinstance(event, ToolApprovalRequested):
+            # **A late prompt is not a prompt.**  The cancel/failure flush waits
+            # for everything posted before it, and a request the turn made
+            # before it died can be in that queue: its future was dropped with
+            # the turn, so mounting the row would put up a question nobody will
+            # ever answer.  A live turn is what gives the question a meaning.
+            if self._turn is None or self._turn_over:
+                return
             # **The turn is parked on this**, so it is answered off the message
             # pump rather than in it — see `_ask_approval`.
             self._ask_approval(event.call_id, event.name, event.arguments)
             return
         if isinstance(event, TurnFinished):
+            # **A turn's end settles its pending approval.**  The server refuses
+            # an unanswered request after its own bound and continues without a
+            # tool event, so the window could keep a row "requests approval"
+            # after the turn was over — leaving y/n live and Ctrl+O refused for
+            # a question nobody was waiting on.  Denying it is the same answer
+            # the cancel path gives, and the worker's `answer_approval` reports
+            # that the turn had already moved on.
+            if self._approval is not None and self._approval.pending:
+                self._approval.action_deny()
             # Two numbers, two questions.  `last_usage` is how large the
             # conversation had become by the end — the only thing a context
             # percentage can be a percentage of.  `usage` is the turn's bill
@@ -1103,6 +1260,15 @@ class SlifeApp(App[None]):
         The flag is set before the cancel so the drain can tell this
         interruption from the one an exit or a reset causes; see
         `_interrupting`.
+
+        **A turn is in flight even where the drain holds no live task.**
+        `_turn` is None while the drain connects and restores before it mounts
+        the first block, and done while a reply's tail events are flushed after
+        the answer arrived — windows where the submission's call is still the
+        work in flight and `_order` still holds it.  The head of the display
+        order is that submission, so the interrupt lands on its task; reporting
+        "no turn" here would quit the app over work that is still running,
+        which is the one thing the module docstring's ctrl+c promise refuses.
         """
         # **The prompt is refused first.**  The loop is parked on that future,
         # and a row left undecided on a turn that is going away is an answer
@@ -1112,21 +1278,61 @@ class SlifeApp(App[None]):
         # is still answered rather than left hanging.
         if self._approval is not None:
             self._approval.action_deny()
-        if self._turn is None or self._turn.done():
-            return False
+        turn = self._turn
+        if turn is None or turn.done():
+            if not self._order:
+                return False
+            # The drain is between holds — connecting, restoring, or flushing
+            # a reply's tail.  The head submission's task is the work still in
+            # flight; where the reply already arrived the cancel is a no-op,
+            # and the report is the point: there is something to stop, so the
+            # interrupt does not quit.
+            turn = self._submissions[self._order[0]].task
+            assert turn is not None
         self._interrupting = True
-        self._turn.cancel()
+        turn.cancel()
         return True
 
     def action_cancel(self) -> None:
-        """Stop the running turn — and nothing else, which is the point.
+        """Refuse the call that is being asked about, or stop the running turn.
 
-        Slife's rule, kept: escape is never a way out of the app, so pressing it
-        by reflex at the wrong moment costs a cancelled turn at worst and never
-        the window.  That is what makes it the interrupt to offer while
-        something is selected, where ctrl+c is busy deciding whether to copy.
+        **A pending approval owns escape, wherever the focus is.**  The row has
+        its own `escape` binding while it is focused, but every printable key
+        moves focus to the prompt, and there the key used to fall through to
+        this action and cancel the whole turn — a person answering the one call
+        the model asked about, and losing the work around it.  Refusing the call
+        is the smaller answer, and it is the one Esc means beside a question.
+
+        With nothing being asked, this is the turn interrupt and nothing else,
+        which is the point: escape is never a way out of the app.  That is what
+        makes it the interrupt to offer while something is selected, where
+        ctrl+c is busy deciding whether to copy.
         """
+        if self._approval is not None and self._approval.pending:
+            self._approval.action_deny()
+            return
         self._cancel_turn()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Whether one of this app's bindings applies right now.
+
+        The two approval answers exist only while a call is waiting for one:
+        with no prompt up they are disabled, and `y`/`n` reach the prompt as
+        ordinary letters — the draft keeps every key it had before.
+        """
+        if action in ("approve_request", "deny_request"):
+            return self._approval is not None and self._approval.pending
+        return super().check_action(action, parameters)
+
+    def action_approve_request(self) -> None:
+        """Approve the waiting call — the row's `y`, wherever the focus is."""
+        if self._approval is not None:
+            self._approval.action_approve()
+
+    def action_deny_request(self) -> None:
+        """Refuse the waiting call — the row's `n`, wherever the focus is."""
+        if self._approval is not None:
+            self._approval.action_deny()
 
     def action_interrupt(self) -> None:
         """Stop the running turn, or quit when there is nothing to stop.
@@ -1175,16 +1381,63 @@ class SlifeApp(App[None]):
         implementation of "switch the model" and one answer as to whether it
         worked.
         """
-        if self._switching:
+        if self._switching or self._choosing:
+            # **One question at a time, and it is the user's to finish.**  A
+            # second key would steal the focus from the open picker, whose blur
+            # cancels it: the first question gone without an answer.  The next
+            # key works once the first is picked or `Esc`ed.
             return
-        # **Only the window's own screen offers this**, for `action_watch_subagent`'s
-        # reason: with a watch up, the picker would mount in the transcript
-        # underneath it — invisible — and the latch would make the key look dead
-        # until the watch closed.
+        # **Only the window's own screen offers this**, for `action_watch`'s
+        # reason: with a watch up, the picker would mount in the window's own
+        # question strip underneath it — invisible — and the latch would make
+        # the key look dead until the watch closed.
         if self.screen is not self.screen_stack[0]:
             return
         self._switching = True
         self.run_worker(self._switch_model(), group="model", exit_on_error=False)
+
+    async def _ask_picker(
+        self,
+        picker: ModelPicker | ConversationPicker,
+        future: asyncio.Future[_Choice | None],
+        css_class: str,
+    ) -> _Choice | None:
+        """Put a picker in the question strip and wait for its decision.
+
+        **One question at a time.**  The caller's latch is what ignores the
+        other key while this one waits; two pickers would fight over the focus,
+        and the second would cancel the first on the blur it caused.
+
+        **The strip, not the transcript.**  A picker mounted at the tail of the
+        transcript scrolls away under the loop that is still writing: the keys
+        keep reaching it while the list stops being readable.  The strip is
+        fixed, and the plan strip above the prompt stays visible underneath it.
+
+        **The choice writes no line of its own.**  `Ctrl+O` opens the watch
+        screen, whose header names what is being watched; `Ctrl+S` ends in the
+        server's own note after the switch; `Esc` closes the question, and
+        nothing happened worth recording.  Adding a "Selected" line would be a
+        second spelling of a fact the interface already says.
+
+        **The prompt takes the focus back whether or not anything was chosen**:
+        the picker had it while it asked, and what the person did before the key
+        was type.  A cancelled worker (the window closing) leaves no record —
+        nothing was decided.
+        """
+        strip = self.query_one(QuestionStrip)
+        strip.display = True
+        # The class is the question's clothes (`app.tcss`): the strip's cap and
+        # the drawn edge both hang off it.
+        picker.add_class(css_class)
+        strip.mount(picker)
+        picker.focus()
+        try:
+            choice = await future
+        finally:
+            await picker.remove()
+            strip.display = False
+            self.query_one(HistoryInput).focus()
+        return choice
 
     async def _switch_model(self) -> None:
         """Read the models, ask which one, and switch the conversation onto it.
@@ -1204,37 +1457,35 @@ class SlifeApp(App[None]):
             try:
                 rows = await self._client.models()
             except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-                self._transcript.add_error(t("model_list_failed", err=exc))
+                self._transcript.add_error(
+                    t("model_list_failed", err=exc), ends_turn=False
+                )
                 return
             choices = model_choices(rows)
             if not choices:
                 # Said rather than shown as an empty picker: a list with no
                 # rows is a key that looks broken, and the tool that would fix
                 # it is the thing to name.
-                self._transcript.add_error(t("no_models"))
+                self._transcript.add_error(t("no_models"), ends_turn=False)
                 return
             future: asyncio.Future[ModelChoice | None] = asyncio.Future()
-            picker = self._transcript.add_picker(
-                ModelPicker(choices, self._model, future)
+            choice = await self._ask_picker(
+                ModelPicker(choices, self._model, future), future, "model-picker"
             )
-            picker.focus()
-            choice = await future
-            # The prompt takes the focus back, whether or not anything was
-            # chosen: the picker had it while it asked, and what the person did
-            # before ctrl+s was type.
-            self.query_one(HistoryInput).focus()
             if choice is None:
-                return  # cancelled — the picker's own line is the whole answer
+                return  # cancelled — nothing to switch, nothing to say
 
             try:
                 answer = await self._client.switch_model(choice.ref)
             except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-                self._transcript.add_error(t("model_switch_failed", err=exc))
+                self._transcript.add_error(
+                    t("model_switch_failed", err=exc), ends_turn=False
+                )
                 return
             # **A note, and it is this window's sentence.**  What the server said
             # is the *facts* — which model it is now, which it was, how many
             # conversations moved — and the line a person reads is the window's,
-            # like every other one it draws (`slife2.tui.i18n`); what it draws
+            # like every other one it draws (`slife2.libs.harness.i18n`); what it draws
             # from them is the half only the server knows, which is why `moved`
             # is in the sentence at all.
             self._transcript.add_note(
@@ -1253,67 +1504,135 @@ class SlifeApp(App[None]):
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(t("model_list_failed", err=exc))
+            self._transcript.add_error(t("model_list_failed", err=exc), ends_turn=False)
         finally:
             self._switching = False
 
-    # --- watching a subagent -------------------------------------------------
+    # --- watching a subagent or a task ---------------------------------------
 
-    def action_watch_subagent(self) -> None:
-        """Open the subagent picker; the choice pushes a read-only screen.
+    def action_watch(self) -> None:
+        """Open the watch picker; the choice pushes a read-only screen.
 
         **Sync, for the model picker's reason** (`action_switch_model`): an
-        action runs inside the key handler, so awaiting the list and then the
+        action runs inside the key handler, so awaiting the lists and then the
         choice there would block the pump that has to deliver the `Enter` that
         resolves the picker.  A worker does both.
         """
-        if self._choosing:
+        if self._choosing or self._switching:
+            # See `action_switch_model`: one question at a time, until the
+            # person picks or presses `Esc`.
             return
         # **Only the window's own screen offers this.**  With a watch screen
-        # up, the picker would mount in the transcript underneath it — invisible
-        # — and the choice would push a second screen over the first.  `Esc` is
-        # how you leave a watch; the next `Ctrl+O` then opens the picker again.
+        # up, the picker would mount in the window's own question strip
+        # underneath it — invisible — and the choice would push a second screen
+        # over the first.  `Esc` is how you leave a watch; the next `Ctrl+O`
+        # then opens the picker again.
         if self.screen is not self.screen_stack[0]:
             return
+        # **And not over a question the person has to answer.**  The approval row
+        # would be covered by the watch screen, which is the hidden-prompt state
+        # `_ask_approval` exists to prevent; the call is one key away after the
+        # answer, so the answer comes first.
+        if self._approval is not None and self._approval.pending:
+            return
         self._choosing = True
-        self.run_worker(self._choose_subagent(), group="watch", exit_on_error=False)
+        self.run_worker(self._choose_watch(), group="watch", exit_on_error=False)
 
-    async def _choose_subagent(self) -> None:
-        """Read the list, ask which one, and push the screen that watches it.
+    async def _choose_watch(self) -> None:
+        """Read both lists, ask which one, and push the screen that watches it.
 
-        The list is the agent server's (`subagents`) and not the mesh's: a
-        subagent is a directory, and the roster that connects the network and
-        wakes members is a different question (`slife2.tui.client.AgentClient`).
+        **Each list comes from the server that owns it.**  Subagents are the
+        agent server's (`subagents`) and not the mesh's: a subagent is a
+        directory, and the roster that connects the network and wakes members is
+        a different question (`slife2.tui.client.AgentClient`).  Tasks are the
+        agent-task server's, because that process holds the running turns; a
+        window asking the agent server about them would be reading a table that
+        does not hold them.  Only running tasks are offered — a stopped task has
+        no events left to watch.
+
+        The two reads are independent: a task server that cannot answer must not
+        take the subagents away, so its failure is said and the picker still
+        opens with what is there.
         """
         try:
             await self._require_connected()
             assert self._client is not None
             found = await self._client.subagents()
-            if not found:
+
+            running: list[dict[str, Any]] = []
+            if self._task_client_factory is not None:
+                tasks = self._task_client_factory()
+                try:
+                    await tasks.connect()
+                    running = [
+                        row
+                        for row in await tasks.tasks()
+                        if row.get("status") == RUNNING
+                    ]
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - the other half of the picker still works
+                    self._transcript.add_error(
+                        t("tasks_failed", err=exc), ends_turn=False
+                    )
+                finally:
+                    await tasks.close()
+
+            if not found and not running:
                 # Said rather than shown as an empty picker: a list with no
-                # rows is a key that looks broken, and the tool that would fix
-                # it is the thing to name.
-                self._transcript.add_note(t("no_subagents", agent=self._agent))
+                # rows is a key that looks broken, and the tools that would fix
+                # it are the things to name.
+                self._transcript.add_note(t("nothing_to_watch", agent=self._agent))
                 return
-            choices = [str(one["name"]) for one in found]
-            future: asyncio.Future[str | None] = asyncio.Future()
-            picker = self._transcript.add_conversation_picker(
-                ConversationPicker(choices, future)
+            choices = [WatchChoice("subagent", str(one["name"])) for one in found] + [
+                WatchChoice("task", str(row["name"])) for row in running
+            ]
+            future: asyncio.Future[WatchChoice | None] = asyncio.Future()
+            choice = await self._ask_picker(
+                ConversationPicker(choices, future), future, "conversation-picker"
             )
-            picker.focus()
-            choice = await future
-            # The prompt takes the focus back whether or not anything was
-            # chosen: what the person did before `Ctrl+O` was type.
-            self.query_one(HistoryInput).focus()
             if choice is None:
-                return  # cancelled — the picker's own line is the whole answer
+                return  # cancelled — nothing to watch, nothing to say
+
+            def show_window(_result: None) -> None:
+                """The watch is gone; put a pending question back in front."""
+                # The refresh is what makes this run after the screen has
+                # actually gone: during the dismissal it is still the app's
+                # current one.
+                self.call_after_refresh(self._rehome_approval)
+
+            if choice.kind == "task":
+                task_watch = self._task_watch_client_factory
+                if task_watch is None:
+                    self._transcript.add_error(
+                        t("tasks_failed", err="no task watch client is configured"),
+                        ends_turn=False,
+                    )
+                    return
+                screen = WatchScreen(
+                    choice.name, lambda: task_watch(choice.name), task=True
+                )
+            else:
+                screen = WatchScreen(
+                    choice.name, lambda: self._watch_client_factory(choice.name)
+                )
             self.push_screen(
-                WatchScreen(choice, lambda: self._watch_client_factory(choice))
+                screen,
+                # **A question the watch was covering comes back with the
+                # window.**  The row was mounted on the watch screen (it is the
+                # one in front), so dismissing that screen takes it; the turn is
+                # still parked on the same future and the row is mounted again
+                # on the window's transcript (`_rehome_approval`).
+                show_window,
             )
+            # **And a question that arrived while the picker was open follows
+            # the screen** — the one race the guard above cannot cover, since
+            # the request landed after the key did.
+            self.call_after_refresh(self._rehome_approval)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(t("subagents_failed", err=exc))
+            self._transcript.add_error(t("subagents_failed", err=exc), ends_turn=False)
         finally:
             self._choosing = False
 
@@ -1325,20 +1644,68 @@ class SlifeApp(App[None]):
         very pump that has to deliver the `y` or the `Esc` that gives it.  The
         answer is awaited by a worker instead.
 
+        **The row goes on the screen in front, not the window's own.**  With a
+        watch screen up the default transcript is hidden, so a row mounted there
+        asks a question nobody can see and parks the turn until the watch closes
+        — `_active_transcript` is the same answer the scroll keys use.  The
+        answer is the app's (`action_approve_request`), so it works wherever the
+        row was drawn; what the row adds is that there *is* something to answer.
+
         **One at a time, structurally.**  The loop runs a batch's calls one after
         another and waits on each answer before the next, so two prompts cannot
         arrive together — no lock is needed, because the shape of the loop is
         the guarantee.
         """
         future: asyncio.Future[bool] = asyncio.Future()
-        prompt = self._transcript.add_approval(ApprovalPrompt(name, arguments, future))
-        self._approval = prompt
-        prompt.focus()
+        self._approval_question = (name, dict(arguments), future)
+        self._mount_approval()
         self.run_worker(
             self._finish_approval(call_id, future),
             group="approval",
             exit_on_error=False,
         )
+
+    def _mount_approval(self) -> None:
+        """Mount the pending question on the transcript in front, and focus it.
+
+        **A row being re-homed is removed from where it was.**  The question is
+        one, and two widgets showing it would leave a stale row `pending` for
+        ever on the screen it was first drawn on — the state the re-home exists
+        to end.  The old widget cannot answer anything on its own: the verdict
+        is the future, and the new row is handed the same one.
+        """
+        assert self._approval_question is not None
+        name, arguments, future = self._approval_question
+        previous = self._approval
+        if previous is not None and previous.is_mounted:
+            previous.remove()
+        prompt = self._active_transcript().add_approval(
+            ApprovalPrompt(name, arguments, future)
+        )
+        self._approval = prompt
+        prompt.focus()
+
+    def _rehome_approval(self) -> None:
+        """Put a still-pending question back on the screen that is showing.
+
+        **A watch screen closing takes the row with it.**  The turn is parked on
+        the same future, so the question is not lost — but a row that vanished
+        with the screen it was drawn on leaves the person with nothing to
+        answer, which is the state this re-mount is here to end.  A decided
+        question is not re-mounted: its verdict has been given and its row
+        stays the status line it became.
+
+        Called after the refresh that finishes a dismissal, because during the
+        dismissal callback the outgoing screen is still the app's current one.
+        """
+        if self._approval_question is None:
+            return
+        prompt = self._approval
+        if prompt is not None and not prompt.pending:
+            return
+        if prompt is not None and prompt in list(self.screen.query(ApprovalPrompt)):
+            return
+        self._mount_approval()
 
     async def _finish_approval(
         self, call_id: str, future: asyncio.Future[bool]
@@ -1351,16 +1718,23 @@ class SlifeApp(App[None]):
         """
         approved = await future
         self._approval = None
-        # The prompt takes the focus back, whether or not anything was approved:
-        # the row had it while it asked, and what the person did before `y` was
-        # type.
-        self.query_one(HistoryInput).focus()
+        self._approval_question = None
+        # The prompt takes the focus back, whether or not anything was approved,
+        # when the screen in front has a draft to take it: what the person did
+        # before `y` was type.  A watch screen has none — a subagent has no
+        # prompt — and taking focus to the hidden window's draft would leave
+        # the watched view unable to receive the keys its own bindings carry.
+        draft = self._active_transcript().screen.query_one_optional(HistoryInput)
+        if draft is not None:
+            draft.focus()
         assert self._client is not None
         try:
             await self._require_connected()
             answer = await self._client.answer_approval(call_id, approved)
         except Exception as exc:  # noqa: BLE001 - a key that raises takes the whole app down
-            self._transcript.add_error(t("approval_undelivered", err=exc))
+            self._transcript.add_error(
+                t("approval_undelivered", err=exc), ends_turn=False
+            )
             return
         # **A sentence means nobody was waiting for it**: the turn ended while
         # the prompt was up — a cancel, or another window answering the same
@@ -1384,7 +1758,7 @@ class SlifeApp(App[None]):
         """
         self._model = choice.ref
         self._model_label = choice.ref
-        self._context_window = choice.context_window
+        self._context_window = choice.prompt_window
         self._thinking = choice.thinking
         self._vision = choice.vision
         self._refresh_status()

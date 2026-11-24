@@ -24,14 +24,25 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 import slife2.plugins.context.server as context_server
+from slife2.helpers.timeutil import BOUND_GRAMMAR
 from slife2.libs.host.config import default_config
-from slife2.libs.host.paths import agent_dir
+from slife2.libs.host.paths import agent_dir, subagent_path
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
-from slife2.libs.turn.context import turn_footnote, turn_note
-from slife2.libs.turn.messages import Usage
-from slife2.libs.turn.tokens import estimate_turn_tokens
+from slife2.libs.turn.context import (
+    LIVE_REPLY,
+    RECALL_REPLY,
+    turn_footnote,
+    turn_note,
+)
+from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
+from slife2.libs.turn.tools import (
+    CONTEXT_REBUILD,
+    CONTEXT_REBUILD_TEXT,
+    TURN_COMPACT,
+    TURN_COMPACT_TEXT,
+)
 from slife2.plugins.context.server import _ask_model, build_server
 from tests.fakes import StubEmbedder
 
@@ -79,7 +90,7 @@ class GradedReranker(StubEmbedder):
 
     The live log's real turns scored 0.69–0.81 and the keyword incidentals
     0.0007–0.006; `0.8` and `0.05` are those bands, so the default
-    `rerank_min_score` (0.1) keeps one and drops the other.
+    `rerank_min_score` (0.3) keeps one and drops the other.
     """
 
     def __init__(self) -> None:
@@ -108,10 +119,11 @@ def _exchange(question: str, answer: str) -> list[dict]:
 
 
 class Replies:
-    """A discriminator that answers with whatever it was told to.
+    """A decision model that answers with whatever it was told to.
 
     The seam is the *decision*, not the transport, so what a test varies is what
-    the model said — which is the only thing a rebuild does with the answer.
+    the model said.  There is one call and no repair: an answer the tool cannot
+    use is the tool's error result, which the agent reads.
     """
 
     def __init__(self, *replies: str) -> None:
@@ -119,10 +131,20 @@ class Replies:
         self.asked: list[str] = []
 
     async def __call__(
-        self, agent: str, subagent: str, model: str, messages: list, prompt: str
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list,
+        *,
+        usage: str = "",
     ) -> str:
-        self.asked.append(prompt)
-        return self.replies.pop(0) if self.replies else "{}"
+        self.asked.append(usage)
+        return (
+            self.replies.pop(0)
+            if self.replies
+            else '{"keep": {"action": "keep"}, "recall": {}}'
+        )
 
 
 async def _seed(client: Client, agent: str, *exchanges: tuple[str, str]) -> list[int]:
@@ -174,9 +196,9 @@ async def test_a_turn_goes_in_and_comes_back() -> None:
     assert record["turn_id"] == 1
     assert record["messages"] == messages
     assert record["what_model"] == "deepseek/deepseek-flash"
-    # The read answers with the turn's own size, not the bill it cost or the
-    # context it ran in; the stored row keeps both for the status bar.
-    assert record["token_count"] == estimate_turn_tokens(messages)
+    # The read is the turn itself; the bill and the context size are the
+    # status bar's, and the stored row keeps both.
+    assert "token_count" not in record
     assert "context_tokens" not in record
     assert "who_helped" not in record
     assert "usage" not in record, "a bill is the operator's, not the model's"
@@ -250,7 +272,7 @@ async def test_the_model_tools_name_no_agent() -> None:
         assert "subagent" not in tools[name].input_schema["properties"]
     # And the ones the agent side calls still take it: `remember`, `restore` and
     # `rebuild` are called by code that knows whose conversation it is running.
-    for name in ("remember", "restore", "rebuild", "forget"):
+    for name in ("remember", "restore", "rebuild"):
         assert "agent" in tools[name].input_schema["properties"]
 
 
@@ -258,10 +280,11 @@ async def test_the_model_tools_name_no_agent() -> None:
 async def test_none_of_the_harness_tools_is_the_models() -> None:
     """The audience mark, and which side of it each tool is on.
 
-    A model may read its own history and may not decide what its context is: the
-    footnote on each rebuilt turn is how it says what it wants kept, and nothing
-    it can call changes the selection.  That is a claim about the marks rather
-    than about the code, so it is asserted here.
+    A model may read its own history; the context plugin's own selection tools
+    are the harness's, not the model's — a model's selection reaches it through
+    the agent server's `_context_rebuild`/`_turn_compact`, which carry the
+    decision schema.  That is a claim about the marks rather than about the
+    code, so it is asserted here.
     """
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
@@ -269,7 +292,7 @@ async def test_none_of_the_harness_tools_is_the_models() -> None:
 
     for name in ("turn_list", "turn_search", "turn_summarize", "turn_read"):
         assert listed[name].meta.get("slife2/audience") == "assistant"
-    for name in ("remember", "restore", "rebuild", "forget"):
+    for name in ("remember", "restore", "rebuild"):
         assert "slife2/audience" not in (listed[name].meta or {})
 
 
@@ -372,6 +395,28 @@ async def test_the_page_reports_the_limit_that_built_it() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_offset_past_every_row_is_the_empty_page() -> None:
+    """A page start beyond SQLite's integer range is still "past the end".
+
+    `page_window` clamps it to the largest bindable value — binding the
+    original would raise `OverflowError` rather than answer — and the response
+    carries the offset it applied, so the caller's `offset + len < total`
+    arithmetic still says there is nothing more.  Every listing shares that
+    helper, so this is the rule rather than this tool's.
+    """
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        page = await client.call_tool(
+            "turn_list", {"offset": 2**63}, meta=conversation_meta("jack")
+        )
+
+    assert page.data["entries"] == []
+    assert page.data["total"] == 1
+    assert page.data["offset"] == 2**63 - 1
+
+
+@pytest.mark.asyncio
 async def test_a_bound_the_grammar_does_not_know_is_a_refusal() -> None:
     """A `ToolError` the model reads and corrects, not an empty page."""
 
@@ -393,6 +438,30 @@ async def test_reading_a_turn_that_is_not_there_says_which_one() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_turn_id_no_row_can_have_is_a_refusal_not_an_internal_error() -> None:
+    """SQLite binds a signed 64-bit integer, and a bigger one raises at the bind.
+
+    A model can write more digits than that; the tools' contract is the
+    sentence naming the id it could not find, which is what a model that
+    invented one needs — not `OverflowError` out of the query.
+    """
+    huge = 2**63
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        with pytest.raises(ToolError, match=f"no turn {huge}"):
+            await client.call_tool(
+                "turn_read", {"turn_id": huge}, meta=conversation_meta("jack")
+            )
+        with pytest.raises(ToolError, match=f"no turn {huge}"):
+            await client.call_tool(
+                "turn_summarize",
+                {"turn_id": huge, "summary": "nowhere"},
+                meta=conversation_meta("jack"),
+            )
+
+
+@pytest.mark.asyncio
 async def test_search_answers_with_the_browse_line_and_a_score() -> None:
     """One hit is `turn_list`'s line plus the meaning score, and nothing else.
 
@@ -408,21 +477,84 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
             ("unrelated chatter", "a1"),
         )
         found = await client.call_tool(
-            "turn_search", {"query": "trump"}, meta=conversation_meta("jack")
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
         )
 
-    entries = found.data["entries"]
-    assert entries[0]["user_message"] == "the trump rally"
-    assert entries[0]["similarity"] > 0
-    assert set(entries[0]) == {
+    results = found.data["results"]
+    assert results[0]["user_message"] == "the trump rally"
+    assert results[0]["similarity"] > 0
+    assert set(results[0]) == {
         "turn_id",
         "created_at",
         "user_message",
         "assistant_message",
-        "token_count",
         "similarity",
     }
+    # The envelope is the one all three searches give.
+    assert set(found.data) == {"results", "best", "confidence", "browsed", "limit"}
+    assert found.data["best"] == results[0]["similarity"]
+    assert found.data["confidence"] == "sure"
+    assert found.data["browsed"] is False
     assert found.data["limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_an_exact_word_match_is_evidence_even_when_meaning_also_scored_it() -> (
+    None
+):
+    """**`worded` was read off a missing similarity, which is not the same fact.**
+
+    A turn found by both legs carries its meaning score, so a page whose every
+    hit does contain the caller's words has no `None` similarity — and the old
+    answer reported `confidence: none` for an exact match whose cosine happened
+    to sit under the weak floor.  The keyword leg itself is asked now, over the
+    page's own ids, which is the only answer that is about the words.
+
+    The turn is built to have both: it carries `trump` (so the keyword leg
+    finds it) and repeats other vocabulary words heavily, which pulls its
+    cosine under the floor while leaving the word match exact.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("trump 计算 计算 计算 计算", "a0"))
+        found = await client.call_tool(
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
+        )
+
+    hit = found.data["results"][0]
+    assert hit["similarity"] is not None, (
+        "the premise: meaning scored this hit, so its similarity is not the "
+        "word-evidence signal"
+    )
+    assert found.data["best"] < 0.48, (
+        "the premise: the cosine is under the weak floor, so only the word "
+        "evidence can make this page weak rather than none"
+    )
+    assert found.data["confidence"] == "weak"
+
+
+@pytest.mark.asyncio
+async def test_a_page_the_words_do_not_reach_is_not_worded() -> None:
+    """**The words are evidence only when the keyword leg finds them.**
+
+    `worded` is asked of the leg over the page's own ids.  An `async def` left
+    on the blocking side of the thread hop answered with an un-awaited
+    coroutine — truthy whatever it found — so every search that passed words
+    reported evidence, and a meaning-only page under the weak floor read
+    `weak` where the honest tier is `none`.  The turn below shares no word
+    with the query and is orthogonal to it, so the meaning leg still brings it
+    with a cosine of zero.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("计算 计算", "a0"))
+        found = await client.call_tool(
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
+        )
+
+    assert [hit["similarity"] for hit in found.data["results"]] == [0.0], (
+        "the premise: the page was measured, and measured below both floors"
+    )
+    assert found.data["best"] == 0.0
+    assert found.data["confidence"] == "none"
 
 
 @pytest.mark.asyncio
@@ -433,10 +565,10 @@ async def test_search_reads_only_the_callers_conversation() -> None:
         await _seed(client, "jack", ("jack's trump note", "a"))
         await _seed(client, "jill", ("jill's trump note", "a"))
         found = await client.call_tool(
-            "turn_search", {"query": "trump"}, meta=conversation_meta("jack")
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
         )
 
-    assert [e["user_message"] for e in found.data["entries"]] == ["jack's trump note"]
+    assert [e["user_message"] for e in found.data["results"]] == ["jack's trump note"]
 
 
 @pytest.mark.asyncio
@@ -456,11 +588,11 @@ async def test_search_reads_the_callers_keyword_weight() -> None:
         await _seed(client, "jack", ("gamma", "1"), ("alpha beta 工具", "2"))
         answer = await client.call_tool(
             "turn_search",
-            {"query": "alpha beta", "limit": 1},
+            {"keywords": ["alpha", "beta"], "limit": 1},
             meta=conversation_meta("jack"),
         )
 
-    assert [entry["turn_id"] for entry in answer.data["entries"]] == [1]
+    assert [entry["turn_id"] for entry in answer.data["results"]] == [1]
     # The premise: with the default weight the keyword hit leads the fusion.
     store = TurnStore(agent_dir("jack") / "turns.db")
     ranked = await store.recall(query="alpha beta", embedder=EMBEDDER, limit=1)
@@ -468,16 +600,16 @@ async def test_search_reads_the_callers_keyword_weight() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("query", ["", "***", "   "])
+@pytest.mark.parametrize("keyword", ["", "***", "   "])
 async def test_a_search_with_nothing_to_look_for_points_at_the_browse(
-    query: str,
+    keyword: str,
 ) -> None:
-    """An empty query is not a browse; `turn_list` is."""
+    """An empty search is not a browse; `turn_list` is."""
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
         with pytest.raises(ToolError, match="turn_list"):
             await client.call_tool(
-                "turn_search", {"query": query}, meta=conversation_meta("jack")
+                "turn_search", {"keywords": [keyword]}, meta=conversation_meta("jack")
             )
 
 
@@ -495,7 +627,31 @@ async def test_search_takes_sentences_as_well_as_words() -> None:
             "turn_search", {"sentences": ["工具"]}, meta=conversation_meta("jack")
         )
 
-    assert answer.data["entries"][0]["turn_id"] == 1
+    assert answer.data["results"][0]["turn_id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_search_can_leave_the_context_out() -> None:
+    """**The live list is a choice, not the tool's rule.**
+
+    The default is the whole log: a turn the conversation is already running on
+    is still one the model may want to read or name.  `exclude_context` drops
+    just those — the rebuild's rule, asked for deliberately.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        ids = await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
+        TurnStore(agent_dir("jack") / "turns.db").set_context_turns([ids[0]])
+        whole = await client.call_tool(
+            "turn_search", {"sentences": ["trump"]}, meta=conversation_meta("jack")
+        )
+        outside = await client.call_tool(
+            "turn_search",
+            {"sentences": ["trump"], "exclude_context": True},
+            meta=conversation_meta("jack"),
+        )
+
+    assert {entry["turn_id"] for entry in whole.data["results"]} == set(ids)
+    assert [entry["turn_id"] for entry in outside.data["results"]] == [ids[1]]
 
 
 @pytest.mark.asyncio
@@ -514,11 +670,11 @@ async def test_search_honours_the_same_time_window_as_the_browse() -> None:
         await _seed(client, "jack", ("new trump note", "a"))
         found = await client.call_tool(
             "turn_search",
-            {"query": "trump", "since": "2025-01-01"},
+            {"keywords": ["trump"], "since": "2025-01-01"},
             meta=conversation_meta("jack"),
         )
 
-    assert [e["user_message"] for e in found.data["entries"]] == ["new trump note"]
+    assert [e["user_message"] for e in found.data["results"]] == ["new trump note"]
 
 
 @pytest.mark.asyncio
@@ -539,11 +695,11 @@ async def test_search_finds_the_topic_a_person_names_in_chinese() -> None:
         )
         found = await client.call_tool(
             "turn_search",
-            {"query": "首经贸发展", "since": "yesterday"},
+            {"keywords": ["首经贸发展"], "since": "yesterday"},
             meta=conversation_meta("jack"),
         )
 
-    assert [e["user_message"] for e in found.data["entries"]][0] == (
+    assert [e["user_message"] for e in found.data["results"]][0] == (
         "昨天讨论的首经贸发展问题"
     )
 
@@ -563,7 +719,7 @@ async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
             "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
         )
         found = await client.call_tool(
-            "turn_search", {"query": "quarterly"}, meta=conversation_meta("jack")
+            "turn_search", {"keywords": ["quarterly"]}, meta=conversation_meta("jack")
         )
 
     assert wrote.data == {"status": "updated", "turn_id": 1}
@@ -571,7 +727,43 @@ async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
         "the quarterly forecast",
         "planning",
     )
-    assert [e["turn_id"] for e in found.data["entries"]][0] == 1
+    assert [e["turn_id"] for e in found.data["results"]][0] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_annotation_keeps_the_half_it_did_not_name() -> None:
+    """`None` is "not named"; `""` is "clear this field".
+
+    The tool coerced an omitted argument to `""`, and the store reads `""` as
+    an explicit clear — so a tags-only call erased the summary (and vice
+    versa), and the word the summary was findable by went out of the keyword
+    index with it.
+    """
+    meta = conversation_meta("jack")
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        await client.call_tool(
+            "turn_summarize",
+            {"turn_id": 1, "summary": "the quarterly forecast", "tags": "planning"},
+            meta=meta,
+        )
+        await client.call_tool(
+            "turn_summarize", {"turn_id": 1, "tags": "budget"}, meta=meta
+        )
+        tags_only = await client.call_tool("turn_read", {"turn_id": 1}, meta=meta)
+        await client.call_tool(
+            "turn_summarize", {"turn_id": 1, "summary": "the annual plan"}, meta=meta
+        )
+        summary_only = await client.call_tool("turn_read", {"turn_id": 1}, meta=meta)
+
+    assert (tags_only.data["summary"], tags_only.data["tags"]) == (
+        "the quarterly forecast",
+        "budget",
+    )
+    assert (summary_only.data["summary"], summary_only.data["tags"]) == (
+        "the annual plan",
+        "budget",
+    )
 
 
 @pytest.mark.asyncio
@@ -632,6 +824,43 @@ async def test_a_new_conversation_restores_its_own_head() -> None:
         )
 
     assert answer.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
+
+
+@pytest.mark.asyncio
+async def test_a_read_of_a_conversation_that_was_never_written_creates_nothing() -> (
+    None
+):
+    """**A removed subagent is a name with no record, and a read must not revive it.**
+
+    `agent_dir` makes a conversation's directory, and `TurnStore` makes its file,
+    so a `restore`, a browse or a search against a stale name used to leave a
+    directory with no `subagent.yaml` behind — which `subagent_create` and
+    `subagent_remove` then both refuse until somebody cleans the filesystem by
+    hand.  A conversation that has genuinely never run is the same absent file,
+    and the empty answer is the honest one for both.
+    """
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        restored = await client.call_tool(
+            "restore",
+            {"agent": "jack", "subagent": "ghost", "messages": [SYSTEM]},
+        )
+        listed = await client.call_tool(
+            "turn_list", {}, meta=conversation_meta("jack", "ghost")
+        )
+        found = await client.call_tool(
+            "turn_search",
+            {"keywords": ["ghost"]},
+            meta=conversation_meta("jack", "ghost"),
+        )
+        with pytest.raises(ToolError, match="no turn 1"):
+            await client.call_tool(
+                "turn_read", {"turn_id": 1}, meta=conversation_meta("jack", "ghost")
+            )
+
+    assert restored.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
+    assert listed.data["entries"] == []
+    assert found.data["results"] == []
+    assert not subagent_path("jack", "ghost").exists(), "the read made its directory"
 
 
 @pytest.mark.asyncio
@@ -790,7 +1019,6 @@ async def _rebuild(client: Client, reply: str, **overrides):
                 {"role": "assistant", "content": "1"},
             ],
             "turn_ids": [1],
-            "prompt": "and then?",
             **overrides,
         },
     )
@@ -802,7 +1030,7 @@ async def test_the_rebuild_uses_the_callers_homes_config(
 ) -> None:
     """A shared context daemon serves every home, and models are per home.
 
-    The discriminator's model reference comes from the caller's conversation,
+    The decision model's model reference comes from the caller's conversation,
     but the daemon resolved it against the config it started with — a
     `ConfigError` in a second home, swallowed as "keep the context", so recall
     never ran there.
@@ -811,7 +1039,7 @@ async def test_the_rebuild_uses_the_callers_homes_config(
 
     async def capture(config, *args, **kwargs) -> str:
         seen.append(config)
-        return "{}"
+        return '{"keep": {"action": "keep"}, "recall": {}}'
 
     monkeypatch.setattr(context_server, "_ask_model", capture)
     mine, callers = default_config(), default_config()
@@ -819,7 +1047,7 @@ async def test_the_rebuild_uses_the_callers_homes_config(
 
     async with Client(server) as client:
         await _seed(client, "jack", ("one", "1"))
-        await _rebuild(client, "{}")
+        await _rebuild(client, '{"keep": {"action": "keep"}, "recall": {}}')
 
     assert seen, "the rebuild asked the model"
     assert seen[0] is callers, "and asked with the caller's config"
@@ -842,18 +1070,25 @@ async def test_the_recall_policy_comes_from_the_callers_home() -> None:
         mine,
         embedder=RerankingEmbedder(),
         source=lambda: callers,
-        ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+        ask=Replies(
+            '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
+        ),
     )
 
     async with Client(server) as client:
         await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
-        answer = await _rebuild(client, "")
+        answer = await _rebuild(client, "", turn_ids=[])
 
     assert answer.data["recalled"] == 2, "the caller's floor kept both"
 
 
 def _config_with_window(window: int):
-    """`default_config()` with the shipped model's window set for a budget test."""
+    """`default_config()` with the shipped model's window set for a budget test.
+
+    `max_tokens` is cleared with it: the prompt budget is the window minus that
+    completion request, and the shipped 384k would leave a 1000-token test
+    window with no prompt space at all.
+    """
     config = default_config()
     provider = config.providers["deepseek"]
     shipped = provider.models["deepseek-flash"]
@@ -862,7 +1097,11 @@ def _config_with_window(window: int):
         providers={
             "deepseek": replace(
                 provider,
-                models={"deepseek-flash": replace(shipped, context_window=window)},
+                models={
+                    "deepseek-flash": replace(
+                        shipped, context_window=window, max_tokens=None
+                    )
+                },
             )
         },
     )
@@ -886,7 +1125,7 @@ async def test_the_recall_budget_is_the_headroom_below_the_ceiling() -> None:
         build_server(
             config,
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "trump"}}'),
+            ask=Replies('{"keep": {"action": "keep"}, "recall": {"query": "trump"}}'),
         )
     ) as client:
         await _seed(client, "jack", ("trump " + "word " * 10, "1"), (candidate, "2"))
@@ -896,12 +1135,14 @@ async def test_the_recall_budget_is_the_headroom_below_the_ceiling() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_context_at_the_ceiling_leaves_the_recall_nothing() -> None:
-    """A kept context at the ceiling is the whole budget; a recall may not top it up.
+async def test_a_context_over_the_ceiling_is_fitted_and_the_recall_spends_it() -> None:
+    """**The ceiling is a hard bound, and it binds the kept turns too.**
 
-    The kept turn alone exceeds the ceiling, so the budget is negative and the
-    recall is abandoned rather than overfilling the window — which is the one
-    thing the old per-recall fraction could not guarantee.
+    A kept turn larger than the whole budget cannot be sent, so it is cut from
+    the selection's oldest end (`fitted`) and the freed budget is what the
+    recall may spend.  The old per-recall fraction could not guarantee this:
+    it only refused to *add* to an over-full context, so the over-full base
+    stayed and the next call was a provider 400.
     """
     config = _config_with_window(1000)
     kept = "trump " + "word " * 1200
@@ -911,14 +1152,72 @@ async def test_a_context_at_the_ceiling_leaves_the_recall_nothing() -> None:
         build_server(
             config,
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "trump"}}'),
+            ask=Replies('{"keep": {"action": "keep"}, "recall": {"query": "trump"}}'),
         )
     ) as client:
         await _seed(client, "jack", (kept, "1"), (candidate, "2"))
         answer = await _rebuild(client, "")
 
-    assert answer.data["changed"] is False
+    assert answer.data["changed"] is True
+    assert answer.data["fitted"] == 1, "the kept turn could not fit the budget"
+    assert answer.data["recalled"] == 1, "the recall spent what the fit freed"
+    assert answer.data["turn_ids"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_context_over_the_budget_is_fitted_and_published() -> None:
+    """**A no-op decision still fits a selection that cannot be sent.**
+
+    The live failure this rule exists for: a rebuild published a ~772k-token
+    selection beside a 384k completion request, and the turn's first call was a
+    provider 400.  A decision that keeps everything is no longer a no-op when
+    the list is over the prompt budget — the oldest turns are cut, the answer
+    says how many, and the live-context list is the fitted one so the next
+    start replays something a request can carry.
+    """
+    config = _config_with_window(1000)
+
+    async with Client(
+        build_server(
+            config,
+            embedder=EMBEDDER,
+            ask=Replies('{"keep": {"action": "keep"}, "recall": {}}'),
+        )
+    ) as client:
+        ids = await _seed(client, "jack", ("word " * 1200, "1"), ("trump " * 10, "2"))
+        answer = await _rebuild(client, "", turn_ids=ids, messages=[SYSTEM])
+        restored = await client.call_tool(
+            "restore", {"agent": "jack", "messages": [SYSTEM]}
+        )
+
+    assert answer.data["changed"] is True
+    assert answer.data["fitted"] == 1, "the older turn cannot fit the budget"
+    assert answer.data["turn_ids"] == [ids[1]]
+    assert (answer.data["kept"], answer.data["in_hand"]) == (1, 2)
     assert answer.data["recalled"] == 0
+    assert restored.data["turn_ids"] == [ids[1]], "the fitted list is what persists"
+
+
+@pytest.mark.asyncio
+async def test_a_keep_list_is_fitted_in_time_order_not_the_models_array_order() -> None:
+    """**The fit's axis is time, whatever order the JSON array came in.**  A
+    keep-list preserved the model's order and `fit_recent` walks from the end
+    assuming time order, so a list written newest-first cut the newest turn and
+    kept the oldest — the opposite of what the ceiling is for."""
+    config = _config_with_window(1000)
+    # The store is fresh for this test, so the two seeds are turns 1 and 2; the
+    # decision names them newest-first.
+    reply = '{"keep": {"action": "ids", "turn_ids": [2, 1]}, "recall": {}}'
+
+    async with Client(
+        build_server(config, embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("word " * 1200, "1"), ("trump " * 10, "2"))
+        answer = await _rebuild(client, "", turn_ids=ids, messages=[SYSTEM])
+
+    assert ids == [1, 2]
+    assert answer.data["fitted"] == 1
+    assert answer.data["turn_ids"] == [ids[1]], "the newest turn survives the cut"
 
 
 @pytest.mark.asyncio
@@ -939,7 +1238,9 @@ async def test_a_candidate_below_the_rerank_floor_is_not_recalled() -> None:
         build_server(
             config,
             embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies(
+                '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
+            ),
         )
     ) as client:
         await _seed(client, "jack", ("trump high", "1"), ("trump low", "2"))
@@ -967,7 +1268,9 @@ async def test_a_failing_reranker_keeps_the_fused_order() -> None:
         build_server(
             config,
             embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies(
+                '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
+            ),
         )
     ) as client:
         await _seed(client, "jack", ("trump high", "1"), ("trump low", "2"))
@@ -983,7 +1286,7 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
 
     Both turns contain the query word, so both reach the pool.  The ranker
     separates the real exchange (0.8) from the incidental one (0.05), and the
-    shipped floor of 0.1 is what turns that separation into a smaller context.
+    shipped floor of 0.3 is what turns that separation into a smaller context.
     A floor of 0.0 — which this test would pass under — would keep both and
     make the stage a reorderer with no membership effect.
     """
@@ -993,13 +1296,15 @@ async def test_the_shipped_rerank_floor_drops_a_keyword_incidental() -> None:
         build_server(
             default_config(),
             embedder=reranker,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies(
+                '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
+            ),
         )
     ) as client:
         await _seed(client, "jack", ("trump real", "1"), ("trump noise", "2"))
         answer = await _rebuild(client, "", turn_ids=[])
 
-    assert default_config().context.rerank_min_score == 0.1
+    assert default_config().context.rerank_min_score == 0.3
     assert answer.data["recalled"] == 1
     assert answer.data["turn_ids"] == [1]
     assert answer.data["rerank"] == "", "the ranker ran"
@@ -1016,7 +1321,9 @@ async def test_a_recall_has_no_count_cap() -> None:
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies(
+                '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
+            ),
         )
     ) as client:
         ids = await _seed(
@@ -1044,7 +1351,7 @@ async def test_the_similarity_floor_drops_a_diluted_candidate() -> None:
         build_server(
             config,
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear", "recall": {"query": "trump"}}'),
+            ask=Replies('{"keep": {"action": "clear"}, "recall": {"query": "trump"}}'),
         )
     ) as client:
         await client.call_tool(
@@ -1102,15 +1409,16 @@ def test_a_long_question_does_not_cut_the_answer_out_of_the_rerank_document() ->
 async def test_a_provider_without_a_cross_encoder_reports_it_in_the_answer() -> None:
     """No `rerank_model` is a capability the caller is told about, not silence.
 
-    A window that did not know would show `[kept …]` and look exactly like one
-    whose ranker ran — the two are different answers to "why is this order
-    this order".
+    A report that did not say so would look exactly like one whose ranker ran —
+    the two are different answers to "why is this order this order".
     """
     async with Client(
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear", "recall": {"sentences": ["trump"]}}'),
+            ask=Replies(
+                '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
+            ),
         )
     ) as client:
         await _seed(client, "jack", ("trump one", "1"))
@@ -1124,14 +1432,18 @@ async def test_a_provider_without_a_cross_encoder_reports_it_in_the_answer() -> 
 async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
     """The common case, and the one that keeps a costly call from being free.
 
-    `{}` means the turns in hand are enough, so nothing is fetched, nothing is
-    rendered and nothing is written — the answer is the caller's own list,
-    handed back.
+    `mode: keep` means the turns in hand are enough, so nothing is fetched,
+    nothing is rendered and nothing is written — the answer is the caller's own
+    list, handed back.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
 
     async with Client(
-        build_server(default_config(), embedder=EMBEDDER, ask=Replies("{}"))
+        build_server(
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"keep": {"action": "keep"}, "recall": {}}'),
+        )
     ) as client:
         await _seed(client, "jack", ("one", "1"))
         answer = await client.call_tool(
@@ -1140,13 +1452,123 @@ async def test_a_decision_to_keep_everything_rebuilds_nothing() -> None:
                 "agent": "jack",
                 "messages": hold,
                 "turn_ids": [1],
-                "prompt": "and then?",
             },
         )
 
     assert answer.data["changed"] is False
     assert answer.data["messages"] == hold
     assert answer.data["turn_ids"] == [1]
+    assert answer.data["decision"] == "", "the model answered"
+    assert answer.data["reason"] == "asked", (
+        "the report says which no-op this was, not merely that nothing moved"
+    )
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_that_finds_nothing_says_which_no_op_it_was() -> None:
+    """**A search that ran and found nothing is not a search nobody made.**
+
+    The counts cannot tell the two apart — both are `changed: false,
+    recalled: 0` — so the answer carries the exit, and the report can say the
+    recall ran rather than leave the model to read silence as a refusal.
+    """
+    hold = [SYSTEM, {"role": "user", "content": "工具"}]
+    reply = '{"keep": {"action": "keep"}, "recall": {"sentences": ["计算"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        answer = await client.call_tool(
+            "rebuild",
+            {"agent": "jack", "messages": hold, "turn_ids": [ids[0]]},
+        )
+
+    assert answer.data["changed"] is False
+    assert answer.data["decision"] == "", "the decision answered"
+    assert answer.data["reason"] == "recalled"
+    assert answer.data["recalled"] == 0
+    assert answer.data["outside"] == 1, "the search had a turn to draw from"
+
+
+@pytest.mark.asyncio
+async def test_a_keep_list_that_names_no_known_turn_is_a_tool_error() -> None:
+    """**A miscopied id is not a clear.**
+
+    The keep-list is an intersection with the turns in hand, so a list the
+    conversation no longer holds has an empty intersection — and publishing
+    that would empty the context on a typo.  The explicit clear is the empty
+    list; a decision that names nothing the conversation has cannot be acted
+    on, so it is the tool's error with the reason, and the context is not
+    written (SDD §5.5, Appendix C).
+    """
+    hold = [
+        SYSTEM,
+        {"role": "user", "content": "one"},
+        {"role": "assistant", "content": "1"},
+        {"role": "user", "content": "two"},
+        {"role": "assistant", "content": "2"},
+    ]
+
+    async with Client(
+        build_server(
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"keep": {"action": "ids", "turn_ids": [99]}, "recall": {}}'),
+        )
+    ) as client:
+        ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
+        with pytest.raises(ToolError, match="the keep-list named no turn in hand"):
+            await _rebuild(client, "", messages=hold, turn_ids=ids)
+
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == ids
+
+
+async def _down(*arguments: Any, **keywords: Any) -> str:
+    """A decision model whose model server never answers."""
+    raise RuntimeError("the model server is down")
+
+
+@pytest.mark.parametrize(
+    ("ask", "reason"),
+    [
+        (_down, "RuntimeError: the model server is down"),
+        (
+            Replies("a reply this build cannot read"),
+            "the reply is not one JSON object",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_decision_that_decided_nothing_says_the_recall_failed(
+    ask: Any, reason: str
+) -> None:
+    """**A decision that did not answer is the tool's error, with its reason.**
+
+    `recalled: 0` is the same count for an empty log and for a decision that
+    never arrived, so the failure is named — the provider's own failure text, or
+    the parser's refusal, in the one spelling the turn's own failed-call line
+    uses (`failure_text`).  The context is not written; the turn keeps what it
+    had.  There is one ask and no repair.
+    """
+    hold = [SYSTEM, {"role": "user", "content": "one"}]
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=ask)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        with pytest.raises(ToolError) as refused:
+            await client.call_tool(
+                "rebuild",
+                {
+                    "agent": "jack",
+                    "messages": hold,
+                    "turn_ids": [1],
+                },
+            )
+
+    assert reason in str(refused.value)
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
@@ -1161,23 +1583,27 @@ async def test_a_clear_empties_the_context_and_is_published() -> None:
 
     async with Client(
         build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies('{"context": "clear"}')
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"keep": {"action": "clear"}, "recall": {}}'),
         )
     ) as client:
-        await _seed(client, "jack", ("one", "1"))
+        await _seed(client, "jack", ("one", "1"), ("two", "2"))
         answer = await client.call_tool(
             "rebuild",
             {
                 "agent": "jack",
                 "messages": [SYSTEM, {"role": "user", "content": "one"}],
                 "turn_ids": [1],
-                "prompt": "ignore all that",
             },
         )
 
     assert answer.data["messages"] == [SYSTEM]
     assert answer.data["turn_ids"] == []
     assert answer.data["changed"] is True
+    assert answer.data["kept"] == 0, "the clear dropped the only turn in hand"
+    assert answer.data["in_hand"] == 1, "and the report says what it was kept out of"
+    assert answer.data["outside"] == 1, "the second turn is the recall's domain"
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == []
 
 
@@ -1194,7 +1620,9 @@ async def test_a_keep_list_intersects_with_what_is_in_hand() -> None:
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": [2, 99]}'),
+            ask=Replies(
+                '{"keep": {"action": "ids", "turn_ids": [2, 99]}, "recall": {}}'
+            ),
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"), ("two", "2"))
@@ -1208,7 +1636,6 @@ async def test_a_keep_list_intersects_with_what_is_in_hand() -> None:
                     {"role": "user", "content": "two"},
                 ],
                 "turn_ids": [1, 2],
-                "prompt": "the second one",
             },
         )
 
@@ -1230,7 +1657,9 @@ async def test_a_recall_adds_to_what_was_kept() -> None:
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "the very first"}}'),
+            ask=Replies(
+                '{"keep": {"action": "keep"}, "recall": {"query": "the very first"}}'
+            ),
         )
     ) as client:
         ids = await _seed(
@@ -1246,7 +1675,6 @@ async def test_a_recall_adds_to_what_was_kept() -> None:
                     {"role": "assistant", "content": "2"},
                 ],
                 "turn_ids": [ids[1]],
-                "prompt": "what did we start with?",
             },
         )
 
@@ -1267,7 +1695,7 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
     config = _config_with_window(1000)
     kept = "工具 工具 " + "word " * 240
     wanted = "工具 trump " + "word " * 280
-    reply = '{"context": [1], "recall": {"query": "工具"}}'
+    reply = '{"keep": {"action": "ids", "turn_ids": [1]}, "recall": {"query": "工具"}}'
 
     async with Client(
         build_server(config, embedder=EMBEDDER, ask=Replies(reply))
@@ -1283,12 +1711,12 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
                     {"role": "assistant", "content": "1"},
                 ],
                 "turn_ids": [ids[0]],
-                "prompt": "那另一条呢？",
             },
         )
 
     assert answer.data["turn_ids"] == ids
     assert answer.data["recalled"] == 1
+    assert answer.data["decision"] == "", "the decision answered"
     # The premise: the kept turn ranks first, so without the exclusion it would
     # be the first thing the recall spends the headroom on.
     store = TurnStore(agent_dir("jack") / "turns.db")
@@ -1297,46 +1725,45 @@ async def test_a_recall_does_not_bring_back_a_turn_already_kept() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_sentence_recall_also_asks_with_the_persons_input() -> None:
-    """**The model's sentence is a paraphrase; the input is what it paraphrases.**
+async def test_a_recall_does_not_bring_back_a_turn_the_decision_dropped() -> None:
+    """**Every turn in hand is excluded, not only the kept ones.**
 
-    A recall asked in sentences gets at least two questions — the sentence and
-    the person's own words — so a paraphrase that misses cannot be the only way
-    the subject is found.  The input is not in the message list yet; `rebuild`
-    carries it separately for exactly this reason.
+    The decision model read the whole conversation, so a turn it left out of the
+    keep-list was left out deliberately: a recall that answered a query with it
+    would overturn the decision it was made in.  The turn outside the
+    conversation is still recalled — that is what the recall is for.
     """
-    reply = '{"context": "clear", "recall": {"sentences": ["trump"]}}'
+    reply = '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
     ) as client:
-        ids = await _seed(client, "jack", ("工具", "1"), ("trump", "2"))
+        ids = await _seed(client, "jack", ("trump one", "1"), ("trump two", "2"))
         answer = await client.call_tool(
             "rebuild",
             {
                 "agent": "jack",
-                "messages": [SYSTEM],
-                "turn_ids": [],
-                "prompt": "工具",
+                "messages": [
+                    SYSTEM,
+                    {"role": "user", "content": "trump one"},
+                    {"role": "assistant", "content": "1"},
+                ],
+                "turn_ids": [ids[0]],
             },
         )
 
-    assert answer.data["turn_ids"] == ids
-    assert answer.data["recalled"] == 2
+    assert answer.data["turn_ids"] == [ids[1]], "the dropped turn stays dropped"
+    assert answer.data["recalled"] == 1
 
 
 @pytest.mark.asyncio
-async def test_a_sentence_recall_can_drop_the_input_from_the_questions() -> None:
-    """The model sees the input and the conversation; a greeting names nothing.
+async def test_a_sentence_recall_reads_the_decisions_sentences() -> None:
+    """The decision's sentences are the meaning leg's questions.
 
-    `prompt_as_sentence: false` is the decision saying the sentence is the only
-    question — what makes "hi" or "continue" safe beside a subject the
-    conversation carries.
+    There is no separate input to add: the decision model read the conversation,
+    and a sentence it wrote is the subject it chose to ask the log for.
     """
-    reply = (
-        '{"context": "clear", "recall": {"sentences": ["trump"],'
-        ' "prompt_as_sentence": false}}'
-    )
+    reply = '{"keep": {"action": "clear"}, "recall": {"sentences": ["trump"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1348,7 +1775,6 @@ async def test_a_sentence_recall_can_drop_the_input_from_the_questions() -> None
                 "agent": "jack",
                 "messages": [SYSTEM],
                 "turn_ids": [],
-                "prompt": "工具",
             },
         )
 
@@ -1358,13 +1784,12 @@ async def test_a_sentence_recall_can_drop_the_input_from_the_questions() -> None
 
 @pytest.mark.asyncio
 async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() -> None:
-    """The input is not added beside a keyword phrase.
+    """A keyword recall asks one meaning question: the query.
 
     A query is already the meaning fallback; the keyword phrase is the
-    deliberate question, and a second raw question there can only reorder it.
-    The phrase is what both halves read; the input is not a third question.
+    deliberate question, and the decision's sentences would be a second one.
     """
-    reply = '{"context": "clear", "recall": {"query": "trump"}}'
+    reply = '{"keep": {"action": "clear"}, "recall": {"query": "trump"}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1376,7 +1801,6 @@ async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() ->
                 "agent": "jack",
                 "messages": [SYSTEM],
                 "turn_ids": [],
-                "prompt": "工具",
             },
         )
 
@@ -1387,7 +1811,7 @@ async def test_a_keyword_recall_keeps_the_query_as_its_one_meaning_question() ->
 @pytest.mark.asyncio
 async def test_a_period_recall_is_not_narrowed_by_the_input() -> None:
     """A period asks for a time, not a subject; the input does not filter it."""
-    reply = '{"context": "clear", "recall": {"since": "yesterday"}}'
+    reply = '{"keep": {"action": "clear"}, "recall": {"since": "yesterday"}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1399,7 +1823,6 @@ async def test_a_period_recall_is_not_narrowed_by_the_input() -> None:
                 "agent": "jack",
                 "messages": [SYSTEM],
                 "turn_ids": [],
-                "prompt": "工具",
             },
         )
 
@@ -1416,7 +1839,7 @@ async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
     have run as a period recall.  A sentence is a question of its own, so only
     the unusable words are dropped and the meaning half is answered.
     """
-    reply = '{"recall": {"query": "***", "sentences": ["the very first thing"]}}'
+    reply = '{"keep": {"action": "keep"}, "recall": {"query": "***", "sentences": ["the very first thing"]}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1434,7 +1857,6 @@ async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
                     {"role": "assistant", "content": "2"},
                 ],
                 "turn_ids": [ids[1]],
-                "prompt": "what did we start with?",
             },
         )
 
@@ -1443,7 +1865,7 @@ async def test_a_recall_runs_on_a_sentence_when_the_query_has_no_term() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_context_list_that_cannot_be_written_fails_the_turn(
+async def test_a_context_list_that_cannot_be_written_fails_the_rebuild(
     monkeypatch,
 ) -> None:
     """The list is authoritative, so a publish that did not land must not pass.
@@ -1466,7 +1888,7 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"context": "clear"}'),
+            ask=Replies('{"keep": {"action": "clear"}, "recall": {}}'),
         )
     ) as client:
         ids = await _seed(client, "jack", ("one", "1"))
@@ -1481,37 +1903,29 @@ async def test_a_context_list_that_cannot_be_written_fails_the_turn(
                         {"role": "assistant", "content": "1"},
                     ],
                     "turn_ids": ids,
-                    "prompt": "hi",
                 },
             )
 
 
 @pytest.mark.asyncio
-async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> None:
-    """**A rebuild is a model call between a read and a write, and the writers
-    are in different processes.**
+async def test_a_private_rebuild_decides_without_moving_the_conversation() -> None:
+    """**An agent task's rebuild is a clone.**
 
-    The agent server's turn and an agent task of the same agent both rebuild one
-    conversation; the turn also saves while the task is deciding.  The decision
-    is composed against the list `restore` answered with, so writing it
-    unconditionally after the save erased the new turn from the live context —
-    the row stayed in the log and the next restore no longer knew it, which is
-    the silent loss `append_context` prevents on the save path.
-
-    `expected` is the snapshot, and the write is a compare-and-set: the newer
-    list stands and the caller keeps what it holds.  What is asserted here is
-    both halves — the decision did not overwrite, and the turn saved while it ran
-    is still in the context.
+    The task records nothing, so its pre-turn decision must not move the
+    conversation it stands in for: `publish=False` returns the selection and
+    writes nothing.  The conversation moving while the decision runs does not
+    change that — the task keeps its own answer and the store keeps the
+    conversation's list.
     """
     parked = asyncio.Event()
     release = asyncio.Event()
 
     async def deciding(
-        agent: str, subagent: str, model: str, messages: list, prompt: str
+        agent: str, subagent: str, model: str, messages: list, *, usage: str = ""
     ) -> str:
         parked.set()
         await release.wait()
-        return '{"context": [1]}'
+        return '{"keep": {"action": "clear"}, "recall": {}}'
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=deciding)
@@ -1524,24 +1938,16 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
                     "agent": "jack",
                     "messages": [
                         SYSTEM,
-                        {"role": "user", "content": "zero"},
-                        {"role": "assistant", "content": "0"},
-                        {"role": "user", "content": "one"},
-                        {"role": "assistant", "content": "1"},
+                        *_exchange("zero", "0"),
+                        *_exchange("one", "1"),
                     ],
                     "turn_ids": ids,
-                    # What `restore` answered and what the store held when this
-                    # caller took its snapshot; the write matches only while
-                    # the conversation still holds exactly this.
-                    "expected": ids,
-                    "prompt": "and then?",
+                    "publish": False,
                 },
             )
         )
         await asyncio.wait_for(parked.wait(), timeout=5)
-        # The other writer: a turn of the agent's own, saved while the
-        # discriminator is deciding.  The store appends it in its own
-        # transaction.
+        # The conversation moves while the decision runs; a clone does not care.
         saved = await client.call_tool(
             "remember",
             {"agent": "jack", "messages": _exchange("two", "2")},
@@ -1549,86 +1955,13 @@ async def test_a_rebuild_that_lost_the_conversation_keeps_the_newer_list() -> No
         release.set()
         rebuilt = await answer
 
-    assert rebuilt.data["changed"] is True, "the newer store list is what it adopted"
-    assert rebuilt.data["turn_ids"] == [ids[0], ids[1], saved.data["turn_id"]]
-    # The rerank report is part of the answer's shape on every exit, including
-    # this one: the caller reads it strictly, and an absent key would fail the
-    # turn over a race the store handled correctly.
-    assert rebuilt.data["rerank"] == ""
+    assert rebuilt.data["turn_ids"] == [], "the task adopts its own decision"
+    assert rebuilt.data["changed"] is True
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [
         ids[0],
         ids[1],
         saved.data["turn_id"],
-    ], "the turn saved while the decision ran is still the conversation"
-    said = [
-        message["content"]
-        for message in rebuilt.data["messages"]
-        if message["role"] == "user"
-    ]
-    assert said[-1].startswith("two"), "the turn it had not seen is in its context"
-
-
-@pytest.mark.asyncio
-async def test_a_rebuild_repairs_a_context_list_naming_a_row_that_is_gone() -> None:
-    """The repair `restore` makes in memory must reach the persisted list.
-
-    `restore` drops an id whose row is gone and the caller adopts the shorter
-    list, but the store's own list still names the missing row.  A
-    compare-and-set against the caller's snapshot then never matches again, so
-    the next rebuild abandons its decision — and so does every rebuild after it,
-    silently disabling the recall for the life of the file.  The surviving ids
-    are published under the same guard, which is what re-arms the next write.
-    """
-    async with Client(
-        build_server(
-            default_config(),
-            embedder=EMBEDDER,
-            ask=Replies('{"context": "clear"}', '{"context": "clear"}'),
-        )
-    ) as client:
-        ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
-        store = TurnStore(agent_dir("jack") / "turns.db")
-        store.set_context_turns([ids[0], 404])
-        restored = await client.call_tool(
-            "restore", {"agent": "jack", "messages": [SYSTEM]}
-        )
-        assert restored.data["turn_ids"] == [ids[0]], "restore drops the dead id"
-        first = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": [
-                    SYSTEM,
-                    {"role": "user", "content": "one"},
-                    {"role": "assistant", "content": "1"},
-                ],
-                "turn_ids": restored.data["turn_ids"],
-                "expected": restored.data["turn_ids"],
-                "prompt": "and then?",
-            },
-        )
-        assert first.data["turn_ids"] == [ids[0]]
-        assert store.context_turns() == [ids[0]], "the dead id is gone from the list"
-        # And the repair is what re-arms the compare-and-set: this rebuild's
-        # `expected` now matches the store, so its decision is published.
-        second = await client.call_tool(
-            "rebuild",
-            {
-                "agent": "jack",
-                "messages": [
-                    SYSTEM,
-                    {"role": "user", "content": "one"},
-                    {"role": "assistant", "content": "1"},
-                ],
-                "turn_ids": first.data["turn_ids"],
-                "expected": first.data["turn_ids"],
-                "prompt": "and then?",
-            },
-        )
-
-    assert second.data["changed"] is True, "the conversation can be rebuilt again"
-    assert second.data["turn_ids"] == []
-    assert store.context_turns() == []
+    ], "the conversation's list is the agent's, not the task's"
 
 
 @pytest.mark.asyncio
@@ -1642,7 +1975,9 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> N
     the decision's keep-list runs on its own and the context it had stands.
     """
     hold = [SYSTEM, {"role": "user", "content": "two"}]
-    reply = '{"recall": {"query": "***", "anchor": "oldest"}}'
+    reply = (
+        '{"keep": {"action": "keep"}, "recall": {"query": "***", "anchor": "oldest"}}'
+    )
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
@@ -1650,7 +1985,7 @@ async def test_a_recall_query_with_no_term_is_dropped_rather_than_widened() -> N
         ids = await _seed(client, "jack", ("one", "1"), ("two", "2"))
         answer = await client.call_tool(
             "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [ids[1]], "prompt": "hi"},
+            {"agent": "jack", "messages": hold, "turn_ids": [ids[1]]},
         )
 
     assert answer.data["changed"] is False
@@ -1677,7 +2012,7 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
         build_server(
             default_config(),
             embedder=EMBEDDER,
-            ask=Replies('{"recall": {"query": "one"}}'),
+            ask=Replies('{"keep": {"action": "keep"}, "recall": {"query": "one"}}'),
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"))
@@ -1688,64 +2023,331 @@ async def test_a_model_the_config_cannot_resolve_is_loud_rather_than_sized_by_co
                     "agent": "jack",
                     "messages": [SYSTEM, {"role": "user", "content": "one"}],
                     "turn_ids": [1],
-                    "prompt": "hi",
                     "model": "no-such-provider/model",
                 },
             )
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_reply_keeps_the_context() -> None:
-    """Degrading, not retrying: the fallback is perfectly good.
+async def test_an_unreadable_reply_is_a_tool_error() -> None:
+    """**One call, then the error.**  There is no repair.
 
-    A timeout, a provider failure and a reply that is not the requested object
-    all arrive as the same answer, and the price of guessing wrong is a context
-    nobody decided on.
+    The decision model is asked once; an answer that is not the forced call is
+    reported as the tool's error, and the context is not written.  The agent can
+    call the tool itself with a selection, which is where a correction belongs.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
+    replies = Replies("I could not decide.")
 
     async with Client(
-        build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies("I could not decide.")
-        )
+        build_server(default_config(), embedder=EMBEDDER, ask=replies)
     ) as client:
         await _seed(client, "jack", ("one", "1"))
-        answer = await client.call_tool(
-            "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
-        )
+        with pytest.raises(ToolError) as refused:
+            await client.call_tool(
+                "rebuild",
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
+            )
 
-    assert answer.data["changed"] is False
-    assert answer.data["messages"] == hold
+    assert len(replies.asked) == 1, (
+        "the decision is asked once; the failure is reported"
+    )
+    assert "the reply is not one JSON object" in str(refused.value)
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
 @pytest.mark.asyncio
-async def test_a_recall_bound_the_grammar_does_not_know_is_dropped() -> None:
-    """The same fallback as an unreadable reply, and for the same reason.
+async def test_a_failed_call_is_not_asked_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing to correct: no answer came back, and a second ask would only
+    spend a call on a provider that has already failed once.
 
-    A reply of the right *shape* whose `since` is in no grammar this build speaks
-    — `whenever`, `sometime last year` — is a boundary case the two halves of the
-    system answer differently: a bound the *model* passes to `turn_list` is a
-    `ToolError` it reads and corrects (the test above), and a bound the
-    *discriminator* writes is not, because nothing is left to read a refusal.
-    Handed to the store it would raise from inside a query and fail the turn, so
-    the reply is dropped where dropping is still something a caller can decide —
-    and the fallback is the same perfectly good one.
+    The failure line carries the provider's own words, not only the exception
+    class: `reason=RuntimeError` is the same line for a dead endpoint, a 400 and
+    a timeout, and the operator is owed the difference.
+    """
+    calls: list[str] = []
+    caplog.set_level(logging.INFO, logger=context_server.logger.name)
+
+    async def down(*arguments: Any, **keywords: Any) -> str:
+        calls.append(keywords.get("repair", ""))
+        raise RuntimeError("the model server is down")
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=down)
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        with pytest.raises(ToolError) as refused:
+            await _rebuild(client, "")
+
+    assert calls == [""], "one ask, and the repair never ran"
+    assert "RuntimeError: the model server is down" in str(refused.value), (
+        "the error carries the same words the log does"
+    )
+    assert any(
+        record.message
+        == "recall_decision_failed reason=RuntimeError: the model server is down"
+        for record in caplog.records
+    ), "the provider's own message is in the line"
+
+
+@pytest.mark.asyncio
+async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
+    """The conversation plus one system instruction, answered by the one tool.
+
+    The instruction is appended as a system message; the decision tool is forced
+    and thinking is off (a thinking endpoint rejects the forced choice).  The
+    live conversation is not otherwise touched.
+    """
+    seen: list[dict[str, Any]] = []
+
+    async def capture(
+        config: Any,
+        clients: Any,
+        opening: Any,
+        agent: str,
+        subagent: str,
+        model: str,
+        asked: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        tool_choice: str,
+        thinking: str,
+        kind: str,
+    ) -> StreamChatResult:
+        seen.append(
+            {
+                "asked": asked,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "thinking": thinking,
+                "kind": kind,
+            }
+        )
+        return StreamChatResult(
+            tool_calls=(
+                ToolCall(
+                    id="call_1",
+                    name=CONTEXT_REBUILD,
+                    arguments={"context": "clear"},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+    hold = [SYSTEM, {"role": "user", "content": "test the tools yourself"}]
+
+    answer = await _ask_model(
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, usage="12,345 (1.2%)"
+    )
+    assert answer == '{"context": "clear"}', "the tool arguments are the decision"
+    call = seen[0]
+    assert call["kind"] == "decision"
+    assert call["asked"][:-1] == hold, (
+        "the conversation is the input, unchanged by the call"
+    )
+    assert call["asked"][-1]["role"] == "system"
+    assert "Decision" in call["asked"][-1]["content"]
+    assert "12,345 (1.2%)" in call["asked"][-1]["content"], "the status bar's figure"
+    tool = call["tools"][0]["function"]
+    assert tool["name"] == CONTEXT_REBUILD
+    assert tool["description"] == CONTEXT_REBUILD_TEXT
+    assert tool["parameters"] == RECALL_REPLY
+    assert call["tool_choice"] == CONTEXT_REBUILD
+    assert call["thinking"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_the_decision_reads_the_conversation_as_it_runs(monkeypatch) -> None:
+    """**The live context is the input, tool exchanges included.**
+
+    `_context_rebuild` is a turn-level decision, and a turn's tool exchanges are
+    part of the conversation it reads.  Nothing is removed before the call: the
+    messages go out as the turn holds them, and the decision instruction is the
+    one message appended.
+    """
+    seen: list[list[dict[str, Any]]] = []
+
+    async def capture(
+        _config: Any,
+        _clients: Any,
+        _opening: Any,
+        _agent: str,
+        _subagent: str,
+        _model: str,
+        asked: list[dict[str, Any]],
+        **_options: Any,
+    ) -> StreamChatResult:
+        seen.append(asked)
+        return StreamChatResult(
+            tool_calls=(
+                ToolCall(
+                    id="call_1",
+                    name=CONTEXT_REBUILD,
+                    arguments={"keep": {"action": "keep"}, "recall": {}},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+    old_call = {
+        "id": "old",
+        "type": "function",
+        "function": {
+            "name": CONTEXT_REBUILD,
+            "arguments": '{"context": [1], "recall": {}}',
+        },
+    }
+    search_call = {
+        "id": "search",
+        "type": "function",
+        "function": {"name": "tool_search", "arguments": '{"query": "x"}'},
+    }
+    hold = [
+        SYSTEM,
+        {"role": "user", "content": "one"},
+        {
+            "role": "assistant",
+            "content": "thinking",
+            "tool_calls": [old_call, search_call],
+        },
+        {"role": "tool", "tool_call_id": "old", "content": "the old report"},
+        {"role": "tool", "tool_call_id": "search", "content": "found"},
+        {"role": "assistant", "content": "", "tool_calls": [dict(old_call, id="old2")]},
+        {"role": "tool", "tool_call_id": "old2", "content": "another old report"},
+        {"role": "user", "content": "two"},
+    ]
+
+    await _ask_model(
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, usage="12,345 (1.2%)"
+    )
+
+    assert seen[0][:-1] == hold, "the conversation goes out as it runs"
+    assert seen[0][-1]["role"] == "system"
+    assert "Decision call" in seen[0][-1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_to_another_tool_is_not_a_decision(monkeypatch) -> None:
+    """**Only the forced tool's arguments are the answer.**
+
+    A provider that ignores `tool_choice` can return a call the conversation
+    already asked for — a harness tool's `{}` would parse as "keep
+    everything", and the decision model would be credited with an answer it
+    never gave.  The name is part of the decision, so a different one is a
+    failed call (keep the context), not a decision.
+    """
+
+    async def capture(*_args: Any, **_kwargs: Any) -> StreamChatResult:
+        return StreamChatResult(
+            tool_calls=(ToolCall(id="c1", name=TURN_COMPACT, arguments={}),),
+            stop_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+
+    with pytest.raises(RuntimeError, match="not '_context_rebuild'"):
+        await _ask_model(object(), {}, asyncio.Lock(), "jack", "", "m", [SYSTEM])
+
+
+@pytest.mark.asyncio
+async def test_the_selection_is_a_forced_tool_call(monkeypatch) -> None:
+    """The live selector is the same forced call, over the numbered view."""
+    seen: list[dict[str, Any]] = []
+
+    async def capture(
+        config: Any,
+        clients: Any,
+        opening: Any,
+        agent: str,
+        subagent: str,
+        model: str,
+        asked: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        tool_choice: str,
+        thinking: str,
+        kind: str,
+    ) -> StreamChatResult:
+        seen.append(
+            {
+                "asked": asked,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "thinking": thinking,
+                "kind": kind,
+            }
+        )
+        return StreamChatResult(
+            tool_calls=(
+                ToolCall(
+                    id="call_2",
+                    name=TURN_COMPACT,
+                    arguments={"compact": [1]},
+                ),
+            ),
+            stop_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(context_server, "_stream_chat", capture)
+    hold = [
+        SYSTEM,
+        {
+            "role": "user",
+            "content": 'test the tools yourself [MESSAGE:{"id": "cur.0"}]',
+        },
+    ]
+
+    answer = await context_server._ask_selector(
+        object(), {}, asyncio.Lock(), "jack", "", "m", hold, ["cur.0"]
+    )
+    assert answer == '{"compact": [1]}'
+    call = seen[0]
+    assert call["kind"] == "compactor"
+    assert call["asked"][1]["content"].endswith('[MESSAGE:{"id": "cur.0"}]'), (
+        "the view is numbered by its caller"
+    )
+    assert call["asked"][-1]["role"] == "system"
+    assert "Decision" in call["asked"][-1]["content"]
+    tool = call["tools"][0]["function"]
+    assert tool["name"] == TURN_COMPACT
+    assert tool["description"] == TURN_COMPACT_TEXT
+    assert tool["parameters"] == LIVE_REPLY
+    assert call["tool_choice"] == TURN_COMPACT
+    assert call["thinking"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_a_recall_bound_the_grammar_does_not_know_is_a_tool_error() -> None:
+    """The same answer as an unreadable reply, and for the same reason.
+
+    A reply of the right *shape* whose `since` is in no grammar this build
+    speaks — `whenever`, `sometime last year` — is refused before the store sees
+    it.  Handed to the store it would raise from inside a query and fail the
+    turn, so the selection is the tool's error instead: it names the grammar,
+    and the agent can correct it.  Nothing is written.
     """
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    reply = '{"context": "clear", "recall": {"query": "one", "since": "whenever"}}'
+    reply = (
+        '{"keep": {"action": "clear"}, "recall": {"query": "one", "since": "whenever"}}'
+    )
 
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
     ) as client:
         await _seed(client, "jack", ("one", "1"))
-        answer = await client.call_tool(
-            "rebuild",
-            {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
-        )
+        with pytest.raises(ToolError) as refused:
+            await client.call_tool(
+                "rebuild",
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
+            )
 
-    assert answer.data["changed"] is False
-    assert answer.data["messages"] == hold
+    assert "recall.since" in str(refused.value)
+    assert "not a time I can place" in str(refused.value)
+    assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
 @pytest.mark.asyncio
@@ -1760,7 +2362,9 @@ async def test_the_carried_tail_survives_a_rebuild() -> None:
 
     async with Client(
         build_server(
-            default_config(), embedder=EMBEDDER, ask=Replies('{"context": "clear"}')
+            default_config(),
+            embedder=EMBEDDER,
+            ask=Replies('{"keep": {"action": "clear"}, "recall": {}}'),
         )
     ) as client:
         await _seed(client, "jack", ("one", "1"))
@@ -1770,35 +2374,11 @@ async def test_the_carried_tail_survives_a_rebuild() -> None:
                 "agent": "jack",
                 "messages": [SYSTEM, {"role": "user", "content": "one"}, tail],
                 "turn_ids": [1],
-                "prompt": "still there?",
                 "carried": 1,
             },
         )
 
     assert answer.data["messages"] == [SYSTEM, tail]
-
-
-@pytest.mark.asyncio
-async def test_forget_clears_the_context_and_keeps_the_turns() -> None:
-    """A reset must not restore the conversation it just forgot.
-
-    Dropping the in-memory loop is not enough any more, because the next message
-    under that key restores — so the list is cleared and the log is left alone.
-    """
-
-    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
-        await _seed(client, "jack", ("one", "1"))
-        forgotten = await client.call_tool("forget", {"agent": "jack"})
-        restored = await client.call_tool(
-            "restore", {"agent": "jack", "messages": [SYSTEM]}
-        )
-        still_readable = await client.call_tool(
-            "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
-        )
-
-    assert forgotten.data == {"turn_ids": []}
-    assert restored.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
-    assert still_readable.data["messages"][0]["content"] == "one"
 
 
 # --- startup: the index is brought up to date with the model ------------------
@@ -1924,13 +2504,18 @@ def test_the_turn_prompt_is_the_status_bar_figure_and_the_clock() -> None:
     assert context_usage(140_127, 0) == ("140,127", 0.0)
     assert context_usage(0, 0) == ("", 0.0)
 
-    note = turn_prompt_note({"now": "2026-10-27T20:40:34+08:00", "token-usage": text})
+    note = turn_prompt_note(
+        {
+            "now": "2026-10-27T20:40:34+08:00",
+            "plan": [{"text": "x", "status": "active"}],
+        }
+    )
     assert note.startswith(TURN_PROMPT_PREFIX)
     assert note.endswith("]")
     payload = json.loads(note[len(TURN_PROMPT_PREFIX) : -1])
     assert payload == {
         "now": "2026-10-27T20:40:34+08:00",
-        "token-usage": "140,127 (14.0%)",
+        "plan": [{"text": "x", "status": "active"}],
     }
 
     # A fact the caller does not have is absent, not empty.
@@ -1938,6 +2523,31 @@ def test_the_turn_prompt_is_the_status_bar_figure_and_the_clock() -> None:
     assert json.loads(only_time[len(TURN_PROMPT_PREFIX) : -1]) == {
         "now": "2026-10-27T20:40:34+08:00"
     }
+
+
+def test_the_turn_prompt_lead_is_one_builder_for_the_clock_and_the_plan() -> None:
+    """**Two servers, one marker.**  The agent server and the agent-task server
+    each assembled this lead; a rule that decides what it carries cannot be two
+    rules, or a task's turn and an agent's would disagree about the same
+    conversation.
+
+    **No context figure.**  The last measured call is the previous turn's, and
+    a rebuild can change the list before this turn's first call — the number
+    the turn runs on is `_context_rebuild`'s report.
+    """
+    from slife2.libs.turn.context import TURN_PROMPT_PREFIX, turn_prompt_lead
+
+    note = turn_prompt_lead()
+    assert note.startswith(TURN_PROMPT_PREFIX)
+    payload = json.loads(note[len(TURN_PROMPT_PREFIX) : -1])
+    assert payload["now"], "a turn always knows when it started"
+    assert "token-usage" not in payload, "the stale figure is gone"
+
+    # The plan rides the same marker, and an empty one is omitted like every
+    # fact the caller does not have.
+    plan = [{"text": "read the config", "status": "active"}]
+    with_plan = json.loads(turn_prompt_lead(plan)[len(TURN_PROMPT_PREFIX) : -1])
+    assert with_plan["plan"] == plan
 
 
 def test_a_turn_prompt_does_not_trim_the_message_it_is_added_to() -> None:
@@ -1969,6 +2579,17 @@ def test_a_turn_prompt_does_not_trim_the_message_it_is_added_to() -> None:
     assert without_lead("no marker here", note) == "no marker here"
     assert without_lead(parts, note) == parts
 
+    # **A lead merged into the first part is still the lead.**  The turn opens
+    # with a string; a mid-turn `attach_image` turns that string into content
+    # parts, with the note joined to the person's text in one part.  Requiring
+    # an exact match left the marker in the row, the index and every rebuild —
+    # the one place SDD §5.5 says it never reaches.
+    merged = [
+        {"type": "text", "text": f"{note} what is this?"},
+        {"type": "image_url", "image_url": {"url": "https://example.test/x.png"}},
+    ]
+    assert without_lead(merged, note) == parts
+
 
 def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
     """**The one source `normalise_ids` exists for, and `parse` refused it.**
@@ -1980,7 +2601,12 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
     `recall` beside the keep-list was ignored in silence.  What an id is, is
     `normalise_ids`'s to decide, and the two now read as one rule.
     """
-    from slife2.libs.turn.context import Decision, parse
+    from slife2.libs.turn.context import Decision, parse_with_reason
+
+    def parse(reply: str) -> Decision | None:
+        """The decision half of the one reader — `parse` was superseded by
+        `parse_with_reason`, and these assertions are about the decision."""
+        return parse_with_reason(reply)[0]
 
     assert parse('{"context": ["2", 1]}') == Decision(keep=[2, 1])
     # The whole reply survives, which is what "both halves" means.
@@ -1990,7 +2616,6 @@ def test_a_keep_list_of_stringly_ids_is_coerced_rather_than_refused() -> None:
             recall={
                 "query": "the very first",
                 "sentences": None,
-                "prompt_as_sentence": None,
                 "since": None,
                 "until": None,
                 "anchor": None,
@@ -2015,7 +2640,12 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
     six-word sentence asked for exactly matches nothing.  Blank sentences are
     nothing asked, and a value that is not a list of strings is a reply the
     build does not obey."""
-    from slife2.libs.turn.context import Decision, parse
+    from slife2.libs.turn.context import Decision, parse_with_reason
+
+    def parse(reply: str) -> Decision | None:
+        """The decision half of the one reader — `parse` was superseded by
+        `parse_with_reason`, and these assertions are about the decision."""
+        return parse_with_reason(reply)[0]
 
     assert parse(
         '{"recall": {"sentences": ["the dean", "the anniversary"]}}'
@@ -2023,7 +2653,6 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
         recall={
             "query": None,
             "sentences": ["the dean", "the anniversary"],
-            "prompt_as_sentence": None,
             "since": None,
             "until": None,
             "anchor": None,
@@ -2039,96 +2668,76 @@ def test_a_recall_carries_sentences_as_separate_questions() -> None:
         assert parse(not_sentences) is None, not_sentences
 
 
-def test_a_recall_can_say_the_input_is_not_a_question() -> None:
-    """**The model sees the input and the conversation; this judgement is its.**
+def test_a_refusal_names_the_field_a_repair_has_to_fix() -> None:
+    """**The reason is the model's instruction, not a log word.**
 
-    The input is read beside the sentences by default.  A greeting or a
-    follow-up names nothing, so the decision can say so — the flag alone is not
-    a question, and a value that is not a boolean is a reply this build does
-    not obey.
+    Every refusal is fed back with the reply it refused, so it has to say what
+    the field is and what shape it takes — "unparsed" would be a repair with
+    nothing to act on.
     """
-    from slife2.libs.turn.context import Decision, parse
+    from slife2.libs.turn.context import parse_with_reason
 
-    assert parse(
-        '{"recall": {"sentences": ["the other school"], "prompt_as_sentence": false}}'
-    ) == Decision(
-        recall={
-            "query": None,
-            "sentences": ["the other school"],
-            "prompt_as_sentence": False,
-            "since": None,
-            "until": None,
-            "anchor": None,
-        }
-    )
-    for flag_only in (
-        '{"recall": {"prompt_as_sentence": false}}',
-        '{"recall": {"prompt_as_sentence": true}}',
+    for reply, fragment in (
+        ("no object here", "not one JSON object"),
+        ('{"context": [true]}', "turn ids"),
+        ('{"recall": {"sentences": "one"}}', "list of strings"),
+        ('{"recall": {"anchor": "first"}}', '"newest" or "oldest"'),
+        ('{"recall": {"since": "whenever"}}', BOUND_GRAMMAR),
+        ('{"context": [], "why": "because"}', '"why"'),
     ):
-        decision = parse(flag_only)
-        assert decision is not None and decision.recall is None
-    for not_a_bool in (
-        '{"recall": {"prompt_as_sentence": "false"}}',
-        '{"recall": {"prompt_as_sentence": 0}}',
-    ):
-        assert parse(not_a_bool) is None, not_a_bool
+        decision, reason = parse_with_reason(reply)
+        assert decision is None, reply
+        assert fragment in reason, (reply, reason)
 
 
 # --- the four ways a rebuild keeps the context, and what the log says ---------
 
 
 @pytest.mark.asyncio
-async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
+async def test_the_ways_a_rebuild_can_fail_and_change_nothing_are_logged_apart(
     caplog,
 ) -> None:
-    """**Four ways to keep the context, and the log may not fold any two of them.**
+    """**A failure and a no-op are different outcomes, and the log says which.**
 
-    `rebuild`'s `_in_hand` is one answer for four situations — a discriminator
-    that decided nothing, a decision that asks for nothing, a decision that
-    equals what is held, and a selection that cannot be fetched.  The line it
-    writes is the only sight anybody gets of the discriminator, and it reported
-    the first as the second: "no decision at all" was logged
-    `reason=context_sufficient`, so every timeout and every unreadable reply —
-    each named on the line above with its own reason — counted as the model
-    having decided the context was enough.  Whoever counts decisions by that
-    word was counting failures.
-
-    The docstring named a fifth exit that does not exist, "the switch is off":
-    `ContextSettings` has no such field and nothing here reads one, so the four
-    below are the whole of it.
+    An unreadable reply and a selection that cannot be fetched are the tool's
+    errors now, each named on its own line; a decision that keeps exactly what
+    is in hand is a success that writes nothing, and its own line says so.  The
+    log may not fold the failures into "the context was sufficient".
     """
     caplog.set_level(logging.INFO, logger=CONTEXT_LOGGER)
     hold = [SYSTEM, {"role": "user", "content": "one"}]
-    # One server, one scripted discriminator, four calls: an unreadable reply,
+    # One server, one scripted decision model, four calls: an unreadable reply,
     # a decision that asks for nothing, a decision equal to what is held, and a
-    # keep-list naming a turn the log does not have.
+    # keep-list naming a turn the store does not have.
     replies = Replies(
-        "I could not decide.", "{}", '{"context": [1]}', '{"context": [99]}'
+        "I could not decide.",
+        '{"keep": {"action": "keep"}, "recall": {}}',
+        '{"keep": {"action": "ids", "turn_ids": [1]}, "recall": {}}',
+        '{"keep": {"action": "ids", "turn_ids": [99]}, "recall": {}}',
     )
     answers = []
     async with Client(
         build_server(default_config(), embedder=EMBEDDER, ask=replies)
     ) as client:
         await _seed(client, "jack", ("one", "1"))
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "rebuild",
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
+            )
         answers.append(
             await client.call_tool(
                 "rebuild",
-                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
             )
         )
         answers.append(
             await client.call_tool(
                 "rebuild",
-                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
+                {"agent": "jack", "messages": hold, "turn_ids": [1]},
             )
         )
-        answers.append(
-            await client.call_tool(
-                "rebuild",
-                {"agent": "jack", "messages": hold, "turn_ids": [1], "prompt": "hi"},
-            )
-        )
-        answers.append(
+        with pytest.raises(ToolError):
             await client.call_tool(
                 "rebuild",
                 {
@@ -2137,25 +2746,74 @@ async def test_the_four_ways_a_rebuild_keeps_the_context_are_four_reasons(
                     # is the disagreement this exit exists for.
                     "messages": [SYSTEM, {"role": "user", "content": "one"}],
                     "turn_ids": [1, 99],
-                    "prompt": "hi",
                 },
             )
-        )
 
     for answer in answers:
         assert answer.data["changed"] is False, "nothing was fetched or written"
         assert answer.data["recalled"] == 0
     said = [record.getMessage() for record in caplog.records]
-    assert "recall_discriminator_unparsed" in said, "the failure is named"
-    assert "recall_not_needed reason=no_decision" in said, "and it is not a decision"
+    assert any(line.startswith("recall_decision_unreadable") for line in said), (
+        "the failure is named, on the one ask the decision call makes"
+    )
     assert "recall_not_needed reason=context_sufficient" in said
     assert "recall_not_needed reason=context_unchanged" in said
     assert "recall_abandoned reason=unfetchable" in said
-    # It stayed [1] throughout: `_in_hand` is the answer that writes nothing.
+    # The fields the outcome cannot report.  The unreadable reply has no
+    # `recall_decided` line at all; the other three say what they were.
+    assert "recall_decided keep=keep recall=none" in said
+    assert "recall_decided keep=1 recall=none" in said
+    assert "recall_decided keep=99 recall=none" in said
+    assert len([line for line in said if line.startswith("recall_decided")]) == 3, (
+        "one line per decision, and none for the unreadable reply"
+    )
+    # It stayed [1] throughout: a failed selection writes nothing.
     assert TurnStore(agent_dir("jack") / "turns.db").context_turns() == [1]
 
 
-# --- the transport, which the discriminator cannot see from where it sits ------
+@pytest.mark.asyncio
+async def test_the_decisions_fields_are_logged(caplog) -> None:
+    """**The outcome cannot say what was decided.**
+
+    `recall_rebuilt turns=0 recalled=0 published=true` is the same line for a
+    model that cleared the turns and one that never had any, and a recall's
+    condition —
+    the sentences, the words, the period — is consumed and dropped.  A live
+    rebuild raised exactly that question and no artifact could answer it, so
+    the decision is logged before its outcome, in the reply's own vocabulary.
+
+    The raw reply is DEBUG because it is the model's text: the parsed line is
+    what an operator reads, and the text is there for whoever is already
+    looking at the protocol.
+    """
+    caplog.set_level(logging.DEBUG, logger=CONTEXT_LOGGER)
+    reply = '{"keep": {"action": "clear"}, "recall": {"sentences": ["the code review prompt"]}}'
+
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        await _seed(client, "jack", ("one", "1"))
+        await client.call_tool(
+            "rebuild",
+            {
+                "agent": "jack",
+                "messages": [SYSTEM, {"role": "user", "content": "one"}],
+                "turn_ids": [1],
+            },
+        )
+
+    said = [record.getMessage() for record in caplog.records]
+    decided = next(
+        line for line in said if line.startswith("recall_decided keep=clear ")
+    )
+    recall = json.loads(decided.partition("recall=")[2])
+    assert recall["sentences"] == ["the code review prompt"]
+    assert any(line.startswith("recall_decision_reply ") for line in said), (
+        "the raw reply is kept for the shape the parser read"
+    )
+
+
+# --- the transport, which the decision model cannot see from where it sits ------
 
 
 class NoStructuredContent:
@@ -2177,8 +2835,8 @@ async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() ->
     """**An unreadable answer is not an empty one**, on this hop too.
 
     `StreamChatResult.from_wire(None)` builds a result with no text, so a model
-    server from another build reached `_discriminate` as "the model answered
-    with nothing": it logged `recall_discriminator_unparsed` and kept the
+    server from another build reached `_decide` as "the model answered with
+    nothing": it logged `recall_decision_unparsed` and kept the
     context, and so did every rebuild for the rest of the session — pointing
     whoever read the log at the model's output rather than at the transport.
     `slife2.clients.model` raises for this on the loop's own hop, and this is
@@ -2191,6 +2849,4 @@ async def test_a_model_answer_carrying_nothing_is_refused_not_read_as_empty() ->
     clients: dict[str, Any] = {config.server(provider.api).url: NoStructuredContent()}
 
     with pytest.raises(ConnectionError, match="another build"):
-        await _ask_model(
-            config, clients, asyncio.Lock(), "jack", "", "", [], "and then?"
-        )
+        await _ask_model(config, clients, asyncio.Lock(), "jack", "", "", [])

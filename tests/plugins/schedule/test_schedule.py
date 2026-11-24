@@ -42,7 +42,7 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 import slife2.plugins.schedule.server as schedule_server
-from slife2.helpers.clock import now
+from slife2.helpers.clock import at, now
 from slife2.libs.host import paths
 from slife2.libs.host.config import ServerSettings, default_config
 from slife2.libs.plugin.audience import (
@@ -50,16 +50,18 @@ from slife2.libs.plugin.audience import (
     for_the_model,
     request_conversation,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import AGENT_TASK_LIST
+from slife2.libs.plugin.vocabulary import (
     FAILED as TASK_FAILED,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     FINISHED as TASK_FINISHED,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
-from slife2.plugins.schedule.expressions import latest_fire
+from slife2.libs.store.db import StaleSchema
+from slife2.plugins.schedule.expressions import latest_fire, next_run
 from slife2.plugins.schedule.server import (
     SCHEDULE_LIST,
     SCHEDULE_REMOVE,
@@ -67,11 +69,14 @@ from slife2.plugins.schedule.server import (
     SCHEDULE_RUN_SKIP,
     SCHEDULE_RUNS,
     SCHEDULE_SET,
+    RunLocks,
+    agent_task_name,
     build_server,
     due,
     poll_forever,
     poll_once,
     reconcile,
+    retry_stale_dispatches,
     sweep_once,
 )
 from slife2.plugins.schedule.store import (
@@ -289,7 +294,6 @@ def build(
 ) -> FastMCP:
     """The plugin, wired to recorders and with its clock not running."""
     return build_server(
-        default_config(),
         window_client=window.client if window else None,
         tasks_client=tasks.client if tasks else None,
         polling=False,
@@ -502,10 +506,10 @@ async def test_an_older_fire_does_not_move_the_anchor_backwards() -> None:
     Two fires of one task can be recorded at once — a maker and its subagent
     share a ledger, and `schedule_run_now` is a call either of them can make.
     Both read the same `last_due`; the older one then writes after the newer
-    one.  The check in front of the update compares against the *caller's*
-    snapshot, so it passes, and the anchor moves backwards: the poll
-    re-considers a fire that has already been recorded, which on a fall-back
-    hour is a fire that can happen twice.
+    one.  If the update compared against the *caller's* snapshot it would pass,
+    and the anchor would move backwards: the poll re-considers a fire that has
+    already been recorded, which on a fall-back hour is a fire that can happen
+    twice.
 
     A stale `Task` value is what a second caller holds, so that is what this
     passes.  The update's own `WHERE` is the thing that decides.
@@ -520,13 +524,56 @@ async def test_an_older_fire_does_not_move_the_anchor_backwards() -> None:
     newer = (moment + timedelta(hours=2)).isoformat()
     older = (moment + timedelta(hours=1)).isoformat()
     store.advance(stale, newer)
-    # The same snapshot, with the older fire: the Python check passes because
-    # the caller never saw the newer write.
+    # The same snapshot, with the older fire: the update's own WHERE is what
+    # keeps the newer anchor.
     store.advance(stale, older)
 
     after = store.task("daily")
     assert after is not None
     assert after.last_due == newer
+
+
+async def test_a_damaged_anchor_is_replaced_by_the_next_fire() -> None:
+    """**The update repairs an anchor the parser refuses.**
+
+    `moment_of` raises on a stamp that is not a time — a hand-edited ledger —
+    and the Python check that used to sit in front of the update called it on
+    the caller's snapshot first.  A damaged anchor therefore raised before the
+    SQL that is designed to replace it (`julianday(last_due) IS NULL`), and the
+    repair the docstring promises could never happen.  The database makes the
+    decision, and it can read a stamp the parser cannot.
+    """
+    async with Client(build()) as client:
+        await write(client)
+
+    connection = sqlite3.connect(paths.schedule_db(AGENT))
+    connection.execute("UPDATE scheduled_tasks SET last_due = 'not-a-time'")
+    connection.commit()
+    connection.close()
+
+    store = ledger()
+    damaged = store.task("daily")
+    assert damaged is not None and damaged.last_due == "not-a-time"
+    repaired = (datetime.fromisoformat(now()) + timedelta(minutes=1)).isoformat()
+    store.advance(damaged, repaired)
+
+    after = store.task("daily")
+    assert after is not None and after.last_due == repaired
+
+
+async def test_a_connection_is_closed_on_the_way_out(tmp_path: Path) -> None:
+    """`with sqlite3.connect(...)` commits; it does not close.
+
+    A connection per call that is never closed is a handle leak, and on Windows
+    it is a file another process cannot delete — the rule the turn store and the
+    cabinet already state, which the ledger now keeps through the same shared
+    lifetime (`connection_to`).
+    """
+    store = ScheduleStore(tmp_path / "schedule.db", tmp_path)
+    with store._connect() as connection:
+        assert connection.execute("SELECT 1").fetchone()[0] == 1
+    with pytest.raises(sqlite3.ProgrammingError):
+        connection.execute("SELECT 1")
 
 
 async def test_a_cron_that_can_never_fire_is_refused() -> None:
@@ -535,6 +582,16 @@ async def test_a_cron_that_can_never_fire_is_refused() -> None:
     async with Client(build()) as client:
         with pytest.raises(ToolError, match="can fire"):
             await write(client, cron="0 9 31 2 *")
+
+
+async def test_a_seconds_cron_is_refused_the_poll_cannot_fire_it() -> None:
+    """croniter accepts six-field (seconds) forms, but the poll's fire window
+    nudges its reference by one second — a step a seconds cron can cross into a
+    future-dated fire.  Five fields is the contract the poll assumes; a sixth is
+    refused at the write rather than mis-fired."""
+    async with Client(build()) as client:
+        with pytest.raises(ToolError, match="can fire"):
+            await write(client, cron="*/5 * * * * *")
 
 
 async def test_an_unknown_timezone_is_refused_at_the_write() -> None:
@@ -578,17 +635,52 @@ async def test_a_task_that_has_come_due_starts_the_work_as_an_agent_task(
     )
 
     assert [one["agent"] for one in window.asked] == [AGENT]
-    assert [
-        (one["agent"], one["name"], one["description"]) for one in tasks.started
-    ] == [(AGENT, "daily", DESCRIPTION)]
-    assert [Path(one["home"]).resolve() for one in tasks.started] == [
-        paths.home().resolve()
-    ]
 
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING
-    assert run.agent_task_id == "agent-task:daily"
+    assert [
+        (one["agent"], one["name"], one["description"]) for one in tasks.started
+    ] == [(AGENT, f"daily@{run.due_at}", DESCRIPTION)]
+    assert [Path(one["home"]).resolve() for one in tasks.started] == [
+        paths.home().resolve()
+    ]
+    assert run.agent_task_id == f"agent-task:daily@{run.due_at}"
     assert did == [f"{AGENT}: daily due {run.due_at} -> {PENDING}"]
+
+
+async def test_a_definition_that_changed_after_the_snapshot_is_not_fired(
+    window: Window, tasks: Tasks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The pass's snapshot is not the definition it fires.**
+
+    The poll reads every enabled task once and then walks them; a `schedule_set`
+    that switches one off while it walks the earlier ones would otherwise be
+    invisible, and the disabled task would fire one run on the definition the
+    caller had just replaced.  The definition is therefore read again under the
+    task's lock — this hands the pass the stale snapshot on purpose and asserts
+    that the stored definition wins.
+    """
+    async with Client(build(window, tasks)) as client:
+        await write(client, cron=EVERY_MINUTE)
+        stale = ledger().task("daily")
+        assert stale is not None and stale.enabled
+        await write(client, cron=EVERY_MINUTE, enabled=False)
+
+    def stale_snapshot(self, **kwargs):
+        return [stale], 1
+
+    monkeypatch.setattr(ScheduleStore, "tasks", stale_snapshot)
+
+    did = await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
+
+    assert did == [], "the pass fired a task that is no longer enabled"
+    assert window.asked == []
+    assert ledger().newest("daily") is None
 
 
 async def test_the_window_and_the_task_are_addressed_to_the_ledgers_own_agent(
@@ -637,13 +729,13 @@ async def test_a_fire_older_than_the_grace_window_is_missed_rather_than_run(
 async def test_the_poll_settles_finished_runs_before_it_fires_again(
     window: Window, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two pending runs of one task would share `agent-task:<name>`.
+    """A finished run is settled before the next fire starts.
 
-    The agent-task id is derived from the name, so a second start while the
-    first run's row is still `pending` aliases the two: `in_flight` returns
-    both, the newer task's ending is used for both, and the older run is never
-    settled from its own.  Reconciling before the fires closes the finished one
-    first.
+    The ids no longer alias — each run's task is named after its due time
+    (`agent_task_name`) — but a finished run left `pending` is one the ledger
+    cannot close until it asks again, and the agent-task registry keeps only
+    the most recently ended tasks.  Reconciling before the fires closes the
+    finished one while its task is still answerable.
     """
     async with Client(build(window)) as client:
         await write(client, cron=EVERY_MINUTE)
@@ -845,13 +937,13 @@ async def test_run_now_starts_the_work_as_a_background_task_of_the_agents(
         run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
 
     assert run["status"] == PENDING
-    assert run["agent_task_id"] == "agent-task:daily"
-    # Handed over as the agent, under the task's own name, with the description
+    assert run["agent_task_id"] == f"agent-task:daily@{run['due_at']}"
+    # Handed over as the agent, under the run's own name, with the description
     # as the whole of what the work is told — and in this home, which is the
     # caller's and is read here rather than assumed.
     assert [
         (one["agent"], one["name"], one["description"]) for one in tasks.started
-    ] == [(AGENT, "daily", DESCRIPTION)]
+    ] == [(AGENT, f"daily@{run['due_at']}", DESCRIPTION)]
     assert [Path(one["home"]).resolve() for one in tasks.started] == [
         paths.home().resolve()
     ]
@@ -869,6 +961,37 @@ async def test_a_run_already_in_flight_is_not_started_twice(tasks: Tasks) -> Non
 
     assert again["agent_task_id"] == first["agent_task_id"]
     assert len(tasks.started) == 1
+
+
+async def test_two_runs_of_one_task_are_named_apart(tasks: Tasks) -> None:
+    """Each run's work is an agent task named after the run, not only after the
+    schedule task: two runs of one task have two ids, so the ledger can ask
+    after each ending without the newer task answering for the older run."""
+    first_due = "2026-11-14T09:00:00+08:00"
+    second_due = "2026-11-14T09:05:00+08:00"
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        store = ledger()
+        task = store.task("daily")
+        assert task is not None
+        # The two runs are written the way the poll would have left them: two
+        # fires of one task, each with its own due time.
+        store.record(task, first_due)
+        store.record(task, second_due)
+        first = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": first_due}
+        )
+        second = await ask(
+            client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": second_due}
+        )
+
+    assert first["agent_task_id"] == f"agent-task:daily@{first_due}"
+    assert second["agent_task_id"] == f"agent-task:daily@{second_due}"
+    assert first["agent_task_id"] != second["agent_task_id"]
+    assert [one["name"] for one in tasks.started] == [
+        f"daily@{first_due}",
+        f"daily@{second_due}",
+    ]
 
 
 async def test_two_run_now_calls_at_once_start_one_task(tasks: Tasks) -> None:
@@ -912,7 +1035,64 @@ async def test_two_run_now_calls_at_once_start_one_task(tasks: Tasks) -> None:
     assert answered[0]["agent_task_id"] == answered[1]["agent_task_id"]
     run = ledger().newest("daily")
     assert run is not None and run.status == PENDING, "the work in flight was closed"
-    assert run.agent_task_id == "agent-task:daily"
+    assert run.agent_task_id == f"agent-task:daily@{run.due_at}"
+
+
+async def test_a_run_lock_is_dropped_when_nobody_holds_it(tmp_path: Path) -> None:
+    """**One `asyncio.Lock` per task name ever used was a table that never shrank.**
+
+    The registry serves a process's whole life, so a task that was removed kept
+    its lock until a restart.  A lease is taken before the wait and given back
+    after the release, and the last one drops both entries: a caller holds or
+    waits for one, or nobody does — and nobody means there is nothing to keep.
+    """
+    locks = RunLocks()
+    store = SimpleNamespace(home=tmp_path, agent="jack")
+    key = (str(tmp_path.resolve()), "jack", "nightly")
+
+    async with RunLocks.held(locks, store, "nightly"):
+        assert key in locks._locks, "the held task has no lock"
+    assert locks._locks == {} and locks._leases == {}, (
+        "a released lock stayed in the table for the process's life"
+    )
+
+
+async def test_a_waiter_keeps_the_lock_its_holder_is_about_to_release(
+    tmp_path: Path,
+) -> None:
+    """**The lease is taken before the wait**, which is what makes pruning safe.
+
+    The holder releases first; a waiter already counted is what keeps the entry
+    alive for it, and both callers really do share one lock rather than each
+    getting a fresh one around a different critical section.
+    """
+    locks = RunLocks()
+    store = SimpleNamespace(home=tmp_path, agent="jack")
+    first_in, second_in, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    seen: dict[str, asyncio.Lock] = {}
+    key = (str(tmp_path.resolve()), "jack", "nightly")
+
+    async def holder(tag: str, inside: asyncio.Event) -> None:
+        async with RunLocks.held(locks, store, "nightly"):
+            seen[tag] = locks.for_task(store, "nightly")
+            inside.set()
+            await release.wait()
+
+    first = asyncio.create_task(holder("first", first_in))
+    await first_in.wait()
+    second = asyncio.create_task(holder("second", second_in))
+    for _ in range(100):
+        if locks._leases.get(key) == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert not second_in.is_set(), "the second caller did not wait for the first"
+    assert locks._leases[key] == 2, "the waiter was not counted before its wait"
+
+    release.set()
+    await asyncio.gather(first, second)
+
+    assert seen["first"] is seen["second"], "the two callers used different locks"
+    assert locks._locks == {} and locks._leases == {}
 
 
 async def test_a_dispatch_that_is_refused_closes_the_run_and_says_why(
@@ -1070,7 +1250,7 @@ async def test_run_now_backfills_the_run_that_was_missed(
 
     assert started["due_at"] == missed.due_at
     assert started["status"] == PENDING
-    assert started["agent_task_id"] == "agent-task:daily"
+    assert started["agent_task_id"] == f"agent-task:daily@{missed.due_at}"
 
 
 async def test_run_now_refuses_a_run_that_has_already_ended(tasks: Tasks) -> None:
@@ -1088,6 +1268,48 @@ async def test_run_now_refuses_a_run_that_has_already_ended(tasks: Tasks) -> Non
             await ask(
                 client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": run["due_at"]}
             )
+
+
+async def test_run_now_does_not_start_work_for_a_settled_run_at_this_instant(
+    tasks: Tasks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The no-`due_at` path checks the row before it dispatches too.**
+
+    It only returned early for a `pending` row with a task id; a `missed`
+    (or `failed`) row at the same second fell through, `agent_task_start` ran
+    the work, and the compare-and-sets in `record`/`attach` silently no-opped —
+    so the answer stayed "missed" about work that was really running.
+    """
+    from slife2.plugins.schedule import server as schedule_server
+
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        stamp = now()
+        monkeypatch.setattr(schedule_server, "now", lambda: stamp)
+        store = ledger()
+        task = store.task("daily")
+        assert task is not None
+        store.record(task, stamp)
+        store.settle("daily", stamp, MISSED, error="nobody was here")
+
+        with pytest.raises(ToolError, match="already missed"):
+            await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    assert tasks.started == [], "work ran for a run the ledger said had ended"
+    assert ledger().run("daily", stamp).status == MISSED
+
+
+async def test_writing_a_task_answers_with_the_whole_description() -> None:
+    """**A listing cuts a row; the answer to writing it is the task.**  The
+    returned row carried the 120-character cut, so a model copying it back into
+    a whole-task `schedule_set` silently lost the tail."""
+    long = "x" * 200
+    async with Client(build()) as client:
+        written = await write(client, description=long)
+        listed = await ask(client, SCHEDULE_LIST)
+
+    assert written["description"] == long
+    assert listed["tasks"][0]["description"] == long[:120]
 
 
 async def test_skipping_a_run_is_an_answer_rather_than_a_gap() -> None:
@@ -1180,6 +1402,51 @@ async def test_a_run_is_found_by_the_moment_rather_than_its_spelling() -> None:
     assert skipped["status"] == SKIPPED
 
 
+async def test_a_run_is_found_by_its_instant_when_the_offset_has_moved() -> None:
+    """**A run written before a fall-back is found by the instant, not the string.**
+
+    The stored key carries the offset in force when it was written; a model
+    handing the same instant back has it normalized to *today's* local offset
+    (`normalize_bound`), which equals no stored key once the offset has moved —
+    so both string lookups answered "no such run" about a run that was there.
+    The lookup that remains compares the moments (`julianday`) and answers with
+    the key the row actually holds.
+
+    The stored spelling is built to differ from this machine's *current* offset
+    whatever that is (UTC when the machine is not UTC, an hour ahead when it is),
+    so the instant fallback is the path that finds it on every runner — not a
+    coincidence of the test machine's zone.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    moment = datetime.fromisoformat(now())
+    other = UTC if moment.utcoffset() != timedelta(0) else timezone(timedelta(hours=1))
+    stored = moment.astimezone(other).isoformat(timespec="seconds")
+    store.record(task, stored)
+
+    async with Client(build()) as client:
+        # The same instant in the machine's own spelling: neither string lookup
+        # matches the stored key, so only the instant comparison can place it.
+        skipped = await ask(
+            client,
+            SCHEDULE_RUN_SKIP,
+            {"name": "daily", "due_at": at(moment), "note": "by instant"},
+        )
+        # A different instant is still a real no-match, not a false positive.
+        with pytest.raises(ToolError, match="has no run due at"):
+            await ask(
+                client,
+                SCHEDULE_RUN_SKIP,
+                {"name": "daily", "due_at": at(moment + timedelta(hours=5))},
+            )
+
+    assert skipped["due_at"] == stored
+    assert skipped["status"] == SKIPPED
+
+
 async def test_a_due_at_in_no_grammar_is_told_apart_from_a_run_that_is_gone(
     tasks: Tasks,
 ) -> None:
@@ -1254,7 +1521,7 @@ async def test_the_sweep_calls_a_run_that_never_started_missed() -> None:
     assert task is not None
     store.record(task, "2026-10-12T09:00:00+08:00")
 
-    did = await sweep_once()
+    did = await sweep_once(default_config())
 
     run = ledger().run("daily", "2026-10-12T09:00:00+08:00")
     assert run is not None and run.status == MISSED
@@ -1273,9 +1540,10 @@ async def test_the_sweep_calls_a_run_that_had_started_failed() -> None:
     assert task is not None
     stamp = "2026-10-12T09:00:00+08:00"
     store.record(task, stamp)
-    store.attach("daily", stamp, "agent-task:daily")
+    store.begin_dispatch("daily", stamp)
+    store.attach("daily", stamp, f"agent-task:daily@{stamp}")
 
-    did = await sweep_once()
+    did = await sweep_once(default_config())
 
     run = ledger().run("daily", stamp)
     assert run is not None and run.status == FAILED
@@ -1283,14 +1551,214 @@ async def test_the_sweep_calls_a_run_that_had_started_failed() -> None:
     assert any("never settled" in line for line in did)
 
 
+async def test_the_sweep_adopts_a_task_a_stopped_dispatch_had_started(
+    tasks: Tasks,
+) -> None:
+    """The crash window the marker exists for.
+
+    The process wrote the run, marked the dispatch and called the peer, then
+    stopped before the id was written down.  The task is running; the sweep
+    finds it by the run's own name and puts the id on the row, so the run is
+    in flight rather than `missed`, and the next poll closes it from its own
+    ending.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+    # What the peer holds: the task the stopped process started, under the
+    # name the run was dispatched with.
+    tasks.started.append({"name": agent_task_name("daily", stamp)})
+
+    did = await sweep_once(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == PENDING
+    assert run.agent_task_id == f"agent-task:daily@{stamp}"
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_a_dispatch_the_startup_sweep_could_not_resolve_is_retried(
+    tasks: Tasks,
+) -> None:
+    """**The peer the startup sweep could not reach is asked again.**
+
+    The launcher starts this plugin in the same wave as the agent-task plugin,
+    so the sweep can run while that peer is still binding its port.  The marked
+    run used to stay `pending` for the life of the process — `reconcile` cannot
+    see it (it has no task id), and only another restart resolved it.  The
+    resolution is remembered and retried on later passes.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+    # What the stopped process's dispatch actually started.
+    tasks.started.append({"name": agent_task_name("daily", stamp)})
+
+    class NotUp:
+        async def call_tool(self, *args, **kwargs):
+            raise ConnectionError("the agent-task plugin is not listening yet")
+
+    await sweep_once(default_config(), tasks_client=NotUp())
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == PENDING
+    assert not run.agent_task_id, "nothing was settled about the run"
+
+    did = await retry_stale_dispatches(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.agent_task_id == f"agent-task:daily@{stamp}"
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_the_sweep_closes_a_stopped_dispatch_whose_task_ended(
+    tasks: Tasks,
+) -> None:
+    """The task got as far as an ending before the process stopped: the run
+    takes that ending, `ran_at` included, rather than being run again."""
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+    tasks.started.append({"name": agent_task_name("daily", stamp)})
+    tasks.status = TASK_FINISHED
+
+    did = await sweep_once(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == RAN
+    assert run.ran_at == FINISHED_AT
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_the_sweep_closes_a_stopped_dispatch_the_peer_does_not_hold(
+    tasks: Tasks,
+) -> None:
+    """The call was reached and the peer has nothing to show for it — a peer
+    that restarted, or a call that never arrived.  `failed` is the honest
+    answer: the work may have happened and the ledger cannot say."""
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+
+    did = await sweep_once(default_config(), tasks_client=tasks.client)
+
+    run = ledger().run("daily", stamp)
+    assert run is not None and run.status == FAILED
+    assert "holds no task" in run.error
+    assert any("resolved from a stopped dispatch" in line for line in did)
+
+
+async def test_a_run_now_during_a_dispatch_resolution_is_not_settled_failed(
+    tasks: Tasks,
+) -> None:
+    """**A manual run dispatched while a resolution is parked stays in flight.**
+
+    The resolution reads the marked runs and asks the peer once; a
+    `schedule_run_now` landing in that window reopens and dispatches the very run
+    the resolution holds a stale list about.  Settling it `failed` on that list
+    would close the run while its work runs and delivers.  Under the task's lock
+    the resolution re-reads the row and leaves a run that is no longer a marked
+    `pending` to the decision that owns it.
+    """
+    async with Client(build()) as client:
+        await write(client)
+    stamp = "2026-10-12T09:00:00+08:00"
+    store = ledger()
+    task = store.task("daily")
+    assert task is not None
+    store.record(task, stamp)
+    store.begin_dispatch("daily", stamp)
+
+    class GatedList:
+        """The peer, holding its first list answer until the test lets it go."""
+
+        def __init__(self, inner: Client) -> None:
+            self.inner = inner
+            self.entered = asyncio.Event()
+            self.gate = asyncio.Event()
+            self.gated = False
+
+        async def call_tool(self, name: str, args: dict, **kwargs: Any) -> Any:
+            if name == AGENT_TASK_LIST and not self.gated:
+                self.gated = True
+                answer = await self.inner.call_tool(name, args, **kwargs)
+                self.entered.set()
+                await self.gate.wait()
+                return answer
+            return await self.inner.call_tool(name, args, **kwargs)
+
+    gated = GatedList(tasks.client)
+    resolving = asyncio.create_task(
+        sweep_once(default_config(), tasks_client=gated, locks=RunLocks())
+    )
+    # The resolution holds the list it fetched before the manual run's task existed.
+    await asyncio.wait_for(gated.entered.wait(), timeout=5.0)
+
+    async with Client(build(tasks=tasks)) as client:
+        run = await ask(client, SCHEDULE_RUN_NOW, {"name": "daily", "due_at": stamp})
+    assert run["status"] == PENDING and run["agent_task_id"]
+
+    gated.gate.set()
+    await resolving
+
+    after = ledger().run("daily", stamp)
+    assert after is not None and after.status == PENDING
+    assert after.agent_task_id == run["agent_task_id"], (
+        "the resolution left the in-flight run to the dispatch that owns it"
+    )
+
+
+async def test_a_ledger_from_another_build_is_refused_not_migrated() -> None:
+    """**There is no migration layer, and the ledger is the reason it cannot
+    have one.**  A file whose `scheduled_runs` predates this build's columns is
+    refused by name, before any DDL touches it — served, every read of a run
+    would raise SQLite's `No item with that key` instead.  The clock skips it,
+    as it skips any file it cannot open, and the rest of the machine keeps its
+    schedules."""
+    path = paths.schedule_db(AGENT)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE scheduled_runs (id INTEGER PRIMARY KEY, task_id INTEGER, "
+        "due_at TEXT, status TEXT, ran_at TEXT, note TEXT, error TEXT, "
+        "agent_task_id TEXT)"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(StaleSchema, match="dispatching"):
+        ScheduleStore.open(AGENT)
+
+    assert await sweep_once(default_config()) == []
+
+
 async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look() -> (
     None
 ):
     """Printing unsettled runs into every turn's prompt would be one plugin
-    reaching into a prompt another plugin owns, and a note to the window is
-    deferred rather than half-built (SDD §14.2). What the agent gets instead is
-    a ledger it can read — which is what makes "did it run?" a question with an
-    answer rather than a message nobody asked for."""
+    reaching into a prompt another plugin owns; the shipped `AGENTS.md` tells
+    the model to read the ledger instead. What the agent gets is a ledger it
+    can read — which is what makes "did it run?" a question with an answer
+    rather than a message nobody asked for."""
     async with Client(build()) as client:
         await write(client)
     store = ledger()
@@ -1298,7 +1766,7 @@ async def test_the_sweep_announces_nothing_because_the_ledger_is_where_you_look(
     assert task is not None
     store.record(task, "2026-10-12T09:00:00+08:00")
 
-    await sweep_once()
+    await sweep_once(default_config())
 
     # …and the run is findable, which is the whole of the answer it needs.
     async with Client(build()) as client:
@@ -1310,7 +1778,7 @@ async def test_a_sweep_with_nothing_to_do_is_quiet() -> None:
     async with Client(build()) as client:
         await write(client)
 
-    did = await sweep_once()
+    did = await sweep_once(default_config())
 
     assert did == []
 
@@ -1397,6 +1865,56 @@ async def test_one_bad_ledger_row_does_not_stop_the_other_agents(
     assert any(OTHER in line for line in did)
 
 
+async def test_a_damaged_anchor_is_repaired_and_its_siblings_still_fire(
+    window: Window, tasks: Tasks
+) -> None:
+    """**A hand-edited anchor is repaired per task, not skipped for ever.**
+
+    `due` parses the anchor before it asks cron anything, so a `last_due` that is
+    not a time raised *upstream* of `record` — the one place the ledger's repair
+    (`advance`'s `julianday(last_due) IS NULL` branch) runs from.  Left to the
+    per-ledger guard it took every task of the agent with it, on every pass.  The
+    poll now asks for the repair itself: the damaged task is skipped for the pass,
+    its siblings in the same ledger fire, and the next pass reads a whole anchor
+    and fires it too.
+    """
+    async with Client(build(window, tasks)) as client:
+        await write(client, name="mine", cron=EVERY_MINUTE)
+        await write(client, name="sibling", cron=EVERY_MINUTE)
+
+    # Damage one task's anchor, leaving its sibling whole.
+    connection = sqlite3.connect(paths.schedule_db(AGENT))
+    connection.execute(
+        "UPDATE scheduled_tasks SET last_due = 'not-a-time' WHERE name = 'mine'"
+    )
+    connection.commit()
+    connection.close()
+
+    await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(90),
+    )
+
+    # The sibling fired on the same pass; the damaged task was skipped, and its
+    # anchor is a time again rather than the damage it was.
+    assert ledger().runs("sibling")[1] == 1
+    assert ledger().runs("mine")[1] == 0
+    repaired = ledger().task("mine")
+    assert repaired is not None and repaired.last_due != "not-a-time"
+    datetime.fromisoformat(repaired.last_due)  # the repair parses as a moment
+
+    # The next pass fires the repaired task too.
+    await poll_once(
+        default_config(),
+        window_client=window.client,
+        tasks_client=tasks.client,
+        reference=later(150),
+    )
+    assert ledger().runs("mine")[1] == 1
+
+
 async def test_a_ledger_in_another_home_is_fired_in_that_home(
     window: Window, tasks: Tasks, tmp_path: Path
 ) -> None:
@@ -1445,7 +1963,8 @@ async def test_a_ledger_in_another_home_is_fired_in_that_home(
         assert task is not None
         stamp = now()
         store.record(task, stamp)
-        store.attach("daily", stamp, "agent-task:daily")
+        store.begin_dispatch("daily", stamp)
+        store.attach("daily", stamp, f"agent-task:daily@{stamp}")
 
     did = await poll_once(
         default_config(),
@@ -1523,7 +2042,11 @@ async def test_a_dispatch_whose_peer_cannot_be_reached_closes_the_run(
     real_dialer("slife2.plugins.schedule.server")
     config = default_config()
     config.servers["agent-task"] = ServerSettings(port=free_port())
-    async with Client(build_server(config, polling=False)) as client:
+    # **The tool reads `live()`, not the built config.**  Without this source a
+    # machine with slife2 running dials its real agent-task server on the
+    # configured port and the dispatch *succeeds* — the test passes only where
+    # no stack is up, which is the opposite of what it says it proves.
+    async with Client(build_server(polling=False, source=lambda: config)) as client:
         await write(client)
         with pytest.raises(ToolError, match="could not be started"):
             await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
@@ -1565,7 +2088,7 @@ async def test_run_now_backfills_a_run_that_failed_after_its_task_started(
         )
 
     assert started["status"] == PENDING
-    assert started["agent_task_id"] == "agent-task:daily"
+    assert started["agent_task_id"] == f"agent-task:daily@{run['due_at']}"
     assert len(tasks.started) == 1, "the backfill really started the work"
 
 
@@ -1846,6 +2369,27 @@ async def test_a_fall_back_repeat_fires_once_and_not_twice() -> None:
     )
 
 
+async def test_next_run_does_not_promise_a_fall_back_repeat() -> None:
+    """**The same rule, on the reader a person sees.**
+
+    `latest_fire` suppresses the second occurrence of a wall reading; the
+    `next_run` the task listing prints was a bare `croniter.get_next`, so it
+    promised a fire the poll would never run.  The reading is skipped while its
+    first occurrence is at or behind the anchor.
+    """
+    fired = datetime.fromisoformat("2026-10-25T01:00+01:00")
+    assert next_run("0 1 * * *", fired, "Europe/London") == datetime.fromisoformat(
+        "2026-10-26T01:00+00:00"
+    )
+
+    # Inside the repeated hour, every repeated reading has already fired; the
+    # next new reading is 02:00 GMT.
+    inside = datetime.fromisoformat("2026-10-25T01:50+01:00")
+    assert next_run("*/10 * * * *", inside, "Europe/London") == datetime.fromisoformat(
+        "2026-10-25T02:00+00:00"
+    )
+
+
 async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> None:
     """The same rule at the clock, which is where the second run was written.
 
@@ -1875,3 +2419,39 @@ async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> 
     assert did == []
     assert window.asked == []
     assert store.newest("daily") is None, "no second run was written"
+
+
+async def test_a_background_task_ending_is_read_one_way() -> None:
+    """The poll's reconcile and the startup sweep close a run from the same
+    task row; they each had their own copy of this mapping."""
+    from types import SimpleNamespace
+
+    from slife2.plugins.schedule.server import _settle_from_task
+
+    run = SimpleNamespace(name="daily", due_at="2026-10-12T09:00:00+08:00")
+    calls: list[tuple[tuple, dict]] = []
+
+    class Store:
+        def settle(self, *args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    _settle_from_task(
+        Store(),
+        run,
+        {"status": TASK_FINISHED, "finished_at": "2026-10-12T09:00:10+08:00"},
+    )
+    assert calls == [
+        (
+            ("daily", "2026-10-12T09:00:00+08:00", RAN),
+            {"when": "2026-10-12T09:00:10+08:00"},
+        )
+    ]
+
+    calls.clear()
+    _settle_from_task(Store(), run, {"status": TASK_FAILED})
+    assert calls == [
+        (
+            ("daily", "2026-10-12T09:00:00+08:00", FAILED),
+            {"error": "the background task ended as failed"},
+        )
+    ]

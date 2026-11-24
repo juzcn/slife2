@@ -8,7 +8,6 @@ that are absent rather than defaulted.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -17,14 +16,16 @@ import slife2.libs.host.config
 from slife2.libs.host.config import (
     A2A_BROKER_ENV_VAR,
     API_BACKENDS,
-    DEFAULT_TOOL_RESULT_TOKENS,
+    DEFAULT_TOOL_RESULT_BYTES,
     LOCAL,
-    MIN_TOOL_RESULT_TOKENS,
+    MIN_TOOL_RESULT_BYTES,
     PLUGINS,
     REMOTE,
     ConfigError,
+    ModelSettings,
     default_config,
     find_config_path,
+    first_reference,
     load,
     load_cached,
     net_settings,
@@ -34,22 +35,23 @@ from slife2.libs.host.paths import DATA_ENV_VAR
 
 A_PROVIDER = """
 providers:
+  default: local/small
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: ${SLIFE2_TEST_KEY}
     models:
       - model: big
         context_window: 100000
         max_tokens: 4000
         temperature: 0.3
       - model: small
+        context_window: 2000
 embeddings:
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: small-emb
-default: local/small
 """
 
 
@@ -64,6 +66,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: test-model
+        context_window: 1000
 """
 
 A_MINIMAL_EMBEDDINGS = """
@@ -264,6 +267,24 @@ def test_the_cut_in_name_is_spelled_on_all_four_sides() -> None:
     assert CHECK_NEW_INPUT in MODEL_VISIBLE_HARNESS_TOOLS
 
 
+def test_turn_compact_is_held_together_across_the_same_boundaries() -> None:
+    """`_turn_compact` is written into a conversation, so the same four agree.
+
+    It is the third harness pair: the server declares it and writes the call,
+    the autoload keeps it in the model's list, the store's gate lets the
+    `_`-prefixed name through, and every request that follows the pair declares
+    it.  A rename or a missing gate is a 400 one turn later, with nothing naming
+    the tool.
+    """
+    from slife2.libs.host.config import REQUIRED_AUTOLOAD
+    from slife2.libs.store.catalogue import MODEL_VISIBLE_HARNESS_TOOLS
+    from slife2.plugins.agent.server import TURN_COMPACT
+
+    assert TURN_COMPACT == "_turn_compact"
+    assert TURN_COMPACT in REQUIRED_AUTOLOAD
+    assert TURN_COMPACT in MODEL_VISIBLE_HARNESS_TOOLS
+
+
 # --- providers and models ----------------------------------------------------
 
 
@@ -291,7 +312,32 @@ def test_a_model_keeps_only_what_was_configured(tmp_path) -> None:
 
     assert (big.temperature, big.top_p, big.max_tokens) == (0.3, None, 4000)
     assert (small.temperature, small.top_p, small.max_tokens) == (None, None, None)
-    assert small.context_window == 0
+    assert (big.context_window, small.context_window) == (100000, 2000)
+
+
+@pytest.mark.parametrize("line", ["", "context_window: 0", "context_window: null"])
+def test_a_model_without_a_positive_window_is_refused(tmp_path, line: str) -> None:
+    """**The window is the one fact a model entry must state.**
+
+    Every bound in a turn is a fraction of it: the recall's token budget, the
+    compaction threshold, the status bar.  A window nobody stated used to leave
+    the recall bounded by retrieval width alone; now the file is refused where
+    it is written.  Zero and `null` are not a window either.
+    """
+    path = write(
+        tmp_path,
+        f"""
+providers:
+  p:
+    api: openai-completions
+    base_url: https://example.test/v1
+    models:
+      - model: m
+        {line}
+""",
+    )
+    with pytest.raises(ConfigError, match="context_window"):
+        load(path)
 
 
 def test_a_model_name_falls_back_to_its_id(tmp_path) -> None:
@@ -311,7 +357,9 @@ providers:
     models:
       - model: sees
         input: [text, image]
+        context_window: 1000
       - model: blind
+        context_window: 1000
 """,
     )
     provider = load(path).provider("p")
@@ -337,10 +385,13 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: refused
+        context_window: 1000
         compat: {store: false}
       - model: asked
+        context_window: 1000
         compat: {store: true}
       - model: silent
+        context_window: 1000
 """,
     )
     provider = load(path).provider("p")
@@ -365,6 +416,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+        context_window: 1000
         compat: {store: false}
 """,
     )
@@ -387,13 +439,33 @@ providers:
     base_url: https://example.test
     models:
       - model: cached
+        context_window: 1000
         compat: {cache_control: 1h}
       - model: silent
+        context_window: 1000
 """,
     )
     provider = load(path).provider("p")
     assert provider.model("cached").cache_control == "1h"
     assert provider.model("silent").cache_control == ""
+
+
+def test_the_prompt_budget_is_one_rule() -> None:
+    """The server's `ModelSettings` and the TUI's picker compute one figure.
+
+    It was two subtractions (`ModelSettings.prompt_window` and the picker's
+    copy of the expression); a reserve or a different clamp added to one would
+    leave the picker's bar describing a window the server does not use.
+    """
+    from slife2.libs.host.config import prompt_budget
+
+    assert prompt_budget(1000, 400) == 600
+    assert prompt_budget(1000, None) == 1000
+    assert prompt_budget(100, 200) == 0
+    assert (
+        ModelSettings(model="m", context_window=1000, max_tokens=400).prompt_window
+        == 600
+    )
 
 
 def test_a_provider_with_nowhere_to_send_is_refused(tmp_path) -> None:
@@ -412,10 +484,55 @@ providers:
   p:
     api: openai-completions
     api_key: sk-live
-    models: [{model: m}]
+    models: [{model: m, context_window: 1000}]
 """,
     )
     with pytest.raises(ConfigError, match="needs `base_url`"):
+        load(path)
+
+
+@pytest.mark.parametrize(
+    ("section", "entry"),
+    [
+        ("mcp", "command: npx"),
+        ("rest-api", "spec: https://example.test/openapi.json"),
+    ],
+)
+@pytest.mark.parametrize("name", ["skills", "cli", "job"])
+def test_an_entry_named_after_a_document_source_is_refused(
+    tmp_path, section: str, entry: str, name: str
+) -> None:
+    """**A source is a name, and one hub source may not take another's.**
+
+    The management tools refuse it, and a hand edit reached the loader: the hub
+    then dropped one of the two declarations, and if the document plugin failed
+    that refresh the entry's whole-list merge replaced the playbook rows.  The
+    ship's own `skills`, `cli` and `job` sources are the names.
+    """
+    with pytest.raises(ConfigError, match="shadow that source"):
+        load(write(tmp_path, f"{section}:\n  {name}:\n    {entry}\n"))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        'p:\n    api: ""\n    base_url: https://x/v1\n    models: [{model: m, context_window: 1000}]\n',
+        'p:\n    api: openai-completions\n    base_url: ""\n    models: [{model: m, context_window: 1000}]\n',
+        "p:\n",
+    ],
+)
+def test_a_required_entry_key_written_empty_is_a_refusal_not_a_traceback(
+    tmp_path, entry: str
+) -> None:
+    """**An empty required key is an absence, and the section owns its sentence.**
+
+    `api: ""` (or a provider entry written as a bare `p:`) used to be left out
+    of the mapping the settings object was built from, so the loader raised
+    `TypeError: ProviderSettings.__init__() missing 'api'` — past every
+    `ConfigError` handler, out of `slife2` as a traceback.
+    """
+    path = write(tmp_path, "providers:\n  " + entry, required=False)
+    with pytest.raises(ConfigError, match="needs `"):
         load(path)
 
 
@@ -524,15 +641,12 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     """**A host is the first of `_server`'s three fields, and it was the last one
     still unchecked.**
 
-    `ServerSettings.url` writes the address as `host:port` with nothing around
-    it, so `host: "::1"` built `http://::1:24010/mcp` — and that is not a URL
-    whose port can be read: `urlsplit("http://::1:24010/mcp").port` raised
-    `ValueError: Port could not be cast to integer value as ':1:24010'` out of
-    `start_lock`, in the start-up loop, after some servers were already up.
-    `host: 0.0.0.0/x` is the same mistake from the other side: the path moves
-    into the address and the port is gone.
+    `host: 0.0.0.0/x` moves the path into the address and the port is gone;
+    `example.test:80` is not an address at all.  **An IPv6 loopback is a host**,
+    though — SDD §11.1 allows a loopback address, and `::1` is one — so it is
+    accepted and bracketed when the URL is written.
     """
-    for written in ("'::1'", "0.0.0.0/x"):
+    for written in ("0.0.0.0/x", "'example.test:80'"):
         with pytest.raises(ConfigError, match=r"servers\.context\.host"):
             load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
 
@@ -541,6 +655,50 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     assert one.server("context").url.startswith("http://localhost:"), (
         "the address is the host and the port together"
     )
+
+    v6 = load(write(tmp_path, "servers:\n  context:\n    host: '::1'\n"))
+    assert v6.server("context").host == "::1"
+    assert v6.server("context").url == "http://[::1]:24010/mcp", (
+        "an IPv6 literal keeps its brackets in the URL"
+    )
+
+
+def test_a_non_loopback_ipv6_host_is_refused(tmp_path) -> None:
+    """The address form is not the security question — loopback is."""
+    with pytest.raises(ConfigError, match="is not loopback"):
+        load(write(tmp_path, "servers:\n  context:\n    host: '2001:db8::1'\n"))
+
+
+def test_a_server_host_is_read_without_the_padding(tmp_path) -> None:
+    """**A quoted `" localhost "` passed the loopback check and built a bad URL.**
+
+    `is_loopback_host` strips before judging, but the value was stored raw, so
+    the address became `http:// localhost :24000/mcp` — a URL whose hostname
+    keeps the spaces, which nothing can dial.  The field is stripped where it is
+    read, so the judgement and the address are about one string.
+    """
+    one = load(write(tmp_path, 'servers:\n  context:\n    host: " localhost "\n'))
+
+    assert one.server("context").host == "localhost"
+    assert one.server("context").url.startswith("http://localhost:")
+
+
+def test_a_server_host_beyond_loopback_is_refused(tmp_path) -> None:
+    """**Loopback is the security boundary, so a bind beyond it is refused.**
+
+    Every plugin is unauthenticated Streamable HTTP (SDD §3.2): `host: 0.0.0.0`
+    reads as "make it reachable" and lets the network call `job_set`, `mcp_set`
+    and `model_set` with no credential.  The whole `127.0.0.0/8` is loopback,
+    not just its first address; `localhost` is the one name allowed, without a
+    resolver — a boundary must not move with the hosts file.
+    """
+    for written in ("0.0.0.0", "192.168.1.5", "example.com"):
+        with pytest.raises(ConfigError, match=r"servers\.context\.host"):
+            load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
+
+    for written in ("127.0.0.1", "127.0.0.2", "localhost", "LOCALHOST"):
+        one = load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
+        assert one.server("context").host == written
 
 
 def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
@@ -555,7 +713,7 @@ def test_a_value_that_is_not_a_number_is_a_config_error(tmp_path) -> None:
     for text, expected in [
         ("agent:\n  max_iterations: many\n", "agent.max_iterations"),
         ("tool_load:\n  threshold: lots\n", "tool_load.threshold"),
-        ("tool_result:\n  tokens: lots\n", "tool_result.tokens"),
+        ("tool_result:\n  bytes: lots\n", "tool_result.bytes"),
         ("context:\n  ceiling: high\n", "context.ceiling"),
         ("servers:\n  context:\n    port: eight\n", "servers.context.port"),
         # **A value that is a number and not the setting's number is a typo
@@ -598,6 +756,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+        context_window: 1000
         {switch}
 """,
             )
@@ -607,20 +766,24 @@ providers:
 def test_the_ceiling_is_bounded(tmp_path) -> None:
     """The ceiling is a window fraction, and the one budget the two halves share.
 
-    An old key beside it is ignored rather than carried across versions: the
-    file is edited with the system, not migrated into it.
+    **A key this reader does not take is refused**, not ignored: `floor` and
+    `recall_limit` are spellings a previous build said and this one does not, and
+    a silent ignore is how an operator's edit means nothing while looking
+    applied.  The config module's own rule (its `ConfigError` docstring) is that
+    silently ignoring a value is the worst of the behaviours.
     """
     for ceiling in ("0", "1.5"):
         with pytest.raises(ConfigError, match="context.ceiling"):
             load(write(tmp_path, f"context:\n  ceiling: {ceiling}\n"))
 
-    kept = load(
-        write(
-            tmp_path,
-            "context:\n  ceiling: 0.6\n  floor: 0.2\n  recall_limit: 40\n",
+    with pytest.raises(ConfigError, match="unknown key"):
+        load(
+            write(
+                tmp_path,
+                "context:\n  ceiling: 0.6\n  floor: 0.2\n  recall_limit: 40\n",
+            )
         )
-    )
-    assert kept.context.ceiling == 0.6
+    assert load(write(tmp_path, "context:\n  ceiling: 0.6\n")).context.ceiling == 0.6
 
 
 def test_the_hybrid_search_knobs_are_read_and_bounded(tmp_path) -> None:
@@ -674,20 +837,24 @@ def test_the_window_is_one_number_for_both_sides(tmp_path) -> None:
     configuration, it is a reader that answers nothing and a shortening that
     keeps nothing.
     """
-    assert load(write(tmp_path, "")).tool_result.tokens == DEFAULT_TOOL_RESULT_TOKENS
-    stated = load(write(tmp_path, "tool_result:\n  tokens: 800\n")).tool_result
-    assert stated.tokens == 800
+    assert load(write(tmp_path, "")).tool_result.bytes == DEFAULT_TOOL_RESULT_BYTES
+    stated = load(write(tmp_path, "tool_result:\n  bytes: 4000\n")).tool_result
+    assert stated.bytes == 4000
 
-    path = write(tmp_path, "tool_result:\n  tokens: 0\n")
+    path = write(tmp_path, "tool_result:\n  bytes: 0\n")
     with pytest.raises(ConfigError, match="smaller than the window's own address"):
         load(path)
+
+    # The old spelling is refused with the rename, not read as a missing key.
+    with pytest.raises(ConfigError, match="tool_result.bytes"):
+        load(write(tmp_path, "tool_result:\n  tokens: 8000\n"))
 
 
 def test_a_window_smaller_than_its_own_address_is_refused(tmp_path) -> None:
     """**Refused where it is written, not at the turn it would ruin.**
 
     A window over a shortened result opens with the marker and the sentence
-    that say where the whole of it is, and that address costs about 140 tokens
+    that say where the whole of it is, and that address costs about 400 bytes
     for the call ids the providers emit and the home-relative path — more than
     a small budget has in total.  `dumps.window` refuses to hand back a window whose
     address it had to cut, so such a budget can only ever fail a turn; the
@@ -695,13 +862,13 @@ def test_a_window_smaller_than_its_own_address_is_refused(tmp_path) -> None:
     already makes about zero.
     """
     with pytest.raises(ConfigError, match="smaller than the window's own address"):
-        load(write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS - 1}\n"))
+        load(write(tmp_path, f"tool_result:\n  bytes: {MIN_TOOL_RESULT_BYTES - 1}\n"))
 
     assert (
         load(
-            write(tmp_path, f"tool_result:\n  tokens: {MIN_TOOL_RESULT_TOKENS}\n")
-        ).tool_result.tokens
-        == MIN_TOOL_RESULT_TOKENS
+            write(tmp_path, f"tool_result:\n  bytes: {MIN_TOOL_RESULT_BYTES}\n")
+        ).tool_result.bytes
+        == MIN_TOOL_RESULT_BYTES
     )
 
 
@@ -754,7 +921,7 @@ def test_a_file_with_no_embeddings_is_refused(tmp_path) -> None:
 def test_an_unknown_api_is_refused(tmp_path) -> None:
     path = write(
         tmp_path,
-        "providers:\n  p:\n    api: carrier-pigeon\n    models: [{model: m}]\n",
+        "providers:\n  p:\n    api: carrier-pigeon\n    models: [{model: m, context_window: 1000}]\n",
     )
     with pytest.raises(ConfigError, match="carrier-pigeon"):
         load(path)
@@ -787,6 +954,7 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: m
+        context_window: 1000
         {line}
 """,
     )
@@ -825,8 +993,8 @@ providers:
     api: openai-completions
     base_url: https://example.test/v1
     models:
-      - {model: m}
-      - {model: m}
+      - {model: m, context_window: 1000}
+      - {model: m, context_window: 2000}
 """,
     )
     with pytest.raises(ConfigError, match="listed twice"):
@@ -902,9 +1070,30 @@ providers:
     base_url: https://example.test/v1
     models:
       - model: only
+        context_window: 1000
 """,
     )
     assert load(path).default == "p/only"
+
+
+def test_first_reference_reads_the_raw_providers_mapping() -> None:
+    """The rule the loader's fallback and the agent's model tools both ask.
+
+    A bare provider is its first model, as `Config.resolve` reads one; nothing
+    at all is the first model of the first provider that has one.  One function
+    over the file's own shape is what keeps those two readers from answering
+    differently.
+    """
+    providers = {
+        "empty": {"models": []},
+        "local": {"models": [{"model": "big"}, {"model": "small"}]},
+    }
+    assert first_reference(providers) == "local/big"
+    assert first_reference(providers, "local") == "local/big"
+    assert first_reference(providers, "local/") == "local/big"
+    assert first_reference(providers, "local/small") == "local/small"
+    assert first_reference(providers, "unknown") == "unknown"
+    assert first_reference({}) == ""
 
 
 # --- file discovery ----------------------------------------------------------
@@ -963,7 +1152,7 @@ def test_explicit_path_beats_the_env_var(tmp_path, monkeypatch) -> None:
         "  elsewhere:\n"
         "    api: openai-completions\n"
         "    base_url: https://other.test/v1\n"
-        "    models: [{model: m}]\n"
+        "    models: [{model: m, context_window: 1000}]\n"
         "embeddings:\n"
         "  providers:\n"
         "    local:\n"
@@ -985,6 +1174,22 @@ def test_malformed_yaml_is_fatal(tmp_path) -> None:
 def test_non_mapping_top_level_is_fatal(tmp_path) -> None:
     with pytest.raises(ConfigError, match="mapping"):
         load(write(tmp_path, "- one\n- two\n", required=False))
+
+
+@pytest.mark.parametrize("text", ["[]\n", '""\n', "false\n", "0\n"])
+def test_a_falsy_non_mapping_top_level_is_refused_too(tmp_path, text: str) -> None:
+    """`load(...) or {}` read a list, a string, a boolean and a number as a
+    file with no sections, so the refusal that followed blamed `providers:`
+    for a file whose top level is not a mapping at all."""
+    with pytest.raises(ConfigError, match="mapping at the top level"):
+        load(write(tmp_path, text, required=False))
+
+
+def test_an_empty_document_is_a_file_with_no_sections(tmp_path) -> None:
+    """`null` and an empty file are the one falsy shape that really is empty;
+    they are refused for the section they lack, not for their top level."""
+    with pytest.raises(ConfigError, match="providers:"):
+        load(write(tmp_path, "", required=False))
 
 
 def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
@@ -1036,11 +1241,10 @@ def test_a_plaintext_value_never_reaches_the_store(
 ) -> None:
     """**A literal written in the file is an answer, not a reference.**
 
-    The chain exists for references — ``${VAR}`` and ``keyring:`` — and a
-    plaintext value resolves by not being looked up at all.  Consulting the
-    store for one would be a lookup nobody asked for, and it would make a
-    config whose keys are written out depend on a store that holds none of
-    them.
+    The chain exists for `${VAR}` references, and a plaintext value resolves
+    by not being looked up at all.  Consulting the store for one would be a
+    lookup nobody asked for, and it would make a config whose keys are written
+    out depend on a store that holds none of them.
     """
     import credstore
 
@@ -1050,11 +1254,6 @@ def test_a_plaintext_value_never_reaches_the_store(
     monkeypatch.setattr(credstore, "get_credential", consulted)
 
     assert resolve_secret("sk-literal") == "sk-literal"
-
-
-def test_default_is_used_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-    assert resolve_secret("${SLIFE2_TEST_KEY:-fallback}") == "fallback"
 
 
 def test_unset_without_default_stays_literal(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1097,212 +1296,6 @@ def test_no_keyring_at_all_still_degrades_to_the_reference(
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
 
 
-def a_seed(path: Path, password: str, entries: dict[str, str]) -> None:
-    """A real encrypted credstore backup at *path*, unlocked by *password*.
-
-    `keyrings.cryptfile` is what credstore writes the seed with; building one
-    here rather than faking the reader keeps the test about the KDF and the
-    public `check_backend()` path, not about a stand-in agreeing with itself.
-    """
-    from keyrings.cryptfile.cryptfile import CryptFileKeyring
-
-    keyring = CryptFileKeyring()
-    keyring.file_path = str(path)
-    keyring.keyring_key = password
-    for key, value in entries.items():
-        keyring.set_password("credstore", key, value)
-
-
-def test_a_mounted_seed_resolves_when_the_keyring_is_silent(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**The container's half of the chain.**
-
-    Docker blocks `keyctl`, so credstore reports no keyring and
-    `get_credential` answers None for every key; the encrypted backup is a file
-    and survives the isolation when it is mounted.  `CREDSTORE_MASTER_PASSWORD`
-    is the non-interactive form of the prompt `credstore get -p` writes, and a
-    value read through it is registered for masking like any other credential.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-    from slife2.libs.host import secrets
-
-    path = tmp_path / "credentials.crypt"
-    password = "correct horse battery"
-    a_seed(path, password, {"SLIFE2_TEST_KEY": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, password)
-    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-
-    assert resolve_secret("${SLIFE2_TEST_KEY}") == "seed-secret"
-    assert secrets.masked("it is seed-secret") != "it is seed-secret"
-    # The master password unlocks every value, so it is masked like one.
-    assert (
-        secrets.masked(f"the password is {password}") != f"the password is {password}"
-    )
-
-
-def test_a_seed_whose_password_is_absent_stays_unread(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """No password is no fallback: the chain still degrades to the reference.
-
-    The backup is Argon2/AES-encrypted; guessing a password would turn a
-    missing secret into a wrong one, and a daemon has no terminal to ask on.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-
-    path = tmp_path / "credentials.crypt"
-    a_seed(path, "correct horse battery", {"SLIFE2_TEST_KEY": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.delenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, raising=False)
-    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-
-    assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
-
-
-def test_a_master_password_that_does_not_unlock_the_seed_is_a_config_error(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A seed that is there and refuses is not a seed that is absent.
-
-    `read_cryptfile_entry` raises `ValueError` for a wrong password (the MAC
-    check).  Letting that out of `resolve_secret` would name neither the file
-    nor the variable; the config error names both, which is the one place where
-    naming them is the whole of the fix.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-
-    path = tmp_path / "credentials.crypt"
-    a_seed(path, "correct horse battery", {"SLIFE2_TEST_KEY": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, "wrong password")
-    monkeypatch.setattr(credstore, "get_credential", lambda key: None)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
-
-    with pytest.raises(ConfigError) as raised:
-        resolve_secret("${SLIFE2_TEST_KEY}")
-    assert config_module.CREDSTORE_PASSWORD_ENV_VAR in str(raised.value)
-    assert str(path) in str(raised.value)
-
-
-def test_a_keyring_uri_falls_back_to_the_same_seed(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A `keyring:` URI is the same credential under its `service/key` spelling.
-
-    A container has no keyring, so `resolve_uri` raises `KeyError`; the seed's
-    entry is what the person stored with `credstore set slife/deepseek`, and
-    the fallback reads it by exactly that name.
-    """
-    import credstore
-
-    import slife2.libs.host.config as config_module
-
-    path = tmp_path / "credentials.crypt"
-    password = "correct horse battery"
-    a_seed(path, password, {"slife/deepseek": "seed-secret"})
-    monkeypatch.setenv("CREDSTORE_FILE", str(path))
-    monkeypatch.setenv(config_module.CREDSTORE_PASSWORD_ENV_VAR, password)
-    monkeypatch.setattr(config_module, "_cryptfile_state", {})
-    monkeypatch.setattr(config_module, "_cryptfile_values", {})
-
-    def missing(value: str) -> str:
-        raise KeyError("Credential 'slife/deepseek' not found in keyring")
-
-    monkeypatch.setattr(credstore, "resolve_uri", missing)
-
-    assert resolve_secret("keyring:slife/deepseek") == "seed-secret"
-
-
-def test_a_keyring_uri_that_failed_is_not_left_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """**A keyring URI nobody could resolve is not a URI that is absent.**
-
-    The `keyring:` branch swallowed *every* failure into `pass`, so a keyring
-    that exists but is locked, or a credential that was never stored, left the
-    `keyring:service/key` reference to travel as the secret itself.  Only a host
-    with no `credstore` at all degrades to the reference; a backend that is
-    there and refused raises where the secret is resolved.
-
-    A store that was asked and refused is the case this test holds, and it is
-    the one exception type `resolve_secret` deliberately does *not* translate —
-    the machine's keyring being locked is not a mistake in the file.
-    """
-    import credstore
-
-    def locked(value: str) -> str:
-        raise RuntimeError("the keyring is locked")
-
-    monkeypatch.setattr(credstore, "resolve_uri", locked)
-    with pytest.raises(RuntimeError, match="locked"):
-        resolve_secret("keyring:slife/deepseek")
-
-
-def test_a_keyring_uri_nobody_stored_is_a_config_error(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """**credstore's "not found" is a config mistake, and it has to read like one.**
-
-    credstore raises a bare `KeyError` for a credential that was never stored,
-    and `KeyError` is not what anything on the load path catches: `slife2`'s
-    entry point and `family.py` each answer a bad config with their own one
-    sentence for `ConfigError` alone, so
-    `env: {TOKEN: 'keyring:slife/nothing-stored'}` printed a traceback out of the
-    console script instead of the refusal naming the reference — at the one
-    place where naming it is the whole of the fix.  Tested through `load` rather
-    than through `resolve_secret` alone, because "out of `load()`" is the
-    failure as it reaches a person.
-    """
-    import credstore
-
-    def missing(value: str) -> str:
-        raise KeyError("Credential 'slife/nothing-stored' not found in keyring")
-
-    monkeypatch.setattr(credstore, "resolve_uri", missing)
-
-    with pytest.raises(ConfigError) as raised:
-        resolve_secret("keyring:slife/nothing-stored")
-    assert "keyring:slife/nothing-stored" in str(raised.value)
-    assert "credstore set slife/nothing-stored" in str(raised.value), (
-        "the store is named, and so is the way to fill it"
-    )
-
-    text = (
-        "mcp:\n"
-        "  one:\n"
-        "    command: npx\n"
-        "    env:\n"
-        "      TOKEN: keyring:slife/nothing-stored\n"
-    )
-    with pytest.raises(ConfigError, match="nothing-stored"):
-        load(write(tmp_path, text))
-
-
-def test_no_credstore_at_all_leaves_a_keyring_uri_verbatim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The declared degrade survives: with no backend, a `keyring:` reference is
-    left exactly as written (SDD Appendix C)."""
-    monkeypatch.setitem(sys.modules, "credstore", None)
-    assert resolve_secret("keyring:slife/deepseek") == "keyring:slife/deepseek"
-
-
 def test_reference_embedded_in_a_larger_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLIFE2_TEST_HOST", "example.test")
     assert resolve_secret("https://${SLIFE2_TEST_HOST}/v1") == "https://example.test/v1"
@@ -1324,7 +1317,7 @@ def test_api_key_is_resolved_lazily(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     """
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved-later")
     provider = load(write(tmp_path, A_PROVIDER)).provider("local")
-    assert provider.api_key_ref == "${SLIFE2_TEST_KEY:-none}"
+    assert provider.api_key_ref == "${SLIFE2_TEST_KEY}"
     assert provider.api_key == "resolved-later"
 
 
@@ -1345,11 +1338,11 @@ mcp:
     command: npx
     args: [-y, serper]
     env:
-      SERPER_API_KEY: ${SLIFE2_TEST_KEY:-unset}
+      SERPER_API_KEY: ${SLIFE2_TEST_KEY}
   arxiv:
     url: https://example.test/mcp
     headers:
-      Authorization: Bearer ${SLIFE2_TEST_KEY:-unset}
+      Authorization: Bearer ${SLIFE2_TEST_KEY}
   off:
     command: npx
     args: [-y, slow-thing]
@@ -1358,7 +1351,7 @@ rest-api:
   registry:
     spec: https://example.test/openapi.json
     base_url: https://api.example.test
-    api_key: ${SLIFE2_TEST_KEY:-unset}
+    api_key: ${SLIFE2_TEST_KEY}
 """
 
 
@@ -1472,7 +1465,7 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
     config = load(write(tmp_path, MCP))
     serper = config.mcp["serper"]
-    assert serper.env["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY:-unset}", (
+    assert serper.env["SERPER_API_KEY"] == "${SLIFE2_TEST_KEY}", (
         "the load keeps the reference; the connection resolves it"
     )
     assert serper.resolved_env()["SERPER_API_KEY"] == "resolved"
@@ -1482,7 +1475,7 @@ def test_a_tool_servers_secrets_go_through_the_same_chain(
 
 
 def test_a_tool_servers_reference_is_not_resolved_by_the_load(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Every server loads this config; one makes the connection.
 
@@ -1490,6 +1483,7 @@ def test_a_tool_servers_reference_is_not_resolved_by_the_load(
     store once per reference — on WSL that is a `powershell.exe` per lookup, and
     the whole stack paid it for keys only the hub uses.
     """
+    caplog.set_level("WARNING")
     calls: list[str] = []
     monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
     monkeypatch.setattr(
@@ -1499,8 +1493,51 @@ def test_a_tool_servers_reference_is_not_resolved_by_the_load(
     config = load(write(tmp_path, MCP))
 
     assert calls == []
-    assert config.mcp["serper"].resolved_env()["SERPER_API_KEY"] == "unset"
+    assert "SERPER_API_KEY" not in config.mcp["serper"].resolved_env(), (
+        "an unresolved reference is left out, so the server sees an absent key"
+    )
     assert calls == ["SLIFE2_TEST_KEY"]
+    assert "SERPER_API_KEY" in caplog.text, (
+        "the omission is warned about rather than raised"
+    )
+
+
+def test_an_unresolved_header_is_left_out_the_same_way(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The environment and the headers are one rule with two field names.
+
+    `resolved_env` and `resolved_headers` had their own copies of the resolve,
+    test, warn and omit loop; the header's half was untested, so a change to
+    one could have sent a reference as a credential.
+    """
+    caplog.set_level("WARNING")
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
+
+    headers = load(write(tmp_path, MCP)).mcp["arxiv"].resolved_headers()
+
+    assert "Authorization" not in headers
+    assert "left out of the headers" in caplog.text
+    assert "SLIFE2_TEST_KEY" in caplog.text
+
+
+def test_a_literal_tool_setting_is_passed_through(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only references are withheld; a literal is the operator's value."""
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
+    text = (
+        "mcp:\n"
+        "  one:\n"
+        "    command: npx\n"
+        "    env:\n"
+        "      MODE: fast\n"
+        "      TOKEN: ${SLIFE2_TEST_KEY}\n"
+    )
+    server = load(write(tmp_path, text)).mcp["one"]
+    assert server.resolved_env() == {"MODE": "fast"}
 
 
 def test_a_tunnel_option_is_not_resolved_by_the_load(
@@ -1517,12 +1554,12 @@ def test_a_tunnel_option_is_not_resolved_by_the_load(
         write(
             tmp_path,
             "file-tunnel:\n  providers:\n    localhost.run:\n"
-            "      binary: ${SLIFE2_TEST_BINARY:-ssh}\n",
+            "      binary: ${SLIFE2_TEST_BINARY}\n",
         )
     ).file_tunnel
 
     assert calls == []
-    assert section.options_for("localhost.run")["binary"] == "ssh"
+    assert section.options_for("localhost.run")["binary"] == "${SLIFE2_TEST_BINARY}"
     assert calls == ["SLIFE2_TEST_BINARY"]
 
 
@@ -1530,8 +1567,8 @@ def test_an_unknown_tunnel_provider_is_a_config_error(tmp_path) -> None:
     """A tunnel publishes the machine; which provider does it is the operator's
     decision, so a name this build lacks is refused rather than swapped for the
     default."""
-    with pytest.raises(ConfigError, match="file-tunnel.active.*made-up"):
-        load(write(tmp_path, "file-tunnel:\n  active: made-up\n"))
+    with pytest.raises(ConfigError, match="file-tunnel.default.*made-up"):
+        load(write(tmp_path, "file-tunnel:\n  default: made-up\n"))
 
 
 def test_an_unknown_tunnel_providers_entry_is_a_config_error(tmp_path) -> None:
@@ -1540,13 +1577,17 @@ def test_an_unknown_tunnel_providers_entry_is_a_config_error(tmp_path) -> None:
         load(write(tmp_path, "file-tunnel:\n  providers:\n    grok: {}\n"))
 
 
-def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
+def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The config layer is where a declarative entry becomes a runnable command.
 
     The entry becomes an ordinary stdio upstream here, so the plugin that holds
     it — `slife2-restapi-tools` — sees the same shape as one under `mcp:`, and
     the hub sees a source like any other.  Two sections and one mechanism.
     """
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
     server = load(write(tmp_path, MCP)).rest_apis["registry"]
     assert server.kind == "rest"
     assert (server.transport, server.command) == ("stdio", "uvx")
@@ -1554,7 +1595,10 @@ def test_a_rest_api_is_expanded_into_the_proxy_that_serves_it(tmp_path) -> None:
     env = server.resolved_env()
     assert env["OPENAPI_SPEC_URL"] == "https://example.test/openapi.json"
     assert env["SERVER_URL_OVERRIDE"] == "https://api.example.test"
-    assert env["API_KEY"] == "unset"  # the ${VAR:-default} form
+    assert "API_KEY" not in env, (
+        "an unresolved reference is left out; the proxy runs without it rather "
+        "than sending the reference as the key"
+    )
 
 
 def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
@@ -1566,6 +1610,21 @@ def test_a_rest_api_may_name_its_own_proxy(tmp_path) -> None:
         )
     )
     assert config.rest_apis["mine"].args == ("--from", "my-proxy", "run")
+
+
+def test_a_command_entry_refuses_a_key_it_does_not_read(tmp_path) -> None:
+    """**The command form has no Pydantic model to be strict for it.**
+
+    Its environment is built by hand, so a misspelt `base_url` — here as
+    `base-url` — would load cleanly and leave the proxy calling the host the
+    OpenAPI document names, or no key at all, with nothing said.  The
+    declarative form refuses the same typo through `load_rest_api`.
+    """
+    text = (
+        "rest-api:\n  mine:\n    command: uvx\n    base-url: https://api.example.test\n"
+    )
+    with pytest.raises(ConfigError, match="unknown key.*base-url"):
+        load(write(tmp_path, text))
 
 
 def test_an_entry_with_no_transport_is_refused(tmp_path) -> None:
@@ -1582,6 +1641,26 @@ def test_an_entry_with_two_transports_is_refused(tmp_path) -> None:
     text = "mcp:\n  both:\n    command: uvx\n    url: https://example.test/mcp\n"
     with pytest.raises(ConfigError, match="both"):
         load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("entry", "field"),
+    [
+        ("command: npx\n    headers: {Authorization: 'Bearer x'}", "headers"),
+        ("url: https://example.test/mcp\n    args: [--x]", "args"),
+        ("url: https://example.test/mcp\n    env: {A: b}", "env"),
+        ("url: https://example.test/mcp\n    cwd: /tmp", "cwd"),
+    ],
+)
+def test_a_field_of_the_other_transport_is_refused_not_silently_ignored(
+    tmp_path, entry: str, field: str
+) -> None:
+    """**A key nobody reads is a switch nobody throws.**  The fields are scoped
+    to one transport by their own descriptions, and the loader accepted them on
+    the other and dropped them: a header credential the operator believed was
+    sent, or a `cwd` a stdio child would have used."""
+    with pytest.raises(ConfigError, match=f"must not name `{field}`"):
+        load(write(tmp_path, f"mcp:\n  x:\n    {entry}\n"))
 
 
 def test_a_rest_api_with_neither_spec_nor_command_is_refused(tmp_path) -> None:
@@ -1703,7 +1782,7 @@ SKILLS = """
 skills:
   baidu-search:
     env:
-      BAIDU_API_KEY: ${SLIFE2_TEST_KEY:-unset}
+      BAIDU_API_KEY: ${SLIFE2_TEST_KEY}
   quiet: {}
 """
 
@@ -1711,9 +1790,19 @@ skills:
 def test_a_skills_entry_resolves_through_the_same_chain(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """**The loader keeps the reference; the consumer resolves it.**
+
+    `load()` runs in every server of the stack.  Resolving here made every one
+    of them pay a keyring lookup for a skill it may never use — and a locked
+    keyring raised outside `load`'s catch, so every config load on the machine
+    died, including `slife2 down`.  `resolved_env()` is the skills plugin's,
+    called where a playbook is handed over.
+    """
     monkeypatch.setenv("SLIFE2_TEST_KEY", "resolved")
     config = load(write(tmp_path, SKILLS))
-    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "resolved"
+    entry = config.skills["baidu-search"]
+    assert entry.env["BAIDU_API_KEY"] == "${SLIFE2_TEST_KEY}"
+    assert entry.resolved_env()["BAIDU_API_KEY"] == "resolved"
 
 
 def test_a_skills_entry_with_nothing_to_supply_is_fine(tmp_path) -> None:
@@ -1723,14 +1812,42 @@ def test_a_skills_entry_with_nothing_to_supply_is_fine(tmp_path) -> None:
     assert config.skills["quiet"].env == {}
 
 
-def test_an_unresolved_skill_secret_stays_a_reference(tmp_path) -> None:
+def test_a_locked_keyring_does_not_fail_a_config_load(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The credential lookup belongs to the process that uses the value.**
+
+    Resolving in the loader put the keyring inside `load`, outside its catch:
+    a locked keyring made every config load on the machine die with a raw
+    keyring traceback, including `slife2 down` — a command that reads the file
+    and no skill at all.  The load now keeps the reference; the failure lands
+    where the skill's value is consumed.
+    """
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+
+    def refuse(key: str) -> None:
+        raise RuntimeError("keyring locked")
+
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", refuse)
+    config = load(write(tmp_path, SKILLS))
+
+    with pytest.raises(RuntimeError, match="keyring locked"):
+        config.skills["baidu-search"].resolved_env()
+
+
+def test_an_unresolved_skill_secret_stays_a_reference(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Which is what `slife2.plugins.skills.playbooks` reads to tell "configured" from "named".
 
     The load does not fail — a missing key is not a config error — so the fact
     has to survive to where somebody can act on it.
     """
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
     config = load(write(tmp_path, SKILLS))
-    assert config.skills["baidu-search"].env["BAIDU_API_KEY"] == "unset"
+    entry = config.skills["baidu-search"]
+    assert entry.resolved_env()["BAIDU_API_KEY"] == "${SLIFE2_TEST_KEY}"
 
 
 def test_no_skills_section_is_no_skills(tmp_path) -> None:
@@ -1819,7 +1936,7 @@ def test_the_switch_is_a_boolean_or_it_is_refused(
 
 # --- embeddings: which endpoint answers ---------------------------------------
 #
-# The table is a list of endpoints, and `active_model` picks one.  A name the
+# The table is a list of endpoints, and `default` picks one.  A name the
 # file does not define is a mistake, not a vote for the first endpoint — a
 # substitution there changes where every vector comes from and, with it, the
 # index's recorded identity.
@@ -1836,21 +1953,23 @@ embeddings:
 """
 
 
-def test_an_unknown_active_model_is_refused_rather_than_substituted(tmp_path) -> None:
+def test_an_unknown_embedding_default_is_refused_rather_than_substituted(
+    tmp_path,
+) -> None:
     """**A name the config does not define is not the first name it does.**
 
-    A stale `active_model` used to fall back to the first provider, so vectors
-    came from an endpoint nobody chose and the index's identity changed
-    underneath with nothing in any file to say why.  The refusal names both the
-    missing model and the ones that exist.
+    A stale `default` used to fall back to the first provider, so vectors came
+    from an endpoint nobody chose and the index's identity changed underneath
+    with nothing in any file to say why.  The refusal names both the missing
+    model and the ones that exist.
     """
-    path = write(tmp_path, EMBEDDINGS_TWO + "  active_model: gone\n")
+    path = write(tmp_path, EMBEDDINGS_TWO + "  default: gone\n")
     with pytest.raises(ConfigError, match="gone") as caught:
         load(path)
     assert "first" in str(caught.value) and "second" in str(caught.value)
 
 
-def test_no_active_model_still_takes_the_first(tmp_path) -> None:
+def test_no_embedding_default_still_takes_the_first(tmp_path) -> None:
     """The designed default, not a substitution: naming none is not naming a
     name that does not exist."""
     config = load(write(tmp_path, EMBEDDINGS_TWO))
@@ -1894,7 +2013,7 @@ media:
 def test_a_stale_media_default_is_refused_at_load(tmp_path) -> None:
     """**A name the config does not define is not the first name it does.**
 
-    Same rule as `embeddings.active_model`: a default is the operator's own
+    Same rule as `embeddings.default`: a default is the operator's own
     statement, and a typo is refused where the file is — not silently replaced
     by the first model of the kind and paid for at a provider nobody named.
     """
@@ -1952,6 +2071,22 @@ def test_load_cached_answers_the_same_object_until_the_file_moves(tmp_path) -> N
     second = load_cached(str(path))
     assert second is not first, "an edit is a new object"
     assert second.default == "local/big"
+
+
+def test_load_cached_keys_by_the_canonical_path(tmp_path) -> None:
+    """**One file, two spellings, one cached object.**
+
+    A symlink, a junction, a `..` or a different case reaches the same
+    `slife2.yaml`, and the readers of this cache test it by identity.  Keyed by
+    the spelling, one home alternating spellings would hand back a new object
+    every call, which `LiveProviders` reads as an edit and answers by rebuilding
+    and retiring its SDK client pool.
+    """
+    path = write(tmp_path, A_PROVIDER)
+    alias = tmp_path / ".." / tmp_path.name / "slife2.yaml"
+
+    first = load_cached(str(path))
+    assert load_cached(str(alias)) is first, "one file, one cached object"
 
 
 def test_load_cached_does_not_answer_one_file_for_another(tmp_path) -> None:
@@ -2159,21 +2294,22 @@ def test_a_remote_mesh_with_no_broker_meets_where_the_subagent_network_does(
 
 
 def test_a_subagent_network_is_one_mesh_per_agent(tmp_path, monkeypatch) -> None:
-    """**A mesh is `{org}/{unit}`, and on this side that pair is the agent's.**
+    """**A mesh is `{org}/{unit}`, and on this side the unit is the agent's.**
 
-    The unit is the agent's own name and the org is this network's word
-    (`SUBAGENT_ORG`), so an agent and its subagents are one mesh and two agents
-    are two — which is what the file cannot be trusted to say: a unit that was
-    anything but the agent's name would put two agents' subagents in one MQTT
-    identity, and an org left at the remote network's would put the two networks
-    in one mesh.
+    The unit is the agent's own name — which is what the file cannot be trusted
+    to say: a unit that was anything but the agent's name would put two agents'
+    subagents in one MQTT identity.  The org is this network's word
+    (`SUBAGENT_ORG` by default) and an `org:` the file writes overrides it to
+    group meshes (SDD §4.5.5), so the namespace reads the org the settings hold
+    rather than a constant that ignores the override.
     """
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
     config = load(write(tmp_path, A_MESH_AND_LOCAL))
 
     local = net_settings(config, LOCAL)
-    assert LOCAL.namespace(local, "jack") == ("subagent", "jack")
-    assert LOCAL.namespace(local, "jill") == ("subagent", "jill")
+    # The fixture writes `org: a-local-org`, and the namespace honours it.
+    assert LOCAL.namespace(local, "jack") == ("a-local-org", "jack")
+    assert LOCAL.namespace(local, "jill") == ("a-local-org", "jill")
     # The org may be overridden to group meshes; the unit is the agent's, so what
     # an operator wrote there is refused rather than ignored.
     assert local.org == "a-local-org"
@@ -2232,14 +2368,19 @@ def test_the_broker_flag_cannot_turn_the_mesh_on(tmp_path, monkeypatch) -> None:
     """The section's presence is the switch, and the flag is not a second one.
 
     A machine with no `peer_agent:` is a machine that is not on that network —
-    that is the
-    design's whole off switch (`A2ASettings`) — so a flag naming a broker is
-    refused by name rather than answered with a mesh the file never described.
+    that is the design's whole off switch (`A2ASettings`).  The *loader* leaves
+    the flag alone for such a file: the environment variable is process-wide,
+    and a shared daemon loads other homes' configs, so raising here refused a
+    file the flag does not describe.  The command that owns the flag refuses it
+    against its own config (`slife2.main`), which is the file the operator asked
+    about.
     """
     monkeypatch.setenv(A2A_BROKER_ENV_VAR, "broker.example:2883")
 
-    with pytest.raises(ConfigError, match="not on the peer network"):
-        load(write(tmp_path, A_PROVIDER))
+    loaded = load(write(tmp_path, A_PROVIDER))
+
+    assert loaded.peer_agent.configured is False
+    assert loaded.peer_agent.overridden is False
 
 
 @pytest.mark.parametrize(
@@ -2272,7 +2413,7 @@ def test_a_broker_port_in_the_file_is_refused_like_the_one_on_the_flag(
     (nothing binds this end of a broker connection), so the dial hangs until its
     timeout instead of failing on the line that named it — the same failure the
     flag's own refusal exists to prevent.  Both networks are checked because
-    `_a2a` parses both.
+    both read their `broker:` through the same field (`_BROKER_FIELDS`).
     """
     monkeypatch.delenv(A2A_BROKER_ENV_VAR, raising=False)
 
@@ -2304,3 +2445,127 @@ def test_an_ipv6_broker_address_is_split_from_the_right(tmp_path, monkeypatch) -
 
     assert log_url(settings) == "mqtt://[::1]:2883"
     assert endpoint_key(log_url(settings))
+
+
+def test_a_hand_written_section_refuses_a_key_it_does_not_read(tmp_path) -> None:
+    """**A key nobody reads is a switch nobody throws** (SDD §11.1).
+
+    The hand-written sections refused unknown keys in some readers and not
+    others; a misspelt `embeddings.active` silently selected the first provider
+    and changed the index's vector identity with nothing said.  Every section
+    now reads through one loader (`slife2.libs.host.section`), whose key list is
+    the same tuple that reads the values — so this is one case per section
+    rather than one implementation per section.
+    """
+    from slife2.libs.host.config import ConfigError, load
+
+    base = (
+        "providers:\n"
+        "  local:\n"
+        "    api: openai-completions\n"
+        "    base_url: https://example.test/v1\n"
+        "    models: [{model: big, context_window: 1000}]\n"
+        "embeddings:\n"
+        "  providers:\n"
+        "    local:\n"
+        "      base_url: http://127.0.0.1:17347/v1\n"
+        "      model: big-emb\n"
+    )
+    cases = {
+        "agent:\n  max_iteration: 5\n": "max_iterations",
+        "agent-task:\n  max_runnin: 5\n": "max_running",
+        "subagent:\n  max_runnin: 5\n": "max_running",
+        "peer_agent:\n  brker: {}\n": "broker",
+        "context:\n  floor: 0.2\n": "ceiling",
+        "tool_load:\n  threshhold: 5\n": "threshold",
+        "tool_result:\n  bytse: 32768\n": "bytes",
+        "media:\n  provider: {}\n": "providers",
+        "file-tunnel:\n  actve: ngrok\n": "default",
+        "servers:\n  agent:\n    prot: 24000\n": "port",
+    }
+    for extra, known in cases.items():
+        with pytest.raises(ConfigError) as refused:
+            load(write(tmp_path, base + extra))
+        assert known in str(refused.value), (extra, str(refused.value))
+    # The embeddings typo goes *into* the section the file already has — a
+    # second `embeddings:` block would be a duplicate key, a different refusal.
+    with pytest.raises(ConfigError) as refused:
+        load(
+            write(
+                tmp_path,
+                base.replace("embeddings:\n", "embeddings:\n  active: local\n"),
+            )
+        )
+    assert "default" in str(refused.value)
+
+
+def test_a_command_or_url_that_is_not_a_string_is_refused_not_coerced() -> None:
+    """`str(["npx", "foo"])` is a program name nobody meant.
+
+    A malformed `command:`/`url:` used to be `str()`-coerced into a row that
+    loaded cleanly and failed at spawn in another process.  The canonical
+    objects' `str` fields refuse a non-string; the hand-written readers do too.
+    """
+    from slife2.libs.host.tool_config import load_cli, load_mcp
+
+    with pytest.raises(ValueError, match="command"):
+        load_mcp({"command": ["npx", "foo"]}, where="mcp.x")
+    with pytest.raises(ValueError, match="url"):
+        load_mcp({"url": 8080}, where="mcp.x")
+    with pytest.raises(ValueError, match="command"):
+        load_cli({"command": False}, where="cli.x")
+    # A scalar number in an args list is text the command line takes; a
+    # container is a mistake (`read_list`'s rule).
+    from slife2.libs.host.section import read_list
+
+    assert read_list([8080, "x"], "args") == ("8080", "x")
+    with pytest.raises(Exception, match="list of strings"):
+        read_list([{"port": 8080}], "args")
+
+
+def test_a_credential_reference_is_one_rule_across_get_and_set() -> None:
+    """`to_reference` and `show_api_key` agree on what a reference is.
+
+    A malformed `${…}` the chain could never resolve is a literal, not a
+    reference: `set` refuses it, and `get` hides it (so `set(get())` keeps it
+    rather than accusing the model of writing a secret).  A well-formed one
+    passes both; a bare name is wrapped.
+    """
+    from slife2.libs.host.model_config import (
+        API_KEY_REFUSAL,
+        show_api_key,
+        to_reference,
+    )
+
+    assert to_reference("${OPENAI_API_KEY}") == "${OPENAI_API_KEY}"
+    assert to_reference("OPENAI_API_KEY") == "${OPENAI_API_KEY}"
+    assert to_reference("") == ""
+    assert show_api_key("${OPENAI_API_KEY}") == "${OPENAI_API_KEY}"
+    assert show_api_key("${MY-KEY}") == "", "a malformed reference is a literal"
+    assert show_api_key("sk-literal") == ""
+    for bad in ("${MY-KEY}", "${}", "sk-literal", "${FOO}bar"):
+        with pytest.raises(ValueError) as refused:
+            to_reference(bad)
+        assert str(refused.value) == API_KEY_REFUSAL
+
+
+def test_the_prompt_budget_reserves_the_completion_request() -> None:
+    """**A provider counts prompt + requested completion against one window.**
+
+    The 2026-11 live failure: a 772k-token selection was sized against the full
+    1M window, the request then carried a 384k `max_tokens`, and DeepSeek
+    answered 400 (`1,182,471 > 1,048,576`).  The prompt budget is the window
+    minus that reservation, and it is the number every context budget and
+    percentage is measured against.
+    """
+    assert (
+        ModelSettings(
+            model="m", context_window=1_000_000, max_tokens=384_000
+        ).prompt_window
+        == 616_000
+    )
+    assert ModelSettings(model="m", context_window=1000).prompt_window == 1000
+    assert (
+        ModelSettings(model="m", context_window=100, max_tokens=200).prompt_window == 0
+    ), "a completion wider than the window leaves no prompt space"
+    assert ModelSettings(model="m").prompt_window == 0

@@ -8,11 +8,14 @@ makes backgrounding a thing a model can use rather than a thing it must babysit.
 
 The rules:
 
-* **The registry is the process's**, keyed by task id alone.  It is not keyed by
-  conversation: the task belongs to the *call*, not to the conversation that
-  happened to make it.  What each task does know is **where to hand its result
-  back to** (`Task.deliver`, bound when the call was made), because that is a fact
-  about the call and nowhere else.
+* **The registry is the process's**, keyed by task id.  It is not *read* by id
+  alone: the task belongs to the call, the call belongs to a conversation, and
+  a model that learns or guesses another conversation's id must not be able to
+  poll it or cancel it.  So each task records the conversation it was scheduled
+  in (`Task.scope`) and the two tools refuse an id from another one.  What each
+  task does know besides that is **where to hand its result back to**
+  (`Task.deliver`, bound when the call was made), because that is a fact about
+  the call and nowhere else.
 * **Nothing bounds a background task.**  Not a lifetime, not any default: the
   point of backgrounding is to leave the in-turn bounds behind, so a bound that
   applied anyway would undo the thing that was asked for.  The only bound a
@@ -75,13 +78,14 @@ catalogue.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from slife2.libs.harness.markers import wrap
+from slife2.libs.plugin.audience import ConversationKey
 from slife2.libs.turn.tools import ToolFailed
 
 logger = logging.getLogger(__name__)
@@ -165,6 +169,11 @@ class Task:
     #: The tool call this task is running, as the transcript names it.
     call_id: str
     tool: str
+    #: The conversation that made the call, as a `(home, agent, subagent)` key —
+    #: `None` for a task scheduled outside any conversation (a test, a worker).
+    #: The two tools answer for a task only in this conversation, so a task id
+    #: is not a capability a model can guess another agent's way into.
+    scope: ConversationKey | None = None
     status: str = RUNNING
     #: Where the result goes when it is ready.  Bound when the call was made,
     #: because that is the one moment the conversation is known —
@@ -208,12 +217,11 @@ MAX_ASYNC_TASKS = 100
 def marker(status: str, *, call_id: str = "", tool: str = "", task_id: str = "") -> str:
     """One line of machine-readable state, as every marker in this system is written.
 
-    `ensure_ascii` off, unlike the turn-event codec: this is content in a
-    conversation rather than a payload on a progress channel, and a tool name
-    that is not ASCII should read as itself in a transcript.
+    The envelope and its `ensure_ascii` decision are `markers.wrap`'s; the name
+    and the fields are this module's, the way every writer owns its own.
     """
     fields = {"call_id": call_id, "tool": tool, "task_id": task_id, "status": status}
-    return f"{MARKER_PREFIX}{json.dumps(fields, ensure_ascii=False)}]"
+    return wrap(MARKER_PREFIX, fields)
 
 
 def channel_for(tool: str) -> str:
@@ -228,19 +236,33 @@ def channel_for(tool: str) -> str:
     return f"{CHANNEL}:{tool}"
 
 
-def started(task_id: str, call_id: str, tool: str) -> str:
+def started(task_id: str, call_id: str, tool: str, *, delivered: bool = True) -> str:
     """What the model reads when a call has been handed to the background.
 
     The sentence under the marker is what the model acts on (it names the two
     calls that work on the id), and the marker is what everything else acts on.
     It does not say "poll for the result": the result comes back on its own.
+
+    **`delivered=False` is a loop with no hand-back** — an agent task, whose
+    turn ends before a background result could arrive.  Its result is kept for
+    `check_async` instead, so the sentence names that road rather than promising
+    a message that will never come.
     """
+    if delivered:
+        landing = (
+            "  Its result will be handed back to this conversation when it is done.\n"
+        )
+    else:
+        landing = (
+            "  No later turn will receive it: read the result with "
+            f'{CHECK_ASYNC}(task_id="{task_id}") once it is finished.\n'
+        )
     return (
         f"{marker(RUNNING, call_id=call_id, tool=tool, task_id=task_id)}\n"
         f"✓ Async task started.\n"
         f"  task_id: {task_id}\n"
         f"  tool: {tool}\n"
-        f"  Its result will be handed back to this conversation when it is done.\n"
+        f"{landing}"
         f'  Ask where it stands with {CHECK_ASYNC}(task_id="{task_id}").\n'
         f'  Abandon it with {CANCEL_ASYNC}(task_id="{task_id}").'
     )
@@ -273,7 +295,9 @@ def _prune_finished() -> None:
     delivered ones, whose text is already cleared.  So the first pass drops only
     finished tasks that were delivered; only if the cap is still exceeded with
     nothing else left does the second pass drop an undelivered one, because the
-    memory bound has to win eventually.
+    memory bound has to win eventually.  The refusal both tools then answer
+    with names that third cause (`_not_found`), so a result nobody read is not
+    reported as one somebody read.
     """
     if len(_tasks) <= MAX_ASYNC_TASKS:
         return
@@ -297,6 +321,7 @@ def schedule(
     tool: str,
     deliver: Deliver | None = None,
     fit: Fit | None = None,
+    scope: ConversationKey | None = None,
 ) -> str:
     """Start `coro` in the background and answer the id the model polls.
 
@@ -311,13 +336,16 @@ def schedule(
     registry is the thing that has to decide it (see `_runner`).
 
     `fit` is kept with the task rather than applied here, because the result it
-    is for does not exist yet — see `Fit` and `hand_back`.
+    is for does not exist yet — see `Fit` and `hand_back`.  `scope` is the
+    conversation the call was made in, and the two tools refuse the id outside
+    it (`Task.scope`).
     """
     task_id = uuid.uuid4().hex[:8]
     _tasks[task_id] = Task(
         handle=asyncio.create_task(_runner(coro, task_id)),
         call_id=call_id,
         tool=tool,
+        scope=scope,
         deliver=deliver,
         fit=fit,
     )
@@ -364,7 +392,14 @@ async def _runner(coro: Awaitable[tuple[str, bool]], task_id: str) -> str:
     )
     if task is not None and task.deliver is not None:
         await hand_back(task, task_id, task.status, result)
-    return result
+    # **The raw result does not outlive this return.**  `asyncio` keeps a
+    # task's return value on the task object, and `Task.handle` is held in
+    # `_tasks` until the model polls or the cap prunes it — so returning the
+    # full, *pre-fit* output here kept a copy of every delivered answer alive
+    # for the process, defeating the release `hand_back` just made.  Nothing
+    # reads this value: `check_async` and `cancel_async` read `Task.result`,
+    # which is cleared on delivery.
+    return ""
 
 
 async def hand_back(task: Task, task_id: str, status: str, body: str) -> None:
@@ -419,6 +454,17 @@ def _get_task(task_id: str) -> Task | None:
     return _tasks.get(task_id)
 
 
+def _may_read(task: Task, scope: ConversationKey | None) -> bool:
+    """Whether this caller may see the task it named.
+
+    **An unscoped caller may.**  That is the library's own — a test, a worker,
+    a turn that named no conversation — and a task scheduled without a scope is
+    one no conversation owns.  A caller that names a conversation sees only
+    that conversation's tasks.
+    """
+    return scope is None or task.scope is None or task.scope == scope
+
+
 def _pop_task(task_id: str) -> Task | None:
     return _tasks.pop(task_id, None)
 
@@ -430,11 +476,17 @@ def _not_found(task_id: str) -> str:
     as a call that succeeded — an `ok` with "Error:" in its text — and a
     transcript that reads a failure as a success is the one thing this system's
     tool contract exists to prevent.
+
+    **Three causes, and the sentence names all three.**  An id that was never
+    started, a finished task somebody read, and a finished task the cap dropped:
+    `_prune_finished`'s second pass takes even an unread result once the memory
+    bound has to win, so "read already" alone would be false about a result
+    nobody read.
     """
     return (
-        f"no async task {task_id!r} here: either it was never started, or it "
-        f"finished and has been read already — the task_id comes from the call "
-        f"that started it."
+        f"no async task {task_id!r} here: it was never started, it finished "
+        f"and has been read already, or it was dropped to bound memory — the "
+        f"task_id comes from the call that started it."
     )
 
 
@@ -470,20 +522,26 @@ def _answer(task: Task, task_id: str) -> dict[str, Any]:
     return answer
 
 
-async def check_async(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Answer where one background call stands.
+async def check_async(
+    arguments: dict[str, Any], *, scope: ConversationKey | None = None
+) -> dict[str, Any]:
+    """Answer where one background call stands — if it is this conversation's.
 
     **Status, not a result**, because the result is handed back on its own —
     the answer here is only where the call stands.  What is still carried here
     is the *undelivered* result: a call whose hand-back did not provably reach
     a conversation stays readable until somebody reads it, and then it goes.
 
+    **`scope` is the caller's conversation** (`Task.scope`).  A task scheduled
+    in another one is answered exactly as an unknown id — a distinct refusal
+    would confirm the id exists, which is the thing the scope is for.
+
     Reading is what removes a finished task from the registry:
     a task read twice would otherwise be a task kept for the whole session.
     """
     task_id = str(arguments.get("task_id") or "")
     task = _get_task(task_id)
-    if task is None:
+    if task is None or not _may_read(task, scope):
         raise ToolFailed(_not_found(task_id))
     # **Final status is not the same moment as a finished delivery.**  `_runner`
     # records the ending before it awaits `hand_back`, so between the two the
@@ -497,8 +555,13 @@ async def check_async(arguments: dict[str, Any]) -> dict[str, Any]:
     return _answer(task, task_id)
 
 
-async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
-    """Abandon one running background call, and tell the conversation it is gone.
+async def cancel_async(
+    arguments: dict[str, Any], *, scope: ConversationKey | None = None
+) -> dict[str, Any]:
+    """Abandon one running background call of this conversation, and say it is gone.
+
+    The task must belong to `scope` (`Task.scope`); another conversation's id
+    is refused exactly as an unknown one, so the refusal cannot confirm it.
 
     **The cancellation is handed back too.**  A person watching saw the call
     start, and a cancellation nobody hears about leaves a panel on screen that is
@@ -524,7 +587,7 @@ async def cancel_async(arguments: dict[str, Any]) -> dict[str, Any]:
     """
     task_id = str(arguments.get("task_id") or "")
     task = _get_task(task_id)
-    if task is None:
+    if task is None or not _may_read(task, scope):
         raise ToolFailed(_not_found(task_id))
     if task.status != RUNNING:
         # **Nothing to cancel, and nothing to throw away.**  The work is over —

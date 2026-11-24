@@ -22,7 +22,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import DEFAULT_AGENT, load, load_cached
-from slife2.libs.host.configfile import read_scalar, read_section
+from slife2.libs.host.configfile import read_default, read_providers
 from slife2.libs.host.launcher import Outcome, Status
 from slife2.libs.model.base import Chunk, StreamChatResult
 from slife2.libs.plugin.audience import conversation_meta
@@ -46,6 +46,7 @@ pytestmark = pytest.mark.unit
 #: preserve and "remove one" has something to leave behind.
 CONFIG = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -56,18 +57,19 @@ providers:
         context_window: 100000
       - model: small
         name: Small
+        context_window: 2000
 embeddings:
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 #: One model with every field at a non-default value, so a `set` that changed
 #: one field and dropped another is visible.
 RICH = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -89,7 +91,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -124,7 +125,7 @@ def written(isolated_runtime: Path) -> str:
 
 
 def section(isolated_runtime: Path) -> dict[str, Any]:
-    return read_section("providers", path=isolated_runtime / "slife2.yaml")
+    return read_providers(path=isolated_runtime / "slife2.yaml")
 
 
 def model_config(
@@ -136,7 +137,7 @@ def model_config(
     api_key: str = "${LOCAL_KEY}",
     reasoning: bool = False,
     input: list[str] | None = None,
-    context_window: int = 0,
+    context_window: int = 1000,
     max_tokens: int | None = None,
     temperature: float | None = None,
     top_p: float | None = None,
@@ -583,6 +584,28 @@ async def test_the_default_model_cannot_be_removed(isolated_runtime) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_file_without_a_default_names_the_model_it_falls_back_to(
+    isolated_runtime,
+) -> None:
+    """The fallback is the loader's, read off the same file the tools read.
+
+    `_active_default` answers `first_reference(providers, default)` — one rule
+    for both the "what does the system run on" answer and the guard — so a file
+    that leaves `providers.default` out still reports, and protects, its first
+    model.
+    """
+    no_default = CONFIG.replace("  default: local/big\n", "")
+
+    async with Client(server_for(isolated_runtime, no_default)) as client:
+        listed = await ask(client, "model_list")
+        with pytest.raises(ToolError) as refused:
+            await ask(client, "model_remove", ref="local/big")
+
+    assert listed["default"] == "local/big"
+    assert "default model" in str(refused.value)
+
+
+@pytest.mark.asyncio
 async def test_the_default_written_as_a_bare_provider_cannot_be_removed(
     isolated_runtime,
 ) -> None:
@@ -592,7 +615,7 @@ async def test_the_default_written_as_a_bare_provider_cannot_be_removed(
     `local/big`, never matched, and removing the model the system actually ran
     on was allowed — silently switching the system to the next one.
     """
-    bare = CONFIG.replace("default: local/big", "default: local")
+    bare = CONFIG.replace("  default: local/big", "  default: local")
 
     async with Client(server_for(isolated_runtime, bare)) as client:
         with pytest.raises(ToolError) as refused:
@@ -624,6 +647,7 @@ async def test_removing_a_providers_last_model_takes_its_entry_too(
     """
     two = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -631,20 +655,22 @@ providers:
     models:
       - model: big
         name: Big
+        context_window: 1000
       - model: small
         name: Small
+        context_window: 1000
   aside:
     api: openai-completions
     base_url: https://aside.test/v1
     api_key: ${ASIDE_KEY}
     models:
       - model: only
+        context_window: 1000
 embeddings:
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
     write_config(isolated_runtime, two)
 
@@ -673,6 +699,7 @@ providers:
     api_key: ${LOCAL_KEY}
     models:
       - model: only
+        context_window: 1000
 embeddings:
   providers:
     local:
@@ -691,7 +718,12 @@ embeddings:
 
 
 @asynccontextmanager
-async def answering_server(isolated_runtime: Path, backend: FakeBackend | None = None):
+async def answering_server(
+    isolated_runtime: Path,
+    backend: FakeBackend | None = None,
+    text: str = CONFIG,
+    cabinet_client: Client | None = None,
+):
     """`server_for`'s server, plus the two peers a turn needs to run.
 
     The real context and hub servers over the in-memory transport, exactly as
@@ -710,7 +742,7 @@ async def answering_server(isolated_runtime: Path, backend: FakeBackend | None =
     it: it is entered inside a test rather than around one, and what it stands up
     is what the `async with` tears down.
     """
-    write_config(isolated_runtime)
+    write_config(isolated_runtime, text)
     live = load()
     holder: dict[str, Any] = {}
     hub_client = Client(
@@ -729,6 +761,7 @@ async def answering_server(isolated_runtime: Path, backend: FakeBackend | None =
             live,
             context_client=context,
             hub_client=hub_client,
+            cabinet_client=cabinet_client,
             backend=backend or FakeBackend(text_turn("one"), text_turn("two")),
             source=load_cached,
         )
@@ -814,9 +847,7 @@ async def test_switching_writes_the_scalar_and_refuses_a_stranger(
     """The default is one top-level scalar, and the writer's judge is `resolve`."""
     async with Client(server_for(isolated_runtime)) as client:
         answer = await ask(client, "model_switch", ref="local/small")
-        assert read_scalar("default", path=isolated_runtime / "slife2.yaml") == (
-            "local/small"
-        )
+        assert read_default(path=isolated_runtime / "slife2.yaml") == ("local/small")
         assert answer["previous"] == "local/big"
         assert answer["moved"] == 0, "nothing was running on this server"
 
@@ -913,6 +944,76 @@ async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
     assert two.data["model"] == "local/big", "the same model, said to both callers"
 
 
+#: `big` reads pictures and holds 100k; `small` reads text only.  A switch from
+#: one to the other is the case a running turn must not feel.
+VISION_CONFIG = """providers:
+  default: local/big
+  local:
+    api: openai-completions
+    base_url: https://local.test/v1
+    api_key: ${LOCAL_KEY}
+    models:
+      - model: big
+        input: [text, image]
+        context_window: 100000
+      - model: small
+        context_window: 2000
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_switch_does_not_change_the_running_turns_image_capability(
+    isolated_runtime,
+) -> None:
+    """**The turn keeps the model's facts, not only its name.**  `model_switch`
+    moves `accepts_images` and `prompt_window` on the loop, and the turn already
+    in flight runs on the old backend: an image the old vision model could read
+    was refused because the new, text-only one was named, and a compaction was
+    sized against a window the running model does not have.
+    """
+    from fastmcp import FastMCP
+
+    cabinet = FastMCP("cabinet")
+
+    @cabinet.tool
+    async def image_save(url: str) -> dict[str, Any]:
+        return {"key": "kept-1", "mime": "image/png", "size": 1}
+
+    backend = FakeBackend(
+        calling("skill_list", {}, delay=0.5),
+        text_turn("done"),
+    )
+    async with (
+        Client(cabinet) as cabinet_client,
+        answering_server(
+            isolated_runtime,
+            backend=backend,
+            text=VISION_CONFIG,
+            cabinet_client=cabinet_client,
+        ) as server,
+    ):
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        async with Client(server) as client:
+            switched = await ask(client, "model_switch", ref="local/small")
+            result = await client.call_tool(
+                "attach_image",
+                {"sources": ["data:image/png;base64,AA=="]},
+                meta=conversation_meta(DEFAULT_AGENT),
+            )
+            attached = result.data
+        await first
+
+    assert switched["moved"] == 1
+    assert attached["attached"], "the running turn kept its vision model"
+    assert attached["refused"] == []
+
+
 # --- one process, several homes -----------------------------------------------
 
 
@@ -921,6 +1022,7 @@ async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
 #: a reference *that home's* file cannot name — so this home must not have it.
 OTHER_HOME = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://local.test/v1
@@ -928,12 +1030,12 @@ providers:
     models:
       - model: big
         name: Big
+        context_window: 1000
 embeddings:
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -1000,3 +1102,26 @@ async def test_one_home_cannot_block_a_removal_with_another_homes_conversation(
         "big",
         "small",
     ], "the other home's file is not this call's to edit"
+
+
+@pytest.mark.asyncio
+async def test_a_reference_is_the_same_reference_however_it_is_spaced(
+    isolated_runtime,
+) -> None:
+    """Every model tool reads the reference `_model_ref` reads.
+
+    `local / small` used to normalize in `model_set` and fail in `model_switch`
+    (the parts were not stripped), so one spelling was two behaviors.  The
+    switch now splits and strips the same way, and writes the canonical ref.
+    """
+    async with Client(server_for(isolated_runtime)) as client:
+        answer = await ask(client, "model_switch", ref="local / small")
+        assert read_default(path=isolated_runtime / "slife2.yaml") == ("local/small")
+        assert answer["previous"] == "local/big"
+
+        # `model_get` reads the same reference, and answers about the model it
+        # found: the padded spelling is the default, and the ref it echoes is
+        # the canonical one.
+        found = await ask(client, "model_get", ref="local / small")
+        assert found["default"] is True
+        assert found["ref"] == "local/small"

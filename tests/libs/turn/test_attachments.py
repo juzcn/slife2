@@ -133,6 +133,94 @@ def test_an_unknown_suffix_is_refused_rather_than_guessed(tmp_path) -> None:
     assert "image/png" not in refusals[0]
 
 
+# --- the cabinet's second chance ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_source_the_encoder_refused_is_asked_of_the_cabinet_once() -> None:
+    """**A `[Image:…]` key is not a path**, and the cabinet is asked once.
+
+    A restored conversation carries markers instead of pixels, so the string a
+    model passes to `attach_image` may be a cabinet key.  The lookup is a batch
+    call because opening the connection belongs to the caller: a batch of five
+    keys must not be five opens.
+    """
+    asked: list[list[tuple[str, str]]] = []
+
+    async def lookup(keys):
+        asked.append(keys)
+        return [(keys[0][0], "data:image/png;base64,AAAA")], [keys[1][1]]
+
+    url = "https://x.test/a.png"
+    pairs, refusals = await attachments.resolve_sources(
+        ["pictures/ab.png", "pictures/gone.png", url], lookup=lookup
+    )
+
+    assert len(asked) == 1, "the whole batch is one ask"
+    assert [source for source, _url in pairs] == [url, "pictures/ab.png"]
+    assert refusals == [asked[0][1][1]]
+    assert asked[0][0][0] == "pictures/ab.png"
+
+
+@pytest.mark.asyncio
+async def test_the_split_runs_off_the_loop(tmp_path, monkeypatch) -> None:
+    """**The read is blocking work, and the loop is shared.**  `split` reads
+    files — up to `MAX_BYTES` each — and base64-encodes them; on the one loop
+    every conversation of a server shares, that stalls turns attaching nothing
+    (`slife2.helpers.threads`).  The hop is asserted where the work happens: the
+    encoder runs on a worker thread, not the loop's.
+    """
+    import threading
+
+    loop_thread = threading.current_thread()
+    seen: list[threading.Thread] = []
+    real_encode = attachments._encode
+
+    def watched(source: str, base=None):
+        seen.append(threading.current_thread())
+        return real_encode(source, base)
+
+    monkeypatch.setattr(attachments, "_encode", watched)
+    path = image(tmp_path)
+
+    pairs, refusals = await attachments.resolve_sources([path.as_posix()])
+
+    assert refusals == []
+    assert pairs[0][1].startswith("data:image/png;base64,")
+    assert seen, "the encoder ran"
+    assert all(thread is not loop_thread for thread in seen), "off the loop"
+
+
+@pytest.mark.asyncio
+async def test_a_key_the_cabinet_does_not_hold_keeps_the_encoders_sentence() -> None:
+    """A failed lookup is that source's refusal, not the batch's — and the
+    refusal is the one naming the string the model wrote."""
+    keys = [("a.png", "a.png: no such file"), ("b.png", "b.png: no such file")]
+
+    async def fetch(key: str) -> str | None:
+        if key == "a.png":
+            raise RuntimeError("the cabinet is down")
+        return None
+
+    pairs, refusals = await attachments.from_keys(keys, fetch)
+
+    assert pairs == []
+    assert refusals == [refusal for _source, refusal in keys]
+
+
+@pytest.mark.asyncio
+async def test_a_key_the_cabinet_holds_becomes_a_pair() -> None:
+    async def fetch(key: str) -> str | None:
+        return f"data:image/png;base64,{key}"
+
+    pairs, refusals = await attachments.from_keys(
+        [("pictures/a.png", "pictures/a.png: no such file")], fetch
+    )
+
+    assert refusals == []
+    assert pairs == [("pictures/a.png", "data:image/png;base64,pictures/a.png")]
+
+
 # --- where it lands -----------------------------------------------------------
 
 

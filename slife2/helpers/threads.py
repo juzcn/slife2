@@ -26,6 +26,7 @@ context store, the hub — that want the rule stated once.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable
 
 
@@ -38,5 +39,17 @@ async def off_loop[**P, T](
     way a direct call would be: this is where a store's signature meets the
     thread hop, and a runner that accepted anything would be the one place in the
     tree where a wrong argument is not an error.
+
+    **An `async` function is refused rather than run.**  Handed one, the worker
+    creates a coroutine and returns it un-awaited: the caller receives a truthy
+    object instead of the result, and the only trace is a `RuntimeWarning` when
+    it is collected — which is how an `async def` over a blocking query made
+    every word page report evidence it did not have.  Await such a function
+    directly; this is the hop for the *sync* calls it makes inside.
     """
+    if inspect.iscoroutinefunction(function):
+        raise TypeError(
+            f"off_loop carries blocking calls; {function!r} is async. "
+            "Await it directly, or make it sync so the hop can run it."
+        )
     return await asyncio.to_thread(function, *args, **kwargs)

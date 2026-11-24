@@ -42,9 +42,10 @@ agent task instead, and the task's delivered message is the answer.
 
 `--help` lists the options, and the flags may be written before or after the
 command.  `--data-dir` is the one worth knowing about on its own: it decides
-which config, which runtime state and which databases everything else reads.
+which home everything reads — its config, agents, skills, jobs and databases.
+The runtime directory (records, locks, logs) is machine-wide and not under it.
 
-`--lang` is the window's language, and **the window's only** (`slife2.tui.i18n`):
+`--lang` is the window's language, and **the window's only** (`slife2.libs.harness.i18n`):
 the model never reads a translated string, the logs stay English whatever the
 flag says, and the report this command prints as the servers come up is the
 terminal's rather than the window's.  It overrides the language the OS reports,
@@ -61,12 +62,15 @@ from __future__ import annotations
 #: daemon is.  Defined after the imports below, that read depends on nothing
 #: imported while this module's body ran ever reaching `protocol.py`; defined
 #: first, there is no order to get wrong.
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 import argparse
 import json
+import signal
 import sys
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -177,7 +181,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     add_a2a_broker_argument(parser)
     parser.add_argument(
         "--agent",
-        default=DEFAULT_AGENT,
+        # None until the validation below has seen it: a flag that was written
+        # is a flag the command must honour, and the default would hide the
+        # writing of it (`--agent` on `status` does nothing there).
+        default=None,
         help=(
             "the name this instance runs under, or the agent a probe asks "
             f"(default: {DEFAULT_AGENT})"
@@ -275,6 +282,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--json only applies to `status`")
     if args.model and args.command != _RUN:
         parser.error("--model only applies to `run`")
+    if args.url is not None and args.command != _RUN:
+        parser.error("--url only applies to `run`")
+    if args.headless and args.command != _RUN:
+        parser.error("--headless only applies to `run`")
+    if args.keep_servers and args.command != _RUN:
+        parser.error("--keep-servers only applies to `run`")
+    if args.agent is not None and args.command not in (_RUN, "probe"):
+        parser.error("--agent only applies to `run` and `probe`")
     if args.force and args.command != "down":
         parser.error("--force only applies to `down`")
     if args.prompt is not None and args.command != "probe":
@@ -297,6 +312,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("--lines must be 0 or more (0 shows the whole log)")
     if args.lines is None:
         args.lines = 50
+    if args.agent is None:
+        args.agent = DEFAULT_AGENT
     apply_data_dir(args)
     apply_a2a_broker(args)
     return args
@@ -406,7 +423,7 @@ def _ensure(config: Config, config_path) -> int:
                 "running  -> ",
                 outcome.spec.name,
                 outcome.spec.url,
-                "reusing",
+                f"reusing ({outcome.detail})" if outcome.detail else "reusing",
                 outcome.seconds,
             )
         else:
@@ -474,6 +491,7 @@ def _open_catalogue(config: Config) -> ToolCounts | None:
     is still a traceback rather than a start-up message about the catalogue.
     """
     from fastmcp.exceptions import ToolError
+    from mcp.shared.exceptions import MCPError
 
     from slife2.libs.host.launcher import open_catalogue
     from slife2.libs.host.paths import catalogue_db
@@ -481,11 +499,13 @@ def _open_catalogue(config: Config) -> ToolCounts | None:
     started = time.monotonic()
     try:
         counts = open_catalogue(config)
-    except (ConnectionError, ToolError) as exc:
+    except (ConnectionError, ToolError, MCPError) as exc:
         # A `ConnectionError` is a hub that could not be reached or read; a
         # `ToolError` is the hub refusing the call — the home named by this
         # instance is not a path on the machine that would serve it (a Windows
-        # client attached to a WSL server, say).  Both are start-up answers, not
+        # client attached to a WSL server, say); an `MCPError` is the MCP
+        # client's own timeout or JSON-RPC failure, which the run budget can
+        # produce on a cold catalogue.  All three are start-up answers, not
         # tracebacks; the message names the fix.
         print(f"slife2: the tool catalogue could not be built: {exc}", file=sys.stderr)
         return None
@@ -561,6 +581,21 @@ def control_url(config: Config) -> str:
     return config.server("tui").url
 
 
+def task_url(config: Config) -> str:
+    """Where the window lists and watches agent tasks, or `""` when absent.
+
+    **The config loader seeds every plugin's `servers:` row**, so a loaded
+    config always has one; the empty answer is for a hand-built `Config` (a
+    test, an embedding) and is what the app reads as "do not ask", the same way
+    `mesh_url`'s empty is "not on the mesh".  The window still offers its
+    subagents under `Ctrl+O` when there is no task server to ask.
+    """
+    try:
+        return config.server("agent-task").url
+    except ConfigError:
+        return ""
+
+
 def mesh_url(config: Config) -> str:
     """Where the window puts its agent on the A2A mesh, or `""` for not on one.
 
@@ -601,15 +636,39 @@ def tui_model(config: Config, reference: str = "") -> tuple[str, ModelSettings]:
     return f"{name}/{model.model}", model
 
 
-def _broker_status(config: Config) -> dict[str, Any] | None:
-    """The A2A broker's row, or `None` when the config is not on the mesh.
+def _broker_settings(config: Config) -> list[Any]:
+    """Every broker this config says it is on, one per address.
+
+    **Both networks may be configured, and each has its own address.**  The
+    local server starts `subagent.network`'s broker; reading only `peer_agent`
+    here left a local-only config's broker invisible to `status`, `down` and
+    `logs`.  The same address named by both sections is one broker, so it is
+    returned once.
+    """
+    from slife2.plugins.a2a.broker import log_url
+
+    found: list[Any] = []
+    seen: set[str] = set()
+    for settings in (config.peer_agent, config.subagent.network):
+        if not settings.configured:
+            continue
+        url = log_url(settings)
+        if url in seen:
+            continue
+        seen.add(url)
+        found.append(settings)
+    return found
+
+
+def _broker_row(settings: Any) -> dict[str, Any]:
+    """One broker's row, read the way `down` reads it.
 
     The broker is the one daemon the launcher does not start, so `statuses`
-    cannot see it.  It is read the way `down` reads it: a record proves the
-    process is ours, and a port that answers proves there is a broker at all.
+    cannot see it: a record proves the process is ours, and a port that
+    answers proves there is a broker at all.  One row per address — both
+    networks may name one (`_broker_settings`), and a dead second broker is
+    a fact the report owes the reader, not a silence.
     """
-    if not config.peer_agent.configured:
-        return None
     from slife2.libs.host.runtime import (
         log_path,
         read_record,
@@ -618,7 +677,6 @@ def _broker_status(config: Config) -> dict[str, Any] | None:
     )
     from slife2.plugins.a2a.broker import BROKER_NAME, log_url
 
-    settings = config.peer_agent
     url = log_url(settings)
     listening = tcp_listening(settings.broker_host, settings.broker_port)
     record = read_record(url)
@@ -668,7 +726,7 @@ def _status_row(outcome: Any) -> dict[str, Any]:
 
 
 def _status(config: Config, *, as_json: bool = False) -> int:
-    """Report what every configured server and the broker are doing.
+    """Report what every configured server and broker is doing.
 
     The exit code is the answer a script needs: zero only when every row is
     usable.  A human-readable status and a machine-readable one are one read of
@@ -677,11 +735,10 @@ def _status(config: Config, *, as_json: bool = False) -> int:
     from slife2.libs.host.launcher import Status, statuses
 
     outcomes = list(statuses(config))
-    broker = _broker_status(config)
+    brokers = [_broker_row(settings) for settings in _broker_settings(config)]
     failed = sum(1 for outcome in outcomes if not outcome.ok)
-    if broker is not None and not broker["ok"]:
-        failed += 1
-    total = len(outcomes) + (1 if broker is not None else 0)
+    failed += sum(1 for row in brokers if not row["ok"])
+    total = len(outcomes) + len(brokers)
 
     if as_json:
         print(
@@ -689,7 +746,11 @@ def _status(config: Config, *, as_json: bool = False) -> int:
                 {
                     "ok": failed == 0,
                     "servers": [_status_row(outcome) for outcome in outcomes],
-                    "broker": broker,
+                    # **A list, and the human report below is the same list**:
+                    # both networks may name a broker, and a JSON consumer owes
+                    # every row — not the first — just as the exit code counts
+                    # every row.
+                    "brokers": brokers,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -707,8 +768,8 @@ def _status(config: Config, *, as_json: bool = False) -> int:
         if outcome.detail:
             suffix += f" - {outcome.detail}"
         _report("", outcome.spec.name, outcome.spec.url, suffix)
-    if broker is not None:
-        _report("", broker["name"], broker["url"], broker["status"])
+    for row in brokers:
+        _report("", row["name"], row["url"], row["status"])
     if failed:
         print(
             f"\nslife2: {failed} of {total} server(s) are not usable",
@@ -718,14 +779,46 @@ def _status(config: Config, *, as_json: bool = False) -> int:
     return 0
 
 
-def _down(config: Config, *, force: bool = False) -> int:
+@contextmanager
+def _uninterruptible() -> Iterator[None]:
+    """Hold off Ctrl+C while a stop that has been asked for runs to its end.
+
+    **The window's Ctrl+C is a key; the second half of a double press is the
+    same request arriving again.**  `SlifeApp.action_interrupt` quits on the
+    first press, Textual hands the terminal back to the console a moment later,
+    and the following press is a real `SIGINT` by then — delivered while this
+    process is stopping the shared servers, inside the `finally` the app's
+    `except KeyboardInterrupt` does not cover.  Unhandled it prints a traceback
+    over an exit somebody asked for and abandons the stop halfway.
+
+    **Swallowed rather than obeyed**, because the stop is what that press was
+    asking for: there is nothing left to cancel, only work to finish, and every
+    process it stops has its own grace period (`launcher.terminate`) rather
+    than an unbounded wait.  The previous handler is restored afterwards, so a
+    caller that comes back — `slife2 down` is one — leaves the process as it
+    found it.
+    """
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+@_uninterruptible()
+def _down(config: Config, *, force: bool = False, everything: bool = False) -> int:
     """Stop the servers this config names, and the broker.
+
+    **A stop that has begun is not cancelled.**  `main` guards its own exit;
+    this guards the same act for `slife2 down`, where an interrupted stop would
+    leave the stack half stopped.  `_uninterruptible` states why.
 
     **A stop is not a broadcast.**  The servers are shared, so another live
     client is another conversation with a turn in flight; `down` refuses while
     one exists and asks for `--force`.  The last client out reaches here with
     `others_running()` already empty, which is why the normal exit path needs no
-    flag.
+    flag — and passes `everything=True`, because "the last client" is the
+    *machine's*, and a daemon another config started is still one to stop.
     """
     from slife2.libs.host.launcher import Status, others_running, stop
 
@@ -743,7 +836,7 @@ def _down(config: Config, *, force: bool = False) -> int:
             )
         return 2
 
-    outcomes = list(stop(config))
+    outcomes = list(stop(config, everything=everything))
     failed = False
     anything = False
     for outcome in outcomes:
@@ -753,6 +846,12 @@ def _down(config: Config, *, force: bool = False) -> int:
                 "", outcome.spec.name, outcome.spec.url, outcome.detail or "stopped"
             )
         elif outcome.status is not Status.NOT_RUNNING:
+            # **Anything reported is something running** — failed to stop,
+            # running but not ours, in conflict — so "nothing running" after
+            # these lines would contradict the line above it.  The flag used to
+            # be set by STOPPED alone, and a `down` that could not stop a
+            # server ended by telling the operator nothing was there.
+            anything = True
             _report(
                 "",
                 outcome.spec.name,
@@ -770,14 +869,31 @@ def _down(config: Config, *, force: bool = False) -> int:
     # what keeps a broker *slife2 did not start* out of it: no record, no
     # signalling.  A stack going away is exactly the moment it should, since the
     # alternative is a machine left holding a broker nobody is using.
-    if config.peer_agent.configured:
-        from slife2.plugins.a2a.broker import BROKER_NAME, log_url, stop_failed
-        from slife2.plugins.a2a.broker import stop as stop_broker
+    from slife2.plugins.a2a.broker import BROKER_NAME, log_url, stop_failed
+    from slife2.plugins.a2a.broker import stop as stop_broker
+    from slife2.plugins.a2a.broker import stop_url as stop_broker_url
 
-        said = stop_broker(config.peer_agent)
+    targets: list[tuple[str, Any | None]] = [
+        (log_url(settings), settings) for settings in _broker_settings(config)
+    ]
+    if everything:
+        # **The broker records are the machine's list too.**  A last client whose
+        # own config is not on a mesh must still stop a broker another config
+        # started; one left running is an orphan at a port the next start
+        # adopts without owning.
+        from slife2.libs.host.runtime import records
+
+        known = {url for url, _settings in targets}
+        targets += [
+            (record.url, None)
+            for record in records()
+            if record.url.startswith("mqtt://") and record.url not in known
+        ]
+    for url, settings in targets:
+        said = stop_broker(settings) if settings is not None else stop_broker_url(url)
         if said:
             anything = True
-            _report("", BROKER_NAME, log_url(config.peer_agent), said)
+            _report("", BROKER_NAME, url, said)
             if stop_failed(said):
                 failed = True
     if not anything:
@@ -805,11 +921,15 @@ def _log_targets(
         targets.append(
             (spec.name, spec.url, log_path(spec.url), tuple(sorted(aliases)))
         )
-    if config.peer_agent.configured:
-        from slife2.plugins.a2a.broker import BROKER_NAME, log_url
+    from slife2.plugins.a2a.broker import BROKER_NAME, log_url
 
-        url = log_url(config.peer_agent)
-        targets.append((BROKER_NAME, url, log_path(url), (BROKER_NAME, "broker")))
+    for index, settings in enumerate(_broker_settings(config)):
+        url = log_url(settings)
+        # The first broker also owns the bare word `broker`; a second one is
+        # addressed by its name, which `_log_target` then reports as ambiguous
+        # when both configured — the honest answer for a word with two logs.
+        aliases = (BROKER_NAME, "broker") if index == 0 else (BROKER_NAME,)
+        targets.append((BROKER_NAME, url, log_path(url), aliases))
     return targets
 
 
@@ -911,7 +1031,7 @@ def _probe(
 
     **Two roads, one answer contract.**  `a2a` (the default) is a mock peer: a
     `task_request` on the peer network, answered by the model's own
-    `task_response`.  `tui` is an agent task: the task runs one loop of the
+    `task_response`.  `tui` is an agent task: the task runs one turn of the
     agent's own and its delivered `agent-task:<name>` message is the answer —
     never the window's assistant text, which answers everything folded into the
     turn.
@@ -943,6 +1063,18 @@ def _probe(
 
 def main(argv: list[str] | None = None) -> int:
     """Entry point for the `slife2` console script."""
+    # **UTF-8 on both streams, whatever the console codepage is.**  A redirect
+    # on Windows uses the locale encoding strictly, and `slife2 logs` reads with
+    # `errors="replace"`: one undecodable byte in a log becomes U+FFFD, which is
+    # unencodable in cp936 and cp1252, so the command a person redirects to a
+    # file died with a `UnicodeEncodeError`.  The daemons already get
+    # `PYTHONIOENCODING=utf-8`; this is the same answer for the CLI itself.
+    for stream in (sys.stdout, sys.stderr):
+        # `getattr` because a test may hand us a stream that is not a
+        # `TextIOWrapper`, and `reconfigure` is the text layer's option.
+        configure = getattr(stream, "reconfigure", None)
+        if configure is not None:
+            configure(encoding="utf-8", errors="replace")
     # **Before any loop is made**, because every command may make one and none
     # of them owns the Windows Proactor's close: `probe` and `_open_catalogue`
     # each run their own `asyncio.run`, and the window's loop is Textual's.
@@ -957,16 +1089,28 @@ def main(argv: list[str] | None = None) -> int:
         # ensured, so that a window is never opened in one language and finished
         # in another.  The import is here rather than at module scope for this
         # module's usual reason: `slife2.libs.host.config` and the servers stay
-        # importable without a UI, and this module is free of Textual only by
-        # accident of where it lives (`slife2/tui/__init__.py` imports nothing,
-        # and `i18n` needs nothing but the stdlib).
-        from slife2.tui.i18n import set_language
+        # importable without a UI: the table lives in the libraries now
+        # (`slife2.libs.harness.i18n`), which needs nothing but the stdlib.
+        from slife2.libs.harness.i18n import set_language
 
         set_language(args.lang)
 
     try:
         config_path = find_config_path()
         config: Config = load()
+        if args.a2a_broker and not config.peer_agent.configured:
+            # **The flag cannot make a mesh**, because the section's presence is
+            # the switch (`A2ASettings`).  Refused here, against the file this
+            # command was told to read, rather than in the loader — a shared
+            # daemon loads other homes' files too, where the process-wide env
+            # var must not turn into a refusal of a config it does not describe.
+            print(
+                f"slife2: --a2a-broker {args.a2a_broker} names a broker to use, "
+                f"but this machine is not on the peer network: there is no "
+                f"`peer_agent:` section in {config_path}",
+                file=sys.stderr,
+            )
+            return 2
 
         # **`status`, `down` and `logs` run before the model is resolved.**
         # They are what an operator runs to recover from a stale `default:`;
@@ -1044,8 +1188,11 @@ def main(argv: list[str] | None = None) -> int:
                     agent=args.agent,
                     model=model_reference,
                     # What this model is, from its own config entry: the status
-                    # bar renders each of these from what it is handed.
-                    context_window=model_settings.context_window,
+                    # bar renders each of these from what it is handed.  The
+                    # bar's percentage is against the **prompt budget** — the
+                    # window minus the completion request — because the
+                    # provider counts both against one window.
+                    context_window=model_settings.prompt_window,
                     thinking=model_settings.reasoning,
                     vision=model_settings.accepts_images,
                     # What the model holds against what the catalogue holds,
@@ -1062,6 +1209,10 @@ def main(argv: list[str] | None = None) -> int:
                     # online, so the address has to reach the window rather
                     # than the plugin that was already started without it.
                     mesh_url=mesh_url(config),
+                    # The tasks the picker offers beside the subagents.  A
+                    # machine without the plugin gets `""`, and the key then
+                    # asks only the agent server.
+                    task_url=task_url(config),
                 )
                 # **The whole of `--headless`, and it is the window either
                 # way.**  Nothing is passed in and nothing above changes: the
@@ -1096,7 +1247,17 @@ def main(argv: list[str] | None = None) -> int:
         # one: otherwise an ordinary exit leaves the servers running until the
         # next reboot.  `others_running` counts by pid liveness, so a client
         # that was killed — and so never deregistered — cannot keep them alive.
-        if claimed and not args.keep_servers and not others_running():
-            print("  last instance out; stopping the shared servers")
-            _down(config)
+        #
+        # **The exit is uninterruptible from here.**  The window is already
+        # gone; the Ctrl+C a double press sends a moment later is this exit
+        # being asked for again, and it must not abort the client check or the
+        # stop — see `_uninterruptible`.
+        with _uninterruptible():
+            if claimed and not args.keep_servers and not others_running():
+                print("  last instance out; stopping the shared servers")
+                # **`everything` is what "the shared servers" means.**  This is
+                # the machine's last client, not this config's: a backend
+                # another config started is still a daemon with nobody left to
+                # stop it.
+                _down(config, everything=True)
     return code

@@ -35,6 +35,7 @@ a reader does belongs in the design document.
 | **Conversation id** | `(agent, subagent)`: the identity a call is for. |
 | **Conversation** | One agent's own history, or one of its subagents'. |
 | **Turn** | One exchange: the input, the model's answer, and the tool calls it made. |
+| **Plan** | The model's current list of steps for one conversation, each with a status. It lives beside the conversation, is replayed at the start of every turn, and is drawn above the prompt. |
 | **Channel** | Where a message arrived: `tui`, `wechat`, `peer_agent:<peer>`, `agent:<name>`, `subagent:<name>`, `agent-task:<name>`, or `async-tool:<name>`. |
 | **Marker** | The machine-readable prefix a sender adds to a message, e.g. `[Wechat:{…}]`. Stored with the message, removed only for display. |
 | **Family** | A plugin that owns one configuration section or folder and declares its rows to the hub. |
@@ -119,11 +120,12 @@ lines print the `source` line to run, or open a new terminal.
 Python 3.13 is installed only when the machine has none; `uv python upgrade 3.13`
 moves it to a newer patch. The installer seeds the bundled `skills/` and `jobs/`
 into the data directory, **overwriting files of the same name**; a skill or job
-you added under another name stays untouched. `AGENTS.md` and `slife2.yaml` are
-**never overwritten**: a changed shipped copy is written beside them as
-`AGENTS-default.md` / `slife2-default.yaml` for you to compare and merge. What
-the installer installs is read from the **shipped** `slife2.yaml`, never your
-home's file: an upgrade does not wait for that merge.
+you added under another name stays untouched. `AGENTS.md` is overwritten too —
+it is the system's guide to the model's tools, not a file to edit. `slife2.yaml`
+is **never overwritten**: a changed shipped copy is written beside it as
+`slife2-default.yaml` for you to compare and merge. What the installer installs
+is read from the **shipped** `slife2.yaml`, never your home's file: an upgrade
+does not wait for that merge.
 
 From a source checkout, run the installer there:
 
@@ -176,7 +178,8 @@ export DEEPSEEK_API_KEY=...
 
 `slife2.yaml` is required — there is no built-in configuration. The installer
 seeds the shipped file into a new home; a checkout uses the `slife2.yaml` beside
-its code. `AGENTS.md` is required too, and follows the same rule.
+its code. `AGENTS.md` is required too; the installer writes it, and a reinstall
+replaces it.
 
 ### Docker
 
@@ -192,37 +195,26 @@ are `/opt/slife2`, and its runtime directory is
 `/home/slife2/.slife2/runtime`. It is about 3 GB because it contains the
 programs the full configuration names.
 
-The image has no OS keyring, so it keeps its keys in credstore's encrypted file
-inside a volume. Create it once and store every key the configuration names:
+The image has no OS keyring, so its keys are environment variables. The build
+runs the same `scripts/install.sh` as a host install, so its log lists every
+credential the shipped configuration names; write those into an env file and
+pass it with `--env-file` (not `-e KEY=...`, which puts the value in the process
+table). Run one prompt and exit:
 
 ```bash
-docker volume create slife2-cred
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  --entrypoint bash slife2:local
-# in that shell:
-credstore set-password            # choose the master password
-credstore set DEEPSEEK_API_KEY    # then every line the build log listed
-```
-
-The build runs the same `scripts/install.sh` as a host install, so its log lists
-every `credstore set <KEY>` line the shipped configuration needs. Run one prompt
-and exit — the image asks for the master password, and every `${VAR}` in the
-configuration resolves from the file:
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+docker run --rm -it --env-file slife2.env \
   slife2:local 'Use the shell tool to run pwd and report the output.'
 ```
 
-Or start the agent headless and keep it running (it prompts the same way):
+Or start the agent headless and keep it running:
 
 ```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
+docker run --rm -it --env-file slife2.env slife2:local
 ```
 
-Keys are configured in the container's credstore, not on the command line. A
-mounted `slife2.yaml` whose values are literals is the other supported source.
-Mount `/opt/slife2/agents` and `/home/slife2/.slife2` if conversations and logs
+Keys are environment variables, not command-line arguments. A mounted
+`slife2.yaml` whose values are literals is the other supported source. Mount
+`/opt/slife2/agents` and `/home/slife2/.slife2` if conversations and logs
 should outlive the container. See [docker/README.md](docker/README.md) for the
 credential setup, the one-shot prompt, and the container-specific notes.
 
@@ -286,7 +278,7 @@ Options:
 | `--keep-servers` | Leave the shared servers running after this instance exits. |
 | `--headless` | Run the same window, servers, connections, and turns without a display. The agent remains reachable on the peer network. Exit with Ctrl+C. |
 | `--lang {en,zh}` | Set the window's language. Without the flag, it is detected from the operating system. |
-| `--json` | Print `status` as JSON (`ok`, `servers`, `broker`; each server row has its log path). |
+| `--json` | Print `status` as JSON (`ok`, `servers`, `brokers`; each row has its log path). |
 | `--force` | Stop the shared servers even when another client is using them. `down` only. |
 | `--prompt TEXT` | The task to ask a running agent. `probe` only. |
 | `--timeout SECONDS` | How long `probe` waits for the completed reply. Default: 3600. |
@@ -330,7 +322,7 @@ one server.
 | `slife2-llm-openai-responses` | OpenAI Responses | 24003 |
 | `slife2-llm-embeddings` | Embeddings | 24004 |
 | `slife2-tui` | Terminal inbox, one session per agent | 24005 |
-| `slife2-context` | Turn log and context decision | 24010 |
+| `slife2-context` | Turn log and context decisions | 24010 |
 | `slife2-toolhub` | Tool catalogue and model tool list | 24020 |
 | `slife2-wechat` | WeChat login and messaging | 24030 |
 | `slife2-skills` | Playbooks and `skill_use` | 24031 |
@@ -345,9 +337,9 @@ one server.
 | `slife2-schedule` | Scheduled tasks and their ledger | 24039 |
 | `slife2-a2a` | Peer-agent network over MQTT | 24040 |
 
-The subagent network is served by the same module on port 24041 and is started
-as `python -m slife2.plugins.a2a.local_server`; it has no separate console
-script.
+The subagent network runs the same implementation through its own entry module,
+`python -m slife2.plugins.a2a.local_server`, on port 24041; it has no separate
+console script.
 
 **On WSL2 with `networkingMode=mirrored`, the WSL instance shifts these ports by
 100** (agent 24100, toolhub 24120). The local MQTT broker is not shifted: both
@@ -355,6 +347,7 @@ stacks share it. Mirrored mode makes the Windows and WSL loopbacks one, so a WSL
 stack on the default ports would be visible to — and silently reused by — a
 Windows instance. `wsl_port_offset` changes the shift: default 100, `0` disables
 it, and it is ignored outside mirrored mode.
+
 ## Using the terminal UI
 
 ### Keys
@@ -366,7 +359,7 @@ it, and it is ignored outside mirrored mode.
 | `Esc` | Interrupt the running turn. |
 | `Ctrl+C` | Copy when something is selected; otherwise interrupt; otherwise quit. |
 | `Ctrl+S` | Open the model picker. `↑`/`↓` move, `Enter` selects, `Esc` closes. |
-| `Ctrl+O` | Open the subagent picker; choosing one opens a read-only view. `Esc` closes it. |
+| `Ctrl+O` | Open the picker for subagents and running agent tasks; choosing one opens a read-only view. `Esc` closes it. |
 | `Ctrl+Q` | Quit (Textual's binding; not shown because terminals with flow control may consume it). |
 | `PageUp` / `PageDown` | Page the transcript. |
 | `Home` / `End` | Jump to the start or end of the transcript. |
@@ -377,11 +370,23 @@ tokens arrive; sending a message returns it to the end.
 
 ### Sending messages
 
-A message sent while a turn is running is queued; the running turn finishes,
-then the queued message runs. The status bar shows the queue depth. `Esc`
-interrupts the running turn but leaves the queue intact. A message that arrives
-while a turn is running — typed, handed over by another channel, or input to a
-headless window — is delivered to that turn at the next iteration boundary.
+A message sent while a turn is running waits in the queue. The running turn
+takes it at its next iteration boundary and folds it into that turn; a message
+the turn does not reach runs as its own turn when its place comes. The status
+bar shows the queue depth. `Esc` interrupts the running turn but leaves the
+waiting messages intact.
+
+### The plan
+
+The model can keep a plan for the work in front of it. Each item is one line of
+text with a status — `pending`, `active`, `done` or `blocked` — and the model
+writes the whole list with `plan_write`. The list rides the `[TURN-PROMPT:{…}]`
+marker at the start of every turn, so a context rebuild cannot drop it, and the
+strip above the prompt shows it while there is one, scrolling when the plan is
+longer than the strip. The statuses are the model's
+own claims, not the harness's observations: nothing in slife2 derives one from a
+tool call. The plan is stored as `plan.yaml` in the conversation's own directory;
+an empty write removes it.
 
 ### Model selection
 
@@ -390,15 +395,22 @@ Selecting one calls the same `model_switch` tool the model can call. The
 conversation keeps its history and moves to the new model on its next turn; a
 turn in progress finishes on the model it started with.
 
-### Watching a subagent
+### Watching a subagent or agent task
 
-`Ctrl+O` lists the subagents this agent has made and opens a read-only view of
-one. The view shows the stored conversation and then the live turn — including a
-turn already in progress when you open it. `Esc` returns. The view is read-only:
-watching does not make you the subagent's window, the prompt is not shown, and an
-approval request is not put to you. In the watched conversation the message that
-woke it wears `Agent(<name>)>`; a message from a sibling wears
-`Subagent(<name>)>`.
+`Ctrl+O` lists the subagents this agent has made and the agent tasks it is
+running, and opens a read-only view of the one you choose. The view shows the
+stored conversation and then the live turn — including a turn already in
+progress when you open it. A task has no stored conversation: its view opens
+with the description it was given, then its one turn. `Esc` returns. The view
+is read-only: watching does not make you the subagent's window, the prompt is
+not shown, and an approval request is not put to you. In the watched
+conversation the message that woke it wears `Agent(<name>)>`; a message from a
+sibling wears `Subagent(<name>)>`; a task's words wear `AsyncTask(<name>)>`.
+
+Only running tasks are offered. A task that stops between the picker and the
+choice opens on its final status and the sentence its ending carried — a task
+records nothing, so there are no events left to replay. Watching never makes a
+task finished: its answer still reaches the conversation by hand-over.
 
 ### Restoring a conversation
 
@@ -407,11 +419,13 @@ not start a new conversation. The transcript is restored with its timestamps,
 tool calls, and results; reasoning is folded where it was folded live.
 
 The status bar reports the context size left by the last model call and its
-fraction of the model's window. Before each turn, a note names what the context
-decision kept and what it recalled. It also reports `tools 26/358`: the hub's
-loaded set, then the catalogue's size. Skills, jobs, and CLI entries count in
-the total, and so do the tools of a server that is down; the loaded half is what
-the next request carries. Both come from the same ask.
+fraction of the **prompt budget** (the model's window minus its `max_tokens`,
+which the provider counts against the same window). At the start of each turn, `_context_rebuild`'s
+answer names what the context decision kept and what it recalled. It also
+reports `tools 26/358`: the hub's loaded set, then the catalogue's size. Skills,
+jobs, and CLI entries count in the total, and so do the tools of a server that
+is down; the loaded half is what the next request carries. Both come from the
+same ask.
 
 ### Images
 
@@ -450,33 +464,33 @@ a reference. slife2 reads only `slife2.yaml`.
 
 `AGENTS.md` sits beside the configuration and is required as well. It is the
 model's guide to its tools, included in the system prompt every conversation
-opens with; an edit reaches the next conversation. The installer seeds it under
-the configuration's rule, writing `AGENTS-default.md` when your copy differs.
+opens with. It is the system's deliverable, not a file to edit: a reinstall
+replaces it, and there is no `AGENTS-default.md`. A prompt addition of your own
+belongs in a template named by `agent.system_prompt`.
 
 `slife2.yaml` is safe to check in. It should contain no secrets; every credential
-is a `${VAR}` or `keyring:` reference resolved at runtime.
+is a `${VAR}` reference resolved at runtime.
 
 ### Sections
 
 | Section | Purpose |
 |---|---|
-| `servers:` | Address and port of each plugin server. Defaults are used when absent. |
-| `providers:` | Chat providers and their models. |
-| `default:` | The model a new conversation starts on, as `provider/model`. |
-| `agent:` | The iteration cap and the system-prompt template. |
-| `agent-task:` | `max_running`, the number of background tasks per agent. |
-| `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
-| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes, each with an optional `rerank_model` for the recall's rerank stage. |
-| `context:` | Limits for the context decision. |
-| `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
-| `tool_result:` | Token budget for a single tool result. |
+| `providers:` | Chat providers and their models; `providers.default:` names the model a new conversation starts on, as `provider/model`. |
+| `embeddings:` | Embedding providers used by the turn, tool, and cabinet indexes; `embeddings.default:` selects the one in use, and each may name an optional `rerank_model` for the recall's rerank stage. |
+| `media:` | Image, video, speech, and transcription providers. |
+| `file-tunnel:` | The public-URL provider for local files; `file-tunnel.default:` selects it. |
 | `mcp:` | External MCP servers (stdio or HTTP). |
 | `rest-api:` | OpenAPI documents exposed as tools. |
 | `cli:` | Commands already installed on the machine. |
 | `skills:` | Environment for playbooks under `skills/`. |
-| `media:` | Image, video, speech, and transcription providers. |
-| `file-tunnel:` | The public-URL provider for local files. |
+| `agent:` | The iteration cap and the system-prompt template. |
+| `context:` | Limits for the context decision. |
+| `agent-task:` | `max_running`, the number of background tasks per agent. |
+| `subagent:` | `max_running`, and the broker and `org` for the local subagent network. |
 | `peer_agent:` | The remote peer-agent network. |
+| `tool_load:` | The loaded-tool cap, and the tools that start loaded and are never evicted. |
+| `tool_result:` | Size budget for a single tool result, in UTF-8 bytes. |
+| `servers:` | Address and port of each plugin server. Defaults are used when absent. |
 
 There is no `wechat:`, `cabinet:`, `schedule:`, or `tui:` section. A WeChat login
 is created by scanning a QR code and stored under the agent's directory. The
@@ -485,27 +499,29 @@ data they hold.
 
 ### Secrets
 
-A value may be a literal string; `${VAR}`, resolved through the shell
-environment, then [credstore](https://pypi.org/project/credstore/), then an
-optional literal default (`${VAR:-default}`); or a `keyring:<service>/<key>`
-reference, resolved against the OS keyring.
+A value may be a literal string, used as written; or `${VAR}`, resolved through
+the shell environment, then [credstore](https://pypi.org/project/credstore/)'s
+OS keyring.
 
 **Only credstore-managed secrets are protected from output.** A credential
-slife2 resolves from credstore — a `keyring:` reference, or a `${VAR}` the store
-answers — is shown masked (first four and last four characters when at least as
-many stay hidden, otherwise `***`) in tool results, tool listings, and log lines.
+slife2 resolves from credstore — a `${VAR}` the store answers — is shown masked
+(first four and last four characters when at least as many stay hidden,
+otherwise `***`) in tool results, tool listings, and log lines.
 A value shorter than eight characters is not registered. An environment variable
 or a literal is the operator's own. Keep every secret in credstore: it is the one
 store whose values slife2 masks everywhere.
 
-Resolution is lazy and lenient. An unresolved reference is left verbatim, so a
-missing key fails at the API call where the error can name it.
+Resolution is lazy and lenient. A provider or media call refuses before use when
+its credential did not resolve. A tool server's `env:` or `headers:` entry that
+still holds its reference is omitted with a warning, so the child's own missing-key
+policy decides: some servers run keyless, others refuse in their own words.
 
 ### Example
 
 ```yaml
 agent:
   max_iterations: 0          # 0 or absent means no cap
+  compact_at: 0.9            # of the prompt budget (window - max_tokens); 0 disables
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -517,21 +533,20 @@ subagent:
   broker: {host: localhost, port: 1883}
 
 context:
-  ceiling: 0.8               # total the kept + recalled context is topped to
+  ceiling: 0.8               # of the prompt budget (window - max_tokens)
   recall_page_limit: 80       # candidates per recall leg; fusion is uncut
   min_similarity: 0.52       # above the embedding model's noise floor
   keyword_weight: 1.0        # weighted RRF; the meaning leg is always 1.0
-  rerank_min_score: 0.1      # its score floor, 0-1; 0 keeps all it returned
-  timeout: 20.0              # seconds for the discriminator call
+  rerank_min_score: 0.3      # its score floor, 0-1; 0 keeps all it returned
 
 tool_load:
   threshold: 100             # loaded tools before the least recently used go
   autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
-             _check_new_input, skill_use, check_async, cancel_async,
-             turn_read]                                # and never evicted
+             _check_new_input, _turn_compact, _context_rebuild, skill_use,
+             check_async, cancel_async, turn_read]    # and never evicted
 
 tool_result:
-  tokens: 8000               # per-result budget; minimum 512
+  bytes: 32768               # per-result budget; minimum 2048
 
 mcp:
   arxiv:
@@ -575,7 +590,7 @@ its own tools:
 | `cli:` | `cli_get`, `cli_set`, `cli_list`, `cli_remove`, `cli_set_enabled` |
 | `skills:` | `skill_draft`, `skill_set`, `skill_edit`, `skill_list`, `skill_remove`, `skill_set_enabled` |
 | `jobs/` (a folder) | `job_set`, `job_list`, `job_read`, `job_run`, `job_remove` |
-| `providers:` and `default:` | `model_get`, `model_set`, `model_list`, `model_remove`, `model_switch` |
+| `providers:` (including its `default:`) | `model_get`, `model_set`, `model_list`, `model_remove`, `model_switch` |
 
 All writes go through one module (`slife2.libs.host.configfile`) under a
 cross-process lock. The write preserves comments, and the result is validated by
@@ -586,31 +601,68 @@ caller is told why.
 `rest-api` and `cli`, read the matching `*_get` first: it returns the whole
 object, `*_set` takes it back with every field required, and a field left out is
 a schema error rather than a removal. `set_enabled` changes only `enabled`.
-There is no approval gate before a write; in particular, `mcp_set` with a
-`command:` records a program slife2 will start.
+There is no approval gate before a write.
 
 ## Capabilities
 
 ### Conversation and memory
 
-A conversation does not accumulate an unbounded context. Before each turn,
-`slife2-context` makes one model call that decides which turns to keep and which
-to recall from the turn log; the turn runs on the two selections in time order.
-If a recall matches more than fits, only what fits is returned. A failed decision
-keeps the context in hand; a missing turn store fails the turn.
+A conversation does not accumulate an unbounded context. At the first boundary
+of each turn, the harness asks the decision model for the selection — one forced
+`_context_rebuild` call — and then calls the tool with those arguments: which
+historical turns to keep and which to recall from the turn log; the turn runs on
+the two selections in time order, followed by the turn itself. The turn running
+is never part of the selection. The model can call `_context_rebuild` itself
+with `mode`/`turn_ids`/`recall` — the same schema, applied as it came, with no
+decision call inside the tool — and
+the answer carries an estimate of the context the turn runs on from there. If a recall matches more than fits, only what fits is
+returned. **The budget is the prompt's, not the window's**: a provider counts
+the prompt and the request's `max_tokens` against one window, so the cap is
+`context.ceiling` of the window minus that completion request. A selection
+heavier than the cap — including one a collapse or restart restored — is cut
+from its oldest turns until it fits, and the answer's `fitted` count says how
+many. A failed decision keeps the context in hand and is not asked again that
+turn; a missing turn store fails the turn.
+
+`_context_rebuild` and `_turn_compact` are the two decision tools: the harness
+asks `decide` / `select_live` for the arguments and calls the tool with them,
+and the model's own call supplies them itself. The tool checks the selection; a
+failure is a tool error the agent reads and can correct.
+
+A turn that grows past `agent.compact_at` of the prompt budget (default 0.9)
+also drops what it no longer needs from its own model context. `_turn_compact`
+is a view, not an edit: the live view annotates the person's messages and the
+tool results with their ids (`[MESSAGE:{"id": …}]`), so the model can name the
+ids to drop itself, and the harness's automatic call asks the selector first;
+the answer says how many left. A selection that names an id the view does not
+offer is refused with the reason, so the model can correct it while the view
+stays whole; a tool exchange named in part goes as a whole, call and results
+together. The turn log keeps every message, the next turn starts from the full
+conversation, and a `_context_rebuild` starts the view over. A decision that
+keeps everything or fails stops the automatic pass for the rest of the turn;
+the model can still call `_turn_compact` itself, and a later drop resumes the
+pass.
 
 The model browses its history with `turn_list`, searches it by what a turn was
 about with `turn_search`, reads one whole with `turn_read`, and writes a summary
 and tags with `turn_summarize`. `turn_list` is newest first, one line per turn,
 with `since`/`until` accepting an ISO date or a phrase such as `yesterday`, and
 `limit`/`offset` paging against `total`. `turn_search` takes the same window and
-returns the same line plus a `similarity` score; its `query` words rank exact
-matches first but are not a filter. None of the tools takes an agent argument: a
-model reads its own history only.
+returns the same line plus a `similarity` score; its `keywords` rank exact
+matches first but are not a filter. It searches the whole log by default;
+`exclude_context: true` leaves out the turns the conversation is already running
+on. None of the tools takes an agent argument: a model reads its own history
+only.
 
-Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now` and
-`token-usage`; it is prompt text and is not stored. Each turn in a rebuilt
-context carries a `[TURN:{…}]` footnote naming its id, channel, and span.
+`turn_search`, `cabinet_search` and `tool_search` share one spelling: they take
+`keywords` and `sentences`, and answer `results` with `best`, `confidence`,
+`browsed` and `limit` beside it. `confidence` is `sure`, `weak` or `none` on a
+ranked page and `null` on a browse.
+
+Each turn opens with a `[TURN-PROMPT:{…}]` marker carrying `now` and, when the
+conversation has one, `plan`; it is prompt text and is not stored. Each turn in
+a rebuilt context carries a `[TURN:{…}]` footnote naming its id, channel, and
+span.
 Capitalized markers are harness annotations; a marker that reads as a word, such
 as `[Wechat:{…}]`, was written by a sender and is stored with the message.
 
@@ -649,14 +701,17 @@ yet"; retry it in a few seconds rather than searching for a replacement.
 A restart restores what was left: the conversation's context, and the tool list
 as it stood. The loaded set lives in the catalogue, not in a process; only a
 change to `tool_load.autoload` alters it, and that only adds. The list is bounded
-by `tool_load.threshold` (default 100). Over the limit, the least recently
-called tools are unloaded; nothing in `tool_load.autoload` is ever evicted, and
+by `tool_load.threshold` (default 100). Over the limit, the tools least recently
+used or loaded are unloaded; nothing in `tool_load.autoload` is ever evicted, and
 the model cannot unload one of those names either. Removing a name from the list
 does not unload it: it only stops being protected. The trim happens at a turn
 boundary and is written into the conversation as a tool call and its result.
 
 Tool names: a tool from an `mcp:` entry is `{server}__{tool}`, for example
-`arxiv__arxiv_search_papers`; a plugin's own tools use bare names.
+`arxiv__arxiv_search_papers`; a plugin's own tools use bare names. Two tools
+that would present one name — another source's, or two remote names that differ
+only in characters the provider's alphabet replaces — are refused at the
+source; one never silently shadows the other.
 
 A tool result is a JSON object, except for the two answers whose text is the
 thing itself: `_check_new_input` returns a person's message verbatim, and
@@ -664,7 +719,7 @@ thing itself: `_check_new_input` returns a person's message verbatim, and
 `{"<noun>": [], "total": N, "limit": L, "offset": O}`; `total` says whether
 another page exists. A refusal or a miss raises a `ToolError`, which the harness
 reports as a failed call with the reason. No answer is intended to exceed
-`tool_result.tokens`; an output that would exceed it is stored as a dump (see
+`tool_result.bytes`; an output that would exceed it is stored as a dump (see
 [Cabinet](#cabinet)).
 
 #### Tool call options
@@ -674,8 +729,8 @@ advertised schema and stripped before dispatch.
 
 | Parameter | Effect |
 |---|---|
-| `_timeout` | Seconds for this call. It overrides the tool's default. `0` or a negative value means "use the default", never "no limit". A tool that declares its own `timeout` argument enforces it itself. If neither applies, the call runs until it finishes. |
-| `_async` | Run the call in the background. The model receives a `task_id`; the result arrives with an `[AgentToolResult:{…}]` marker on the `async-tool:<tool>` channel. `check_async` reports the state; `cancel_async` abandons it. The result budget still applies. An agent task's loop has no `_async`. |
+| `_timeout` | Seconds for this call. It overrides the tool's default. Any value that is not a positive, finite number — `0`, a negative, text — fails the call; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. If neither applies, the call runs until it finishes. |
+| `_async` | Run the call in the background. The model receives a `task_id`; the result arrives with an `[AgentToolResult:{…}]` marker on the `async-tool:<tool>` channel. `check_async` reports the state; `cancel_async` abandons it. The result budget still applies. An agent task is one turn: its prompt tells the model not to use `_async` or start another task. |
 | `_approve` | Ask the user before running. The terminal draws an inline row (`y` approves, `n` or `Esc` denies) and answers with `answer_approval`. If the channel has no person behind it, the call runs without asking. A caller that can answer says so with `watched=true`. |
 
 #### Skills and commands
@@ -742,8 +797,10 @@ The `media:` section provides four capabilities:
 
 - `generate_image` — draw an image from a prompt.
 - `generate_video` — render a video from a prompt or an image.
-- `text_to_speech` — write speech to an audio file.
-- `transcribe_audio` — transcribe an audio file, paged by `offset` and `limit`.
+- `text_to_speech` — say `text`, or read a text file named in `input`, into an audio file.
+- `transcribe_audio` — transcribe the audio file named in `input`; `output` writes the transcript to the path you name (a relative path is relative to this conversation's work directory) and answers that path, while without `output` the transcript is the answer and a long one is kept as a dump.
+
+Each generation tool writes into the agent's media directory by default; `output` names the file instead (a relative path is relative to this conversation's work directory). Every tool answers with the file's path as text, or — for `transcribe_audio` without `output` — the transcript.
 
 Each model declares what it is for:
 
@@ -768,10 +825,11 @@ The supported `api:` values are `dashscope-aigc` (images, video, speech,
 transcription) and `openai-images` (image generation only). Choosing a model that
 does not support the requested kind is refused.
 
-Generated files are written under `<data>/agents/<agent>/media/`. A `folder`
-argument creates a subdirectory inside that root; a path outside it is refused.
-A long-running video call that exceeds its timeout is refused with the provider's
-job id rather than its result.
+Generated files are written under `<data>/agents/<agent>/media/` by default. Each
+generation tool also takes an `output` path: a relative one is relative to the
+conversation's work directory, an absolute one is used as written, and the artifact
+is written there instead. A long-running video call that exceeds its timeout is
+refused with the provider's job id rather than its result.
 
 ### File tunnel
 
@@ -785,7 +843,12 @@ unexpose_local_image(token)   -> the URL stops working
 The file is served from its original location. A link stops working when the file
 changes, when `unexpose_local_image` is called, or when the process exits. A share
 outlives the turn that created it. Private keys, `.env` files, and saved
-passwords are refused by name.
+passwords are refused by name. `path` is an absolute path, or one relative to the
+data directory — where the agent's own tools run.
+
+The tunnel is pointed at a loopback listener that serves only
+`/share/<token>`; the MCP endpoint is not published, so knowing the hostname
+does not let a caller run tools.
 
 Three providers are supported. Exactly one is active; the others may stay
 configured and inert.
@@ -832,7 +895,7 @@ period are what the update passes, and an omitted one is cleared.
 A dump is a tool output too large for the conversation. The output is stored
 whole **in its file**, keyed by the tool call id; the cabinet row is the
 address and holds no copy of the text, so a large output is never stored twice.
-The conversation carries its head within `tool_result.tokens` — a marker with
+The conversation carries its head within `tool_result.bytes` — a marker with
 the file's size and its path relative to the data directory (where the agent's
 own tools run, so it survives moving the home). Nothing is paraphrased, and
 nothing is counted: the size is the mirror file's `stat`, not a pass over the
@@ -883,10 +946,12 @@ is not the agent's to control, and meaning search over them is deferred until a
 RAG pass over their contents exists. `cabinet_summarize` writes a description
 for a document; a file's description is keyword text and re-embeds nothing,
 while a dump or an image is not described because it is not searched.
-`file_save` copies a local file (never moving it) or fetches an `http(s)` URL. A
-fetched URL reaches the public internet only: credentials, `localhost`, and
-literal addresses that are not globally routable are refused, and the response
-is capped at 50 MiB.
+`file_save` copies a local file (never moving it) or fetches an `http(s)` URL.
+One call may name several sources, and each is stored or refused on its own —
+the answer lists what was saved and what failed, with the reason. A fetched URL
+reaches the public internet only: credentials, `localhost`, and literal
+addresses that are not globally routable are refused, and the response is
+capped at 50 MiB.
 
 ### WeChat
 
@@ -924,8 +989,10 @@ not, and the plugin is one shared process.
 
 ### Agent tasks
 
-An agent task is a separate loop of the same agent, started with a name and a
-description and answered later by a message in the same conversation.
+An agent task is a separate turn of the calling conversation — the agent's own or
+one of its subagents' — started with a name and a description and answered later
+by a message. It is one turn: its prompt tells it not to use `_async` or start
+another task, because a result arriving later has nowhere to go.
 
 | Tool | Purpose |
 |---|---|
@@ -934,13 +1001,18 @@ description and answered later by a message in the same conversation.
 | `agent_task_list` | List this agent's tasks, running first. |
 | `agent_task_cancel` | Stop a task and report its state after the call. |
 
-A task runs as the agent, with the same system prompt, model, tools, and context
-decision. It does not have the turn that started it, so the description must
-restate the relevant context. Its answer arrives with an
+A task runs as the conversation that started it: an agent's task uses the agent's
+system prompt, model, tools, and its own context decision; a subagent's task uses
+the subagent's prompt, role, and model. **The context is a clone**: the task
+reads the conversation's context and chooses what its turn runs on, and the
+conversation's stored context is unchanged when the task ends. It does not have
+the turn that started it, so the description must restate the relevant context.
+Its answer arrives with an
 `[AgentTaskResult:{…}]` marker on the `agent-task:<name>` channel and is drawn as
-`AsyncTask(<name>)>`. If no window is showing the conversation when it stops, the
-task ends `failed` — the answer is the product and is not kept — and the log
-says why.
+`AsyncTask(<name>)>`. A subagent has no window, so a subagent's task answer is
+delivered to its agent's conversation. If no window is showing the agent when it
+stops, the task ends `failed` — the answer is the product and is not kept — and
+the log says why.
 
 ```yaml
 agent-task:
@@ -948,8 +1020,8 @@ agent-task:
 ```
 
 `max_running` is the only key the section owns; everything else comes from
-`agent:`. A task may start another task, so `max_running` bounds concurrency but
-not total work over time.
+`agent:`. A task's prompt tells it not to start another task — it is one turn,
+like `_async`. `max_running` bounds concurrency, not total work over time.
 
 ### Scheduled tasks
 
@@ -957,9 +1029,11 @@ A scheduled task is a name, a description, and a cron expression written by the
 model. `slife2-schedule` fires it while slife2 is running. When a task comes due,
 the scheduler asks whether a window is showing that agent: a window that is not
 there ends the run as `missed` — the answer would have nowhere to go — and a
-window that is there starts the work directly as an agent task. No turn is
-opened and no model call is spent. A terminal that cannot be asked, or a dispatch
-that fails, ends the run as `failed` with the reason recorded.
+window that is there starts the work directly as an agent task. Each run's work
+is an agent task named `<task>@<due time>`, so two overlapping runs of one task
+are two tasks rather than one name answering for both. No turn is opened and no
+model call is spent. A terminal that cannot be asked, or a dispatch that fails,
+ends the run as `failed` with the reason recorded.
 
 | Tool | Purpose |
 |---|---|
@@ -981,8 +1055,11 @@ to 30 seconds after its due moment, and a finished run closes on the next pass;
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run that never started is `missed`, one that names
 a task is `failed` — and the poll records the newest missed fire for each task.
-`schedule_runs(status="missed")` and `status="failed"` list them; either can be
-re-run with `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
+A run caught inside the dispatch is resolved against the agent-task plugin by
+its name: a running task is adopted, an ended one supplies the ending, and one
+the plugin does not hold is `failed`. `schedule_runs(status="missed")` and
+`status="failed"` list them; either can be re-run with
+`schedule_run_now(name, due_at)` or closed with `schedule_run_skip`.
 
 The ledger is `<data>/agents/<agent>/schedule.db`. There is no configuration
 section. A task's `timezone` is an IANA name; leaving it out uses the machine's
@@ -1083,13 +1160,20 @@ A subagent is an agent that belongs to another agent. It has the maker's tool
 set, its own role-specific system prompt, and its own conversation, but no
 process, no window, no claim on an agent name, and no external identity. It is
 reached only on the local subagent network and runs when something sends it a
-message. `subagent_set` and `subagent_remove` refuse a subagent caller.
+message. `subagent_create` and `subagent_remove` refuse a subagent caller. A
+subagent is a persistent agent with a memory of its own; for one piece of work
+beside the conversation, use an agent task — it runs on a clone of the maker's
+context and answers with one message.
 
-A subagent is created with `subagent_set` and removed with `subagent_remove`.
+A subagent is created with `subagent_create` and removed with `subagent_remove`.
 Once created, it is addressed over the local network with the same operations as
 a peer agent, under `subagent_*` names: `subagent_send_message`,
-`subagent_cancel_task`, `subagent_list`, `subagent_task_list`,
-`subagent_broadcast`, and the six group tools. Membership is the directory set,
+`subagent_task_response`, `subagent_continue_task`, `subagent_cancel_task`,
+`subagent_list`, `subagent_task_list`, `subagent_broadcast`, and the six group
+tools. `subagent_cancel_task` settles the task as cancelled and tells the
+member's model, which stops working on it and owes no response; `subagent_remove`
+interrupts a turn it finds and records every task to and from it as cancelled
+before deleting. Membership is the directory set,
 so a send naming anything that is not a member is refused before it is published.
 Group traffic on this network wears `[SubagentGroup:…]` and the
 `subagent_group:<group>:<sender>` channel, whether the sender is the maker or a
@@ -1102,16 +1186,10 @@ the two networks' groups never overwrite each other.
 | `name` | The subagent's name and directory. |
 | `model` | `provider/model`; empty uses the maker's model. |
 | `role` | A word included in the subagent's prompt. |
-| `fork` | Copy the maker's current conversation as the starting point. A fork's turns are not stored, and it lives only for the session. |
 
-A non-fork subagent lives in `agents/<maker>/subagents/<name>/` with its own
-`turns.db`, `subagent.yaml`, cabinet, and media directory. A fork has only the
-`subagent.yaml` record: it keeps its conversation in memory as a copy of the
-maker's, reads the maker's turn log for context, and shares the maker's cabinet
-and media. A fork is session-lived; the next server start removes every fork
-record. **A fork cannot be pulled into a group**: `subagent_group_set` refuses
-one, and its group traffic is dropped. Scheduling stays with the agent. A
-subagent cannot create or remove a subagent.
+A subagent lives in `agents/<maker>/subagents/<name>/` with its own `turns.db`,
+`subagent.yaml`, cabinet, and media directory. Scheduling stays with the agent.
+A subagent cannot create or remove a subagent.
 
 Removing a subagent first tells the local network to release its place, then
 stops its loop, then deletes its directory. If the network notification cannot be
@@ -1153,8 +1231,8 @@ A data directory (a **home**) contains:
       media/                   generated images, video, and audio
       wechat.yaml              this agent's WeChat login
       subagents/
-        <name>/                a non-fork subagent's turns.db, subagent.yaml,
-                               cabinet/ and media/; a fork has only the record
+        <name>/                a subagent's turns.db, subagent.yaml,
+                               cabinet/ and media/
 ```
 
 The tool catalogue sits beside the agent directories because it belongs to the
@@ -1234,8 +1312,7 @@ The test lanes, CI matrix, project structure, and the plugin registry are in
   not sandboxed. The top-level tool call is the approval point.
 - There is no approval gate before a configuration edit, including `mcp_set`
   with a `command:` that records a program slife2 will start.
-- An agent task may start another agent task; `agent-task.max_running` bounds
-  concurrency, not total work over time.
+- `agent-task.max_running` bounds concurrent tasks, not total work over time.
 
 ## License
 

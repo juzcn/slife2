@@ -103,9 +103,10 @@ from slife2.libs.host.config import (
     load_cached,
     net_settings,
 )
-from slife2.libs.host.paths import forked, home, home_key, in_home, subagent_dirs
+from slife2.libs.host.paths import home, home_key, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     close_server,
     conversation_reader,
     describe,
@@ -114,6 +115,7 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
+from slife2.libs.plugin.vocabulary import FORGET, JOIN
 from slife2.plugins.a2a import groups as group_store
 from slife2.plugins.a2a import mesh
 from slife2.plugins.a2a.broker import ensure as ensure_broker
@@ -170,21 +172,11 @@ PEER_GROUP_REMOVE = REMOTE.tool(GROUP_REMOVE)
 PEER_GROUP_LEAVE = REMOTE.tool(GROUP_LEAVE)
 PEER_GROUP_SEND_MESSAGE = REMOTE.tool(GROUP_SEND_MESSAGE)
 
-#: The tool that puts an agent *on* the mesh — and it is not the model's.  A
-#: window calls it and holds it open; see `join` for why the mesh's membership
-#: is a call rather than a state the plugin keeps.  Spelled here because a name
-#: crossing a process boundary is written in two places
-#: (`slife2.tui.client`), like the tui plugin's `attach` and `submit`.
-JOIN = "join"
-
-#: The other call that is not the model's: **give up a member's place on the
-#: mesh** (`forget`).  Its caller is the agent server, in the middle of
-#: `subagent_remove` — a member can stop existing while this process is serving
-#: it, and a directory that is gone cannot unsubscribe anything.  Spelled there
-#: too, for the reason `JOIN` is spelled in `slife2.tui.client`: a name crossing a
-#: process boundary is written in two places, and the pair is held together by
-#: those two comments.
-FORGET = "forget"
+# The two calls that are not the model's, imported from
+# `slife2.libs.plugin.vocabulary`: `join` puts an agent *on* the mesh and is
+# held open by a window (`slife2.tui.client`); `forget` gives up a member's
+# place and is called by the agent server in the middle of `subagent_remove`.
+# A name crossing a process boundary is written once, in the vocabulary module.
 
 #: The three reasons a member is on the mesh (`Session.reasons`), and they differ
 #: in whether they ever go away.  `USED` is a tool's: it is added when a call
@@ -213,28 +205,17 @@ MEMBER = "member"
 #: word the marker below opens with.
 CHANNEL = REMOTE.channel
 
-#: What the marker opens with.  A constant because the marker is *read* as well
-#: as written: stored text carries it into a transcript, and the window takes it
-#: back off by this string rather than by a second copy of the spelling.
-#:
-#: **Word-shaped, like every other name this build writes into a row.**
-#: Capitals are the convention for the *other* kind of bracket — `[TURN:{…}]`,
-#: which says "this is what the process knows about the conversation, not what
-#: was said" (`slife2.plugins.wechat.server`'s module docstring, SDD §5.5).
-#: This one *is* what was said: it goes into the turn's row and comes back out
-#: of it verbatim, so capitals would tell the model the opposite of the truth
-#: about it.  What is *not* renamed is anything that names
-#: the plugin — the `a2a` channel and its config key — because those are this
-#: plugin's own name rather than a word in somebody's conversation.
+#: The marker's spelling is `Net.marker`'s (`config.REMOTE`), and the window
+#: strips it from the same table rather than through a constant here: the name
+#: is written by `marker` below and read by `slife2.tui.widgets.MARKERS`.
 #:
 #: **`PeerAgent`, because `Agent` alone is the one word this marker must not
 #: say.**  Its `from` field is a peer and never the receiver, for the reason the
 #: marker's own docstring gives — receivers read the sender as themselves — and
-#: a name that says "an agent did this" reintroduces exactly
-#: that ambiguity on the line where the model is told who spoke.  `Peer` is what
-#: settles it, and it is the word the window's bubble uses too
+#: a name that says "an agent did this" reintroduces exactly that ambiguity on
+#: the line where the model is told who spoke.  `Peer` is what settles it, and
+#: it is the word the window's bubble uses too
 #: (`slife2.tui.widgets.channel_prefix`).
-MARKER_PREFIX = REMOTE.marker
 
 #: How many inbound messages may be waiting for a hand-over.  A peer flooding a
 #: conversation must not grow this process without limit.  Past the bound the
@@ -251,10 +232,6 @@ MAX_QUEUED = 500
 #: order.  It is not the agent server's constant because a plugin does not import
 #: another plugin's internals: 8 is the smaller number on purpose.
 MAX_MEMBER_TURNS = 8
-
-#: What a call that does not say which agent it is for is told.  A shared process
-#: cannot guess it: one `slife2-a2a` serves every agent, and a mesh identity is
-#: the agent's own name.
 
 
 def marker(
@@ -326,8 +303,8 @@ def peer_phrase(net: Net, peer: str) -> str:
 
     **`Peer` is the remote network's word and the subagent network's is nothing**,
     which is why this is a function rather than a hole in a template — the hole
-    would be empty.  The remote network needs the word for the reason
-    `MARKER_PREFIX` is `PeerAgent`: its `from` must not be read as the receiver.
+    would be empty.  The remote network needs the word for the reason its marker
+    is `PeerAgent`: its `from` must not be read as the receiver.
 
     On the subagent network the same sentence has two possible readers — a maker
     reading about one of its subagents, and a subagent reading about its maker or
@@ -371,12 +348,6 @@ class Session:
     #: agent`), so it is also what a delivery that is not the window's has to
     #: address its turn with (`run_turn`).
     subagent: str = ""
-    #: Whether this member was made as a **fork** — a temporary copy of its
-    #: maker's conversation.  Read once when the session is built
-    #: (`paths.forked`), because the record does not change while a session
-    #: lives.  A fork is never a group member: it ends with the next start and
-    #: would leave a name behind that its maker's roster still addressed.
-    fork: bool = False
     #: The groups this member knows on this network, loaded from the member's
     #: own groups file — `groups.yaml` for the peer network and
     #: `subagent-groups.yaml` for the local one
@@ -406,6 +377,10 @@ class Session:
     #: **A count per reason rather than a set of them**, so two holders of one
     #: reason are two reasons to stay (`hold`).
     reasons: dict[str, int] = field(default_factory=dict)
+    #: How many reasons have been taken, ever.  The departure timer reads it to
+    #: tell a holder that was already there when the wait began from one that
+    #: arrived during it — see :meth:`_depart`.
+    holds: int = 0
 
     def hold(self, reason: str) -> None:
         """Add one reason for this agent to be on the mesh: one more *holder*.
@@ -419,6 +394,7 @@ class Session:
         holder something.
         """
         self.reasons[reason] = self.reasons.get(reason, 0) + 1
+        self.holds += 1
 
     def release(self, reason: str) -> bool:
         """Give up one holder of *reason*.  True when it was the last one."""
@@ -448,26 +424,45 @@ class Session:
         """
         if self.departure is not None and not self.departure.done():
             return
-        self.departure = asyncio.create_task(self._depart())
+        # The baseline is taken here, under the caller's lock, and not when the
+        # task first runs: a call that takes the mesh between the two is an
+        # arrival during the wait, and a baseline read a loop turn later would
+        # count it as one that was already there.
+        self.departure = asyncio.create_task(self._depart(self.holds))
 
-    async def _depart(self) -> None:
-        """The wait `leave_later` starts: leave once no window is held."""
-        await asyncio.sleep(_T.timeouts.pacing.mesh_departure)
-        async with self.lock:
-            if self.reasons.get(WINDOW):
-                return  # the window came back; its `join` is the presence again
-            # The callers that held `USED` belonged to the process that has just
-            # gone; a reason nothing can act on is not a reason to stay.
-            self.reasons.pop(USED, None)
-            try:
-                await self.mesh.disconnect()
-            except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left (SDD §9.2)
-                logger.error(
-                    "a2a %s: the mesh would not leave the broker as its window "
-                    "left, so the agent may stay advertised: %s",
-                    self.agent,
-                    e,
-                )
+    async def _depart(self, taken: int) -> None:
+        """The wait `leave_later` starts: leave once no window is held.
+
+        **A reason taken during the wait restarts it.**  That holder is a call
+        this process accepted after the window went — a send whose retry ladder
+        is in flight — and the teardown at the original deadline would cancel a
+        message the caller was told was sent.  Giving it its own window lets the
+        send finish; the next deadline still leaves, so a call cannot keep an
+        unreachable card up for ever.  `taken` (the count when the wait began)
+        is what tells that arrival apart from the `USED` holders that were
+        already there.
+        """
+        while True:
+            await asyncio.sleep(_T.timeouts.pacing.mesh_departure)
+            async with self.lock:
+                if self.reasons.get(WINDOW):
+                    return  # the window came back; its `join` is the presence again
+                if self.holds != taken:
+                    taken = self.holds
+                    continue  # a call accepted during the wait: its own window
+                # The callers that held `USED` belonged to the process that has
+                # just gone; a reason nothing can act on is not a reason to stay.
+                self.reasons.pop(USED, None)
+                try:
+                    await self.mesh.disconnect()
+                except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the offline card is how a peer is told this agent left (SDD §9.2)
+                    logger.error(
+                        "a2a %s: the mesh would not leave the broker as its window "
+                        "left, so the agent may stay advertised: %s",
+                        self.agent,
+                        e,
+                    )
+                return
 
     def settle(self, task_id: str, outcome: str, text: str = "") -> None:
         """Settle the round a queued line belongs to, when it can.
@@ -609,7 +604,7 @@ async def run_turn(
     caller with nothing to draw.  `timeout=None` on the call because the turn's
     length is the answer's own business, and `timeout=None` on the *connection*
     because a deadline there is one on every request that crosses it, which for
-    this client is the whole turn (the agent server's own `hub()` says the same
+    this client is the whole turn (the turn runtime's own `hub()` says the same
     thing about the same trap).
 
     **What comes back is the turn's final text, and it is not a reply.**  A
@@ -659,16 +654,27 @@ async def run_turn(
             # `Exception` — and the cancellation still propagates once the close
             # has finished, so the caller's turn is cancelled as it expected.
             await asyncio.shield(close_server(peer))
-    payload = tool_payload(answer)
-    said = payload.get("text")
-    if not isinstance(said, str):
+    try:
+        payload = tool_payload(answer)
+    except UnreadableAnswer as exc:
         # **A turn nobody can read is said rather than counted as nothing.**
         # The answer is not relayed (see above), but it is the evidence that the
         # turn happened at all — so an unreadable shape is a build mismatch worth
         # a warning, and it must not read as a member that answered with silence.
+        # It is *not* raised: the call reached the conversation and the turn ran,
+        # so failing the delivery would make the caller retry a message that
+        # already landed.
         logger.warning(
             "a2a_turn_unreadable agent=%s — the turn's answer was not a shape "
             "this build can read: %s",
+            describe((agent, subagent)),
+            exc,
+        )
+        return ""
+    said = payload.get("text")
+    if not isinstance(said, str):
+        logger.warning(
+            "a2a_turn_unreadable agent=%s — the turn's answer carried no text: %s",
             describe((agent, subagent)),
             payload,
         )
@@ -857,13 +863,25 @@ def _wire(session: Session) -> None:
         )
 
     def on_peer_cancel(task_id: str, peer: str) -> None:
-        """A peer withdrew an inbound task — hand it over like any other message.
+        """A peer withdrew an inbound task — hand the withdrawal to the model.
 
-        The withdrawal is NOT a control signal: it reaches the model the same
-        way every other peer event does, and the model — the only party that
-        knows whether it is still working on that task — decides what to do with
-        it.  The one constraint rides the marker: the completion bridge died with
-        the task, so a `task_response` for it is refused.
+        **The task is settled where the withdrawal is accepted, and the work is
+        the model's to stop.**  The responder has already recorded the task
+        terminal by the time this runs (`Responder._on_cancel`), so a later
+        `task_response` for the id is refused; what the model gets instead is
+        this message, and it owes no answer.  The line reaches the conversation
+        the same way every other inbound line does — at the running turn's next
+        boundary, or as a turn of its own.
+
+        **Nothing cancels a turn, on either network.**  A peer's turn is in
+        another process and cannot be reached.  A member's turn runs in this one
+        (`run_turn`), which makes an interrupt look possible, but a turn is not
+        a task: one turn can fold in several tasks' messages, a task can outlive
+        the turn that started it, and only the model knows which of them it is
+        working on.  An interrupt would either miss the work (the task was
+        folded into another turn) or reach work nobody withdrew (another task
+        folded into this one).  Both networks say the same thing, in the same
+        envelope.
 
         **The peer is scrubbed here too**, for the reason `on_inbound_task`
         gives: a withdrawal is handed over like any other message, so its
@@ -873,7 +891,8 @@ def _wire(session: Session) -> None:
         peer = safe_name(peer)
         session.post(
             f"{marker(sender_net(session, peer), peer, task_id, type='cancel_task')}"
-            f"The sender withdrew this task — stop working on it.",
+            f"The sender withdrew this task — it is settled as cancelled, so "
+            f"stop working on it; no task_response is needed.",
             peer,
             f"a withdrawal from {peer}",
         )
@@ -910,22 +929,12 @@ def _wire(session: Session) -> None:
     def on_group_message(data: dict[str, Any]) -> None:
         """A group message: learn the roster, then hand the words to the turn.
 
-        **A fork is dropped here as well as refused at `group_set`.**  A fork is
-        a temporary copy of its maker's conversation; a stale roster that still
-        named it must not wake it for a group it can never belong to.
-
         The store is updated before delivery, so a member that missed the
         invitation has the group's name in `group_list` when it answers.  The
         marker and channel use the validated wire names verbatim — `safe_name`
         would collapse whitespace and silently rename an identity the store and
         the roster both key by.
         """
-        if session.fork:
-            logger.debug(
-                "a2a_group_message_fork agent=%s — dropped",
-                describe((session.agent, session.subagent)),
-            )
-            return
         event = group_store.parse_event(data)
         if event is None or event.kind != group_store.GROUP_MESSAGE:
             logger.warning(
@@ -954,8 +963,6 @@ def _wire(session: Session) -> None:
         spend a window line and a model's attention on bookkeeping.  The next
         group message carries the same roster anyway.
         """
-        if session.fork:
-            return
         event = group_store.parse_event(data)
         if event is None or event.kind not in group_store.GROUP_KINDS:
             logger.warning(
@@ -974,6 +981,44 @@ def _wire(session: Session) -> None:
     session.mesh.on_broadcast_event = on_broadcast_event
     session.mesh.on_group_message = on_group_message
     session.mesh.on_group_control = on_group_control
+
+
+def _delivery_failed(
+    session: Session,
+    task_id: str,
+    kind: str,
+    exc: DeliveryFailed,
+    *,
+    peer: str,
+    text: str,
+) -> None:
+    """The one rule for a hand-over that failed, applied by both writers.
+
+    **An unknown outcome leaves a task round open.**  The words may already be
+    in the conversation, so recording `rejected` would tell the peer a task it
+    is working on is dead and then refuse the model's own answer because the
+    task is terminal.  A bare message has no later answer of its own, so only a
+    task round can wait.
+
+    The two writers — the member's own turn and the window's — had a copy each,
+    and they had already drifted in what they logged around the decision.
+    """
+    logger.error(
+        "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
+        describe((session.agent, session.subagent)),
+        peer,
+        len(text),
+        exc,
+    )
+    if exc.unknown and kind != "message":
+        logger.error(
+            "a2a_delivery_unverified agent=%s task=%s — the message may have "
+            "landed, so its round stays open for the model's answer",
+            describe((session.agent, session.subagent)),
+            task_id,
+        )
+    else:
+        session.settle(task_id, mesh.REJECTED, exc.reason)
 
 
 async def _drain(
@@ -1014,6 +1059,15 @@ async def _drain(
     something this process may assume — the rejected status is what tells it.
     Nothing is softened into a state here: this plugin has no record of its own
     and no right to claim the work happened.
+
+    **Except where the outcome is unknown.**  A hand-over that did not come back
+    may already have put the words in the conversation
+    (`DeliveryFailed.unknown`), and settling that as `rejected` tells the peer a
+    task it is working on is dead — then refuses the model's answer because the
+    task is terminal.  So a task round whose delivery is unverified stays open,
+    and the model's own `task_response` is what settles it.  A bare message has
+    no later answer of its own, so it is still settled: the peer's only choice
+    is whether to re-send it.
 
     **A member's turn is delivered to its conversation, and the harness does
     not speak for the member.**  The inbound message becomes a turn there
@@ -1103,40 +1157,46 @@ async def _drain(
                     len(said),
                 )
             except DeliveryFailed as exc:
-                # **An error, because the words are the only thing that could
-                # answer `peer` and they went nowhere.**  Its own key rather
-                # than the handler's below, which is about this plugin's own
-                # fault: this one is a conversation that could not be reached.
-                # The round is settled for the same reason: the peer already
-                # has the acknowledgment and has stopped re-sending.
-                logger.error(
-                    "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
-                    describe((session.agent, session.subagent)),
-                    peer,
-                    len(text),
-                    exc,
-                )
-                session.settle(task_id, mesh.REJECTED, exc.reason)
+                _delivery_failed(session, task_id, kind, exc, peer=peer, text=text)
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - one bad turn must not end the writer
+            except Exception as exc:  # noqa: BLE001 - one bad turn must not end the writer
                 # **Not fatal, and the difference is this agent's whole mesh.**
                 # A turn that failed is one message dropped, and the round is
                 # settled so the peer learns it — the acknowledgment stopped
-                # its ladder, so nothing else would tell it.  The connection
-                # is replaced too, because the failure may have been the
-                # connection's and the next turn is what finds out.
+                # its ladder, so nothing else would tell it.  A *transport*
+                # failure replaces the connection too, because the next turn is
+                # what finds out whether it healed.  A `ToolError` is the agent
+                # server answering — the turn ran and failed — and the link is
+                # fine: dropping it here closes the connection every other
+                # in-flight member turn on this session is still using.
                 logger.exception(
                     "a2a_delivery_failed agent=%s peer=%s — that message dropped",
                     describe((session.agent, session.subagent)),
                     peer,
                 )
-                session.settle(
-                    task_id,
-                    mesh.REJECTED,
-                    "the agent's harness failed before the turn could run",
-                )
-                await drop_member_client()
+                if not isinstance(exc, ToolError) and kind != "message":
+                    # **A call that did not come back may have landed.**  A
+                    # `ToolError` is the server's own answer — the turn ran and
+                    # failed — while every other exception is a broken link
+                    # whose write may already be down the stream.  Only the
+                    # first may be settled as a rejection; the second leaves
+                    # the round for the member's own answer.
+                    logger.error(
+                        "a2a_delivery_unverified agent=%s task=%s — a transport "
+                        "failure may have landed, so its round stays open for "
+                        "the model's answer",
+                        describe((session.agent, session.subagent)),
+                        task_id,
+                    )
+                else:
+                    session.settle(
+                        task_id,
+                        mesh.REJECTED,
+                        "the agent's harness failed before the turn could run",
+                    )
+                if not isinstance(exc, ToolError):
+                    await drop_member_client()
         finally:
             member_turns.discard(asyncio.current_task())
 
@@ -1212,20 +1272,7 @@ async def _drain(
                         window_client=window_client,
                     )
                 except DeliveryFailed as exc:
-                    # **An error, because the words are the only thing that
-                    # could answer `peer` and they went nowhere.**  Its own key
-                    # rather than the handler's below, which is about this
-                    # plugin's own fault; and the round is settled, because the
-                    # peer already has the acknowledgment and its requester
-                    # ladder has stopped — nothing else would tell it.
-                    logger.error(
-                        "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
-                        describe((session.agent, session.subagent)),
-                        peer,
-                        len(text),
-                        exc,
-                    )
-                    session.settle(task_id, mesh.REJECTED, exc.reason)
+                    _delivery_failed(session, task_id, kind, exc, peer=peer, text=text)
                 else:
                     if kind == "message":
                         # A bare message owes its sender no answer, so its
@@ -1271,7 +1318,6 @@ async def _drain(
 
 
 def build_server(
-    config: Config,
     *,
     net: Net = REMOTE,
     window_client: Client | None = None,
@@ -1303,11 +1349,24 @@ def build_server(
         """This network's settings, as the config has them *now*.
 
         Read per use rather than once at build, which is `current`'s rule for
-        the model config and for the same reason: the section is a file an
-        operator edits, and a mesh that kept the address it started with would
-        be the one thing in this process that could not be corrected.
+        the model config: the section is a file an operator edits, and whether
+        this machine is on the network at all is a live answer.  A member built
+        on an older address is moved by `rebind` — the mesh is not re-pointed
+        underneath a live connection, it is replaced on the next call.
         """
         return net_settings(live(), net)
+
+    def settings_for(maker: str) -> A2ASettings:
+        """The address and namespace this maker's mesh belongs to, as the
+        config has them *now*.
+
+        Split from `mesh_for` because the two readers need it apart: building a
+        member reads it once, and an existing member compares its mesh's own
+        settings with it on every call (`rebind`).
+        """
+        found = mesh_settings()
+        org, unit = net.namespace(found, maker)
+        return replace(found, org=org, unit=unit)
 
     def mesh_for(maker: str, subagent: str = "") -> A2AMesh:
         """A member's mesh, on this network and in the mesh it belongs to.
@@ -1330,13 +1389,50 @@ def build_server(
         one for a name that never joins is a card and an in-flight table, not a
         connection.
         """
-        found = mesh_settings()
-        org, unit = net.namespace(found, maker)
-        return A2AMesh(
-            replace(found, org=org, unit=unit),
-            maker,
-            subagent=subagent,
+        return A2AMesh(settings_for(maker), maker, subagent=subagent)
+
+    async def rebind(session: Session) -> None:
+        """Move a member onto the address the config names now, if it moved.
+
+        **The caller holds the session's lock.**  That is the same lock every
+        connect and departure takes, so the mesh cannot be swapped under a call
+        deciding whether it is up.  The section is read per use, but a member is
+        built once; without this an edit reached only members built afterwards,
+        and an existing one kept the old broker and namespace until a restart —
+        two members of one network talking past each other.  The old mesh is
+        abandoned, not revived: a send on it is over, and its ladder is told so
+        like any other teardown.  A pending departure belonged to the mesh being
+        replaced and is cancelled with it.
+        """
+        wanted = settings_for(session.agent)
+        if session.mesh.settings == wanted:
+            return
+        if session.departure is not None:
+            session.departure.cancel()
+            session.departure = None
+        previous = session.mesh
+        session.mesh = A2AMesh(wanted, session.agent, subagent=session.subagent)
+        # The callbacks are the mesh's, so the new one has none until this runs.
+        _wire(session)
+        logger.info(
+            "a2a_mesh_rebound agent=%s from=%s/%s/%s to=%s/%s/%s",
+            describe((session.agent, session.subagent)),
+            previous.settings.broker_host,
+            previous.settings.broker_port,
+            f"{previous.settings.org}/{previous.settings.unit}",
+            wanted.broker_host,
+            wanted.broker_port,
+            f"{wanted.org}/{wanted.unit}",
         )
+        try:
+            await previous.disconnect()
+        except Exception as e:  # noqa: BLE001 - a teardown that carries a protocol fact is reported, not swallowed: the old card is how a peer sees this member leave that network (SDD §9.2)
+            logger.error(
+                "a2a %s: the mesh replaced by a config edit would not leave its "
+                "broker, so the agent may stay advertised there: %s",
+                describe((session.agent, session.subagent)),
+                e,
+            )
 
     async def writer_in(root: Path, session: Session) -> None:
         """Run *session*'s writer **in its own home**, for the life of this process.
@@ -1390,19 +1486,16 @@ def build_server(
         key = (home_key(where), agent, subagent)
         found = sessions.get(key)
         if found is None:
-            # Both of these resolve a home's own files — the mesh opens the
-            # member's ledger at `agents/<agent>/<ledger>`, or one level in for a
-            # subagent — so the home goes around the build rather than being read
-            # off whatever directory the daemon happens to be started in.
+            # Both of these resolve a home's own files — the member's groups
+            # file under `agents/`, one level in for a subagent — so the home
+            # goes around the build rather than being read off whatever
+            # directory the daemon happens to be started in.
             with in_home(where):
                 found = Session(
                     agent=agent,
                     net=net,
                     mesh=mesh_for(agent, subagent),
                     subagent=subagent,
-                    # A fork's record is read once; it ends with the next start
-                    # and is never a group member.
-                    fork=forked(agent, subagent) if subagent else False,
                     # **Per network**: the peer server and the local one both
                     # serve this member's directory, and one shared file would
                     # be a store each process rewrites from its own stale copy.
@@ -1438,7 +1531,6 @@ def build_server(
         (SDD §9.2): the offline card is how a peer is told this member left,
         and a failure here leaves it advertised with nobody to retire it.
         """
-        sessions.pop(key, None)
         writer, session.writer = session.writer, None
         if writer is not None and writer is not asyncio.current_task():
             writer.cancel()
@@ -1453,6 +1545,13 @@ def build_server(
                 describe((session.agent, session.subagent)),
                 e,
             )
+        # **Last, and only if it is still this session's entry.**  Popping
+        # first let a call arriving during either await build a second session
+        # and mesh for the same name while the predecessor was still connected;
+        # by identity, a successor's entry is not removed by the teardown it
+        # replaced.
+        if sessions.get(key) is session:
+            sessions.pop(key, None)
 
     async def connected(agent: str, reason: str, subagent: str = "") -> Session:
         """This member's mesh, connected — or a refusal naming why it is not.
@@ -1460,6 +1559,12 @@ def build_server(
         Double-checked under the session's lock: two calls arriving
         together must not both dial the broker, and a mesh whose connect failed
         is discarded rather than half-kept, so a retry starts from nothing.
+
+        **The address is the config's, as it is now.**  A member's mesh is built
+        once, so a section edited after that is a different mesh: `rebind` swaps
+        it under this lock before anything reads whether the mesh is up, and a
+        call that finds it changed dials the new address rather than the one the
+        member was born on.
 
         **The fast path is inside that lock too, and the lock is the same one the
         release takes** (`join`'s `finally`), because the two are one decision
@@ -1491,6 +1596,7 @@ def build_server(
             raise ToolError(switch_off(net))
         session = session_of(agent, subagent)
         async with session.lock:
+            await rebind(session)
             if session.mesh.is_connected:
                 session.hold(reason)
                 return session
@@ -1633,11 +1739,6 @@ def build_server(
         subscribed — the same silent loss `place_for` exists to prevent, one
         name over.  The maker's session is the empty-subagent one and is
         connected explicitly here.
-
-        **A fork is skipped.**  `group_set` refuses to put one in a roster; this
-        is the other half of that rule, for a stale roster that still names one:
-        a temporary conversation must not be woken for a group it can never
-        belong to.
         """
         if net is not LOCAL:
             return
@@ -1647,21 +1748,24 @@ def build_server(
             if peer == agent:
                 await connected(agent, USED, "")
             elif peer in membership(agent):
-                if forked(agent, peer):
-                    logger.debug(
-                        "a2a_group_fork_skipped agent=%s member=%s", agent, peer
-                    )
-                    continue
                 await connected(agent, MEMBER, peer)
 
-    def start_broker(config_now: Config) -> None:
-        """Bring the mesh's broker up, or refuse the start.
+    def start_broker(settings: A2ASettings) -> None:
+        """Bring **this network's** broker up, or refuse the start.
 
-        A machine whose config says `peer_agent:` has said it wants the mesh, so
-        an absent broker is a missing dependency rather than a preference.  One
-        that will not serve raises out of the lifespan — this plugin failing to
-        start, which is `slife2` refusing to start rather than handing the model
-        tools attached to nothing (`slife2/plugins/a2a/broker.py`).
+        A machine whose config says `peer_agent:` — or whose `subagent:` names a
+        network — has said it wants the mesh, so an absent broker is a missing
+        dependency rather than a preference.  One that will not serve raises out
+        of the lifespan — this plugin failing to start, which is `slife2`
+        refusing to start rather than handing the model tools attached to
+        nothing (`slife2/plugins/a2a/broker.py`).
+
+        **The settings are the network's, not the file's remote section.**  This
+        process serves one network, chosen by `net`; the local one reads
+        `subagent.network`, and handing `peer_agent` to `ensure` started a broker
+        at the remote address while every local mesh dialled its own — a stack
+        whose every subagent tool timed out, with a stray broker left behind.
+        `mesh_settings()` is the same answer the gate below uses.
 
         **Nothing else happens at start.**  Nothing joins the mesh (a window does
         that, `join`), and nothing is announced: a restart has no inbound bridges
@@ -1669,7 +1773,7 @@ def build_server(
         which arrives as a fresh request with a fresh bridge, so the loop closes
         without the harness remembering anything.
         """
-        logger.info("a2a_broker %s", ensure_broker(config_now.peer_agent))
+        logger.info("a2a_broker %s", ensure_broker(settings))
 
     @contextlib.asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, object]]:
@@ -1697,8 +1801,9 @@ def build_server(
         session exists rather than after the last one succeeded.
         """
         try:
-            if connecting and mesh_settings().configured:
-                start_broker(live())
+            settings = mesh_settings()
+            if connecting and settings.configured:
+                start_broker(settings)
             yield {}
         finally:
             for session in sessions.values():
@@ -1724,7 +1829,7 @@ def build_server(
     #  own advice, and the other plugins here make the same choice.
     mcp: FastMCP = house_server(net.server_name, lifespan=lifespan)
 
-    @mcp.tool
+    @mcp.tool(name=JOIN)
     async def join(agent: str, ctx: Context) -> None:
         """Put *agent* on the mesh, and keep it there for as long as this call.
 
@@ -1738,12 +1843,13 @@ def build_server(
         should be decided by whether anyone is there, not by which process
         happened to be running.
 
-        **This is the enrollment.**  The ledger at `agents/<agent>/inbound.yaml` is
-        the record of inbound tasks a process died holding, which is a fact about
-        work already received rather than a claim about who is here; a window is
-        the only thing that is both true while somebody is present and untrue the
-        moment they leave.  An A2A call still joins its agent lazily, for as
-        long as the task it started may be answered.
+        **This is the enrollment.**  The inbound task table is a fact about work
+        this process is holding, not a claim about who is here — and it is
+        in-memory (`slife2.plugins.a2a.inbound_store`), so it dies with the
+        process that received the work.  A window is the only thing that is both
+        true while somebody is present and untrue the moment they leave.  An A2A
+        call still joins its agent lazily, for as long as the task it started
+        may be answered.
 
         **Nobody is told that the agent itself arrived.**  A window showing *jack*
         is jack; a line reading `⚡ jack online` in it is the harness telling
@@ -1828,6 +1934,16 @@ def build_server(
         session (`drop_session`), which is what a *forced* cleanup means and why
         this is not a message to the member.
 
+        **The tasks around it are withdrawn with it, in both directions.**
+        The ones sent *to* it live in the senders' sessions and the ones it
+        *sent* live in the receivers' inbound tables; neither is the member's,
+        so a teardown that only dropped its session would leave each one
+        `pending` in `task_list` — a row saying work is still running whose
+        member has just stopped existing.  `A2AMesh.withdraw_sends_to` and
+        `A2AMesh.withdraw_inbound_from` record the one true status; the second
+        also tells the surviving receiver's model, because its work has just
+        lost the party that was waiting for it.
+
         Args:
             agent: Whose member it is — the conversation id's first half.
             subagent: The member's own name.  Empty is the agent itself, which
@@ -1836,6 +1952,37 @@ def build_server(
         where = str(home())
         key = (home_key(where), agent, subagent)
         found = sessions.get(key)
+        if net is LOCAL and subagent:
+            # **Both directions, because neither lives in the member's session.**
+            # The tasks sent *to* it are filed in the senders' sessions, and the
+            # tasks it *sent* are filed in the receivers' inbound tables;
+            # dropping the member's own session reaches neither.  Left open,
+            # each is a `pending` row in `task_list` — a row claiming work whose
+            # member no longer exists — and a sent task's live round would hold a
+            # responder slot against a sender that can never answer.  The
+            # sweep is the maker's own conversations (its session and its
+            # siblings'), because that is the network the removed member was
+            # on; the process also serves other agents and other homes.
+            withdrawn = 0
+            # **This maker's sessions, not every session in the process.**  The
+            # table is keyed by `(home, agent, subagent)` because one process
+            # serves every home and every agent — and a member name is only
+            # unique *within* one maker's network.  Two agents may each have a
+            # `tester`; sweeping the whole table withdrew jack's outstanding
+            # task when jill removed hers, and cancelled the tasks jack's
+            # tester had sent.  The home is part of the key for the same
+            # reason: two homes may each run an agent called `jack`.
+            for other_key, other in list(sessions.items()):
+                if other_key[0] != key[0] or other_key[1] != agent:
+                    continue
+                withdrawn += await other.mesh.withdraw_sends_to(subagent)
+                withdrawn += await other.mesh.withdraw_inbound_from(subagent)
+            if withdrawn:
+                logger.info(
+                    "a2a_member_tasks_withdrawn agent=%s count=%d",
+                    describe((agent, subagent)),
+                    withdrawn,
+                )
         if found is None:
             return {"agent": agent, "subagent": subagent, "forgotten": False}
         await drop_session(found, key)
@@ -2169,6 +2316,11 @@ def build_server(
             # The remote network's presence is its window's `join`; a read must
             # not put an agent on it that nobody is showing.
             session = session_of(agent, mine)
+        async with session.lock:
+            # The roster is read from the mesh the config names now; a member
+            # built before an address edit would otherwise list the peers of a
+            # network this process has left.
+            await rebind(session)
         mesh = session.mesh
         own, *peers = mesh.list_agents()
         found = {safe_name(card.agent_name): safe_name(card.status) for card in peers}
@@ -2291,13 +2443,6 @@ def build_server(
     # wire as a directed event.  The tools below are the only writers; the
     # receive path (`_wire`) is the other half.
 
-    def refuse_fork(agent: str, mine: str) -> None:
-        """A forked subagent is temporary, so it is never part of a group."""
-        if net is LOCAL and mine and forked(agent, mine):
-            raise ToolError(
-                "a forked subagent is temporary and cannot take part in groups."
-            )
-
     def unknown_group(group: str) -> ToolError:
         return ToolError(
             f"no group named {group!r} — {net.tool(GROUP_LIST)} shows the ones "
@@ -2312,7 +2457,7 @@ def build_server(
             raise ToolError(f"the group could not be saved: {exc}") from exc
 
     def group_roster_for_local(agent: str, roster: tuple[str, ...]) -> None:
-        """Refuse a local roster naming anything but real, non-fork members."""
+        """Refuse a local roster naming anything but real members."""
         known = membership(agent) | {agent}
         unknown = [name for name in roster if name not in known]
         if unknown:
@@ -2320,12 +2465,6 @@ def build_server(
                 f"{', '.join(repr(name) for name in unknown)} is not a member of "
                 f"this local network — a group may name the agent {agent!r} "
                 f"itself or one of its subagents."
-            )
-        forks = [name for name in roster if name != agent and forked(agent, name)]
-        if forks:
-            raise ToolError(
-                f"{', '.join(repr(name) for name in forks)} is a forked "
-                f"subagent; a fork is temporary and cannot join a group."
             )
 
     @mcp.tool(
@@ -2347,9 +2486,7 @@ def build_server(
         still learns the group.
 
         On the local network a member must be the maker itself or one of its
-        subagents, and a **forked** subagent is refused: a fork is a temporary
-        copy of its maker's conversation and ends with the next start, so a
-        roster naming one would keep addressing a name nobody answers.
+        subagents.
 
         Args:
             group: The group's name. Naming one you own replaces its roster.
@@ -2357,7 +2494,6 @@ def build_server(
                 omitted when replacing an existing roster is removed.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         me = member_name(sender, mine)
         try:
             if not group_store.valid_group_name(group):
@@ -2519,7 +2655,6 @@ def build_server(
             group: The group to disband, by name.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         me = member_name(sender, mine)
         session = session_of(sender, mine)
         found = session.groups.get(group)
@@ -2568,7 +2703,6 @@ def build_server(
             group: The group to leave, by name.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         me = member_name(sender, mine)
         session = session_of(sender, mine)
         found = session.groups.get(group)
@@ -2657,7 +2791,6 @@ def build_server(
             message: What to say; `@name`, `@all` and `@所有人` address people in it.
         """
         sender, mine = speaker(ctx)
-        refuse_fork(sender, mine)
         if not isinstance(message, str) or not message.strip():
             raise ToolError("a group message cannot be empty.")
         me = member_name(sender, mine)
@@ -2777,6 +2910,8 @@ _TOOL_TEXTS: dict[str, str] = {
     ),
     CANCEL_TASK: (
         "Withdraw a task you sent to {them}.\n"
+        "\n"
+        "{withdraw}\n"
         "\n"
         "`status` is the answer: 'cancelled' when the withdrawal went out,\n"
         "'completed'/'failed'/'cancelled'/'rejected' when the task had already\n"
@@ -2920,6 +3055,11 @@ _NET_WORDS: dict[str, dict[str, str]] = {
             "A name that is not on the roster may be a peer that has not\n"
             "appeared yet; the send is still accepted."
         ),
+        "withdraw": (
+            "The withdrawal is a request: the peer is told the task is\n"
+            "withdrawn, and its model decides when to stop. The task is\n"
+            "settled as cancelled; no task_response is needed for it."
+        ),
     },
     LOCAL.key: {
         # **The members are an agent and the subagents it made, and every one of
@@ -2963,6 +3103,11 @@ _NET_WORDS: dict[str, dict[str, str]] = {
         "addressing": (
             "A name that is not a member of this network is refused before\n"
             "anything is sent; `{list}` reads the roster."
+        ),
+        "withdraw": (
+            "The withdrawal is a request: the member is told the task is\n"
+            "withdrawn, and its model decides when to stop. The task is\n"
+            "settled as cancelled; no task_response is needed for it."
         ),
     },
 }
@@ -3042,7 +3187,7 @@ def main(argv: list[str] | None = None, *, net: Net = REMOTE) -> int:
         argv,
         server_name=net.server_name,
         config_key=net.plugin_key,
-        build=lambda config: build_server(config, net=net),
+        build=lambda config: build_server(net=net),
         logger=logger,
         note=lambda config: server_note(config, net),
     )

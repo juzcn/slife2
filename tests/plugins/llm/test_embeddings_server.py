@@ -44,8 +44,13 @@ class _FakeOpenAI:
         self.requests.append((model, list(input)))
         return SimpleNamespace(
             data=[
-                SimpleNamespace(embedding=[float(index)] + [0.0] * (self.dimension - 1))
-                for index, _ in enumerate(input, start=1)
+                # `index` is the protocol's own statement of which input the
+                # vector answers, and the server orders by it.
+                SimpleNamespace(
+                    index=index,
+                    embedding=[float(index + 1)] + [0.0] * (self.dimension - 1),
+                )
+                for index, _ in enumerate(input)
             ]
         )
 
@@ -220,6 +225,27 @@ async def test_an_empty_list_asks_nothing() -> None:
     fake = _FakeOpenAI()
     assert await _client("mystery", fake).embed([]) == []
     assert fake.requests == []
+
+
+@pytest.mark.asyncio
+async def test_vectors_come_back_in_input_order_however_the_list_is_ordered() -> None:
+    """`data[].index` identifies the input a vector answers; list position is
+    not a promise.  An endpoint that returns the list in any other order would
+    otherwise attribute one text's vector to another — silently, because every
+    vector still looks right."""
+
+    class _Shuffled(_FakeOpenAI):
+        async def _create(self, *, model: str, input: list[str]) -> Any:
+            self.requests.append((model, list(input)))
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=1, embedding=[2.0]),
+                    SimpleNamespace(index=0, embedding=[1.0]),
+                ]
+            )
+
+    vectors = await _client("mystery", _Shuffled()).embed(["one", "two"])
+    assert vectors == [[1.0], [2.0]]
 
 
 @pytest.mark.asyncio
@@ -571,7 +597,7 @@ async def test_a_provider_refusal_is_a_sentence_not_a_traceback() -> None:
             await client.call_tool("embed", {"texts": ["a"]})
 
     assert "402" in str(caught.value)
-    assert "embeddings.active_model" in str(caught.value)
+    assert "embeddings.default" in str(caught.value)
 
 
 def test_each_refusal_status_gets_its_own_action() -> None:
@@ -599,3 +625,60 @@ def test_each_refusal_status_gets_its_own_action() -> None:
     assert "in arrears" in provider_refusal(refusal(402))
     assert "api_key" in provider_refusal(refusal(401))
     assert "real-name" in provider_refusal(refusal(403))
+
+
+def test_an_embeddings_edit_reaches_the_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The process re-reads the section instead of pinning its provider at boot.**
+
+    An `embeddings:` edit — the model, its base URL or its key — used to be
+    silently ineffective until a restart, and `describe()` kept answering the
+    old identity, so a store's identity check could not notice either
+    (invariant 9).  The live provider follows `load_cached`'s object identity,
+    as the chat backends' `LiveProviders` does.
+    """
+    from dataclasses import replace
+
+    import slife2.plugins.llm.embeddings_server as embeddings
+    from slife2.libs.host.config import EmbeddingsSettings
+
+    one = EmbeddingProviderSettings(name="one", base_url="http://one/v1", model="m1")
+    two = EmbeddingProviderSettings(name="two", base_url="http://two/v1", model="m2")
+    first = replace(
+        default_config(),
+        embeddings=EmbeddingsSettings(providers={"one": one}, active="one"),
+    )
+    second = replace(
+        default_config(),
+        embeddings=EmbeddingsSettings(providers={"two": two}, active="two"),
+    )
+    current = {"config": first}
+    monkeypatch.setattr(embeddings, "load_cached", lambda: current["config"])
+
+    built: list[Any] = []
+
+    class FakeClient:
+        def __init__(self, provider: EmbeddingProviderSettings) -> None:
+            self.provider = provider
+            self.closed = False
+            built.append(self)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(embeddings, "EmbeddingClient", FakeClient)
+
+    async def scenario() -> None:
+        live = embeddings.LiveEmbedding()
+        async with live.lease() as client:
+            assert client.provider.name == "one"
+        current["config"] = second
+        async with live.lease() as client:
+            assert client.provider.name == "two", "the edit did not reach the call"
+        assert built[0].closed, "the retired provider's client was left open"
+        assert not built[1].closed, "the live provider's client was closed"
+
+    import asyncio
+
+    asyncio.run(scenario())

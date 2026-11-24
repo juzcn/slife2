@@ -15,6 +15,13 @@ ever becomes another colour, `slife-amber` in the CSS is the only rename.
 
 from __future__ import annotations
 
+#: The glyphs moved to the shared vocabulary once two *daemons* began composing
+#: a line the window draws: a plugin must not import the terminal package for a
+#: mark (`slife2.libs.harness.glyphs`).  Re-exported here — the explicit alias is
+#: what says so to `ruff` and `pyright` — because every widget reads its visual
+#: vocabulary, colours and marks, from this one module.
+from slife2.libs.harness.glyphs import GLYPHS as GLYPHS
+
 #: GitHub-dark, with warm amber accents.  Keys are CSS variable names without
 #: the `slife-` prefix.
 PALETTE: dict[str, str] = {
@@ -43,36 +50,3 @@ PALETTE: dict[str, str] = {
 def css_variables() -> dict[str, str]:
     """The palette as Textual CSS variables, for the stylesheet."""
     return {f"slife-{name}": value for name, value in PALETTE.items()}
-
-
-#: Glyphs, kept with the palette because they are the same kind of thing: the
-#: visual vocabulary, spelled once so a widget and its tests cannot disagree.
-#:
-#: All of these are outside ASCII, and the house rule is that anything reaching
-#: a *console* must be ASCII.  These never do — Textual owns the terminal and
-#: writes UTF-8 — but it is why the server logs and the CLI stay plain.
-GLYPHS: dict[str, str] = {
-    "collapsed": "▸",  # right-pointing small triangle
-    "expanded": "▾",  # down-pointing small triangle
-    "running": "◌",  # dotted circle
-    "done": "●",  # filled circle
-    "error": "●",
-    # The fourth state of a call's panel: the turn it belonged to ended while the
-    # window was still waiting on it.  A glyph of its own rather than a second use
-    # of one of the two above, because it answers neither of their questions —
-    # nothing is running and nothing came back (`slife2.tui.widgets._status`).
-    "interrupted": "⊘",  # circled division slash
-    "failed": "✗",
-    "check": "✓",  # the other half of `failed`
-    "up": "↑",
-    "down": "↓",
-    "separator": "│",
-    "ellipsis": "…",
-    "thinking": "⟐",
-    "vision": "◉",
-    # The model picker's two, named apart from `collapsed` for the reason every
-    # one of these is named apart: a cursor and a folded panel look alike and
-    # mean nothing alike, so one name for both is a name that says neither.
-    "cursor": "▸",
-    "current": "★",
-}

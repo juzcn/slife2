@@ -1,4 +1,4 @@
-"""The agent task: one loop of the agent's own, run on a description, answered
+"""The agent task: one turn of the agent's own, run on a description, answered
 by a message.
 
 Everything here runs over FastMCP's **in-memory transport**.  A task is a turn —
@@ -17,8 +17,8 @@ and nothing
 else.
 
 The properties under test throughout: a task is the agent's own work — its
-identity, its context, its tools — it answers by a message rather than by a
-return value, and it is one turn with exactly one rebuild in it.
+identity, a clone of its context, its tools — it answers by a message rather
+than by a return value, and it is one turn with exactly one rebuild in it.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
@@ -44,16 +45,36 @@ from fakes import (
     plugin_transports,
     text_turn,
 )
-from fastmcp import Client, FastMCP
+from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.harness.markers import strip as strip_marker
+from slife2.libs.host import statefile
 from slife2.libs.host.config import AgentTaskSettings, Config, default_config
-from slife2.libs.plugin.audience import conversation_meta, for_the_model
+from slife2.libs.host.paths import subagent_file
+from slife2.libs.model.base import Chunk
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    conversation_meta,
+    for_the_model,
+)
+from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.context import TURN_PROMPT_PREFIX
+from slife2.libs.turn.events import (
+    MessageCutIn,
+    TextDelta,
+    TurnFinished,
+)
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import CHECK_NEW_INPUT
+from slife2.libs.turn.tools import (
+    ATTACH_IMAGE,
+    CHECK_NEW_INPUT,
+    CONTEXT_REBUILD,
+    TURN_COMPACT,
+)
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief
+from slife2.libs.turn.watch import decode as decode_watch
 from slife2.plugins.agent_task.server import (
     AGENT_TASK_CANCEL,
     AGENT_TASK_LIST,
@@ -62,10 +83,20 @@ from slife2.plugins.agent_task.server import (
     CHANNEL,
     MARKER_PREFIX,
     build_server,
+    task_id_for,
 )
 from slife2.plugins.tui import server as control
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
+
+#: The live-id footnote the view appends to every addressable message.
+LIVE_ID_RE = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
+
+
+def without_id(content: Any) -> str:
+    """A view message's text with the live-id footnote taken off."""
+    return LIVE_ID_RE.sub("", str(content or ""))
+
 
 AGENT = "jack"
 DESCRIPTION = "Find the retry policy."
@@ -73,42 +104,81 @@ DESCRIPTION = "Find the retry policy."
 
 def config(**task_overrides: Any) -> Config:
     base = default_config()
+    compact_at = task_overrides.pop("compact_at", None)
+    if compact_at is not None:
+        base = replace(base, agent=replace(base.agent, compact_at=compact_at))
     return replace(base, agent_task=AgentTaskSettings(**task_overrides))
 
 
 @dataclass
-class Discriminator:
+class DecisionModel:
     """The context plugin's one model call, scripted — and counted.
 
-    `{}` is SDD §5.5's common answer: what is in hand is the answer, so nothing is
-    fetched and nothing is written.  Counting the calls is how "one turn, one
-    rebuild" is asserted rather than assumed, and the two are the same fact.
+    Keeping every turn in hand and recalling nothing is SDD §5.5's no-change
+    answer: what is in hand is the answer, so nothing is fetched and nothing is
+    written.  Counting the calls is how "one turn, one rebuild" is asserted
+    rather than assumed, and the two are the same fact.
     """
 
-    answer: str = "{}"
-    calls: list[str] = field(default_factory=list)
+    answer: str = '{"keep": {"action": "keep"}, "recall": {}}'
+    calls: list[Any] = field(default_factory=list)
 
     async def __call__(
-        self, agent: str, subagent: str, model: str, messages: Any, prompt: str
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: Any,
+        *,
+        usage: str = "",
     ) -> str:
-        self.calls.append(prompt)
+        self.calls.append(messages)
         return self.answer
 
 
 @dataclass
+class Selector:
+    """The context plugin's live selector, scripted — and counted.
+
+    The answer drops everything it is offered, which is what makes a task's
+    automatic pass visible; the existing tests never reach it, and a stub keeps
+    the fixture off a real model server if one ever does.
+    """
+
+    calls: list[str] = field(default_factory=list)
+
+    async def __call__(
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: Any,
+        selectable: list[str],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        self.calls.append(usage)
+        return json.dumps({"compact": selectable})
+
+
+@dataclass
 class Store:
-    """The real `slife2-context`, over the in-memory transport, and its call."""
+    """The real `slife2-context`, over the in-memory transport, and its calls."""
 
     client: Client
-    ask: Discriminator
+    ask: DecisionModel
+    select: Selector | None = None
 
 
 class UnreadableStore:
     """A context plugin answering with the shapes this task server refuses.
 
-    `adopt` reads the store's answer as a thing it must be able to trust, and a
-    store this build started never returns one it cannot read — so a test of the
-    refusal hands in the shape a *daemon from another build* does, by name.
+    The turn runtime's `restore` reads the store's answer as a thing it must be
+    able to trust, and a store this build started never returns one it cannot
+    read — so a test of the refusal hands in the shape a *daemon from another
+    build* does, by name.
     """
 
     def __init__(self, **answers: dict[str, Any]) -> None:
@@ -233,24 +303,39 @@ async def dead_window() -> AsyncIterator[Window]:
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def store() -> Any:
-    """The real context store, and the discriminator it will ask."""
+    """The real context store, and the decision model it will ask."""
     from slife2.plugins.context.server import build_server as build_context
 
-    ask = Discriminator()
+    ask = DecisionModel()
+    select = Selector()
     async with Client(
-        build_context(default_config(), embedder=StubEmbedder(), ask=ask)
+        build_context(default_config(), embedder=StubEmbedder(), ask=ask, select=select)
     ) as client:
-        yield Store(client=client, ask=ask)
+        yield Store(client=client, ask=ask, select=select)
 
 
 @pytest_asyncio.fixture(loop_scope="function")
 async def hub() -> Any:
-    """The real toolhub, with every plugin it asks standing in memory."""
+    """The real toolhub, with every plugin it asks standing in memory.
+
+    **The agent entry declares the live-conversation tools**, as the agent
+    server does in production: a task's registry replaces their bodies with its
+    own and takes the declarations from the hub, and the automatic
+    `_context_rebuild` asks the registry whether the name is there before it
+    runs.  `hub_declaring_them` is the same arrangement for a test that also
+    records the agent server's bodies.
+    """
     from slife2.plugins.toolhub.server import build_server as build_hub
 
     base = default_config()
     async with Client(
-        build_hub(base, transports=plugin_transports(base), embedder=StubEmbedder())
+        build_hub(
+            base,
+            transports=plugin_transports(
+                base, {"agent": lambda _settings: declaring_agent([])}
+            ),
+            embedder=StubEmbedder(),
+        )
     ) as client:
         yield client
 
@@ -319,14 +404,24 @@ async def settle(built: Built, name: str = "research") -> dict[str, Any]:
 
     The poll is the test's, which is the one place polling is right: the model is
     told not to do it (that is what the tool's description is for), and a test
-    has no other way to wait for a background loop.
+    has no other way to wait for a background task.
 
     **The bound is a wall clock, not a count of polls.**  A count makes the
     budget depend on how fast each poll is answered, and a loaded CI runner
     spent 400 of them before a turn of two one-second sleeps had finished.  A
     deadline asks the question the test means: has the task stopped by now.
+
+    **And the wall clock has to outlast the runner's stalls, not the task's
+    work.**  A task's first two calls — `restore` and `rebuild` — carry no
+    timeout of their own (the context store is a peer of the turn, not a
+    probe), and a Windows CI worker has been measured taking 43 s to set up a
+    neighbouring test and 35 s to run a hub listing.  Thirty seconds was less
+    than one such stall: the task was still working when `settle` gave up, and
+    the teardown then reported its interrupted call.  Two minutes leaves room
+    for the stall and still fails a real hang inside the suite's own
+    `faulthandler_timeout`.
     """
-    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+    deadline = time.monotonic() + 120.0  # timeouts: a test's patience
     async with Client(built.mcp) as client:
         while time.monotonic() < deadline:
             answer = await ask(client, AGENT_TASK_STATUS, {"name": name})
@@ -336,22 +431,108 @@ async def settle(built: Built, name: str = "research") -> dict[str, Any]:
     raise AssertionError(f"task {name} never stopped")
 
 
+async def wait_for_call(built: Built) -> None:
+    """Wait until the turn has reached the model, so a watch joins mid-turn."""
+    deadline = time.monotonic() + 30.0  # timeouts: a test's patience
+    while time.monotonic() < deadline:
+        if built.backend.calls:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the task never reached the model")
+
+
+async def wait_for_frame(
+    frames: list[Any], kind: type, *, timeout: float = 10.0
+) -> Any:
+    """The first frame of *kind*, polled — the watch stream is a callback."""
+    deadline = time.monotonic() + timeout  # timeouts: a test's patience
+    while time.monotonic() < deadline:
+        for item in frames:
+            if isinstance(item, kind):
+                return item
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{kind.__name__} never arrived; frames: {frames}")
+
+
+async def wait_for_rebuild(frames: list[Any], *, timeout: float = 10.0) -> Any:
+    """The rebuild's answer, polled — the harness auto call's note.
+
+    The auto path writes the pair and emits the tool's own answer as a
+    `MessageCutIn`; that line is what a watcher replays from the turn's start.
+    """
+    deadline = time.monotonic() + timeout  # timeouts: a test's patience
+    while time.monotonic() < deadline:
+        for item in frames:
+            if isinstance(item, MessageCutIn) and item.text.startswith("kept "):
+                return item
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"the rebuild never finished; frames: {frames}")
+
+
+@contextlib.asynccontextmanager
+async def watching(
+    built: Built, name: str = "research"
+) -> AsyncIterator[tuple[list[Any], asyncio.Task[Any]]]:
+    """A watch call held open, and the frames it has been handed so far.
+
+    The call is started as a task and *probed* for its snapshot rather than
+    slept on: what proves a watcher is registered is that the server has
+    answered it at all.  The helper cancels the call on the way out, which is
+    the detach; a test that waits for `Closed` gets the normal return instead.
+    """
+    frames: list[Any] = []
+    snapshot = asyncio.Event()
+
+    async def on_progress(
+        progress: float, total: float | None, message: str | None
+    ) -> None:
+        item = decode_watch(message or "")
+        if item is None:
+            return
+        frames.append(item)
+        if isinstance(item, Snapshot):
+            snapshot.set()
+
+    async with Client(built.mcp) as client:
+        call = asyncio.create_task(
+            client.call_tool(
+                "watch",
+                {"name": name},
+                meta=conversation_meta(AGENT),
+                progress_handler=on_progress,
+                timeout=None,
+            )
+        )
+        try:
+            await asyncio.wait_for(snapshot.wait(), timeout=10)
+            yield frames, call
+        finally:
+            call.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await call
+
+
 # ── the surface ──────────────────────────────────────────────────────────────
 
 
-async def test_the_four_tools_are_the_models_and_nothing_else_is(
+async def test_the_model_has_its_four_tools_and_the_watch_beside_them(
     hub: Client, store: Store
 ) -> None:
+    """The model's four, and the one management read beside them.
+
+    `watch` is the terminal's, not the model's: it is what `Ctrl+O` holds open,
+    and the gate (SDD §7.1) is what says so — a tool the model may call says
+    `for_the_model`, and an absent mark is the answer "no" rather than
+    "nobody has decided yet".
+    """
     tools = await build(hub=hub, context=store).mcp.list_tools()
-    assert sorted(t.name for t in tools) == [
+    assert sorted(t.name for t in tools if for_the_model(t.meta)) == [
         AGENT_TASK_CANCEL,
         AGENT_TASK_LIST,
         AGENT_TASK_START,
         AGENT_TASK_STATUS,
     ]
-    # The gate (SDD §7.1): a tool the model may call says so, and absence is the
-    # answer "no" rather than "nobody has decided yet".
-    assert all(for_the_model(t.meta) for t in tools)
+    assert sorted(t.name for t in tools if not for_the_model(t.meta)) == ["watch"]
 
 
 async def test_a_call_that_does_not_say_whose_task_it_is_is_refused(
@@ -407,13 +588,14 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     assert opening.startswith("▸ Agent task: research")
     assert DESCRIPTION in opening
     assert "nobody can answer a question" in opening
+    # The prompt is the one place the exclusions are stated, now that the
+    # registry does not filter them.
+    assert "do not use `_async`" in opening
 
     # **The hub's own list, by name** — compared against what the hub
     # advertises rather than against two names, because there is no per-caller
-    # *tool set* here: a task gets the names its agent does, which is what makes
-    # starting a task from inside one possible rather than forbidden.  The two
-    # that act on a live conversation keep their declarations but are backed by
-    # a refusal (`LIVE_CONVERSATION_TOOLS`).
+    # *tool set* here: a task gets the names its agent does.  The opening
+    # template is what tells it what not to call; the registry does not filter.
     from slife2.clients.toolclient import remote_tools
 
     assert {spec.name for spec in built.backend.calls[0][1]} == {
@@ -421,37 +603,25 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     }
 
 
-async def test_a_task_cannot_take_the_live_conversations_cut_in(
+async def test_a_task_of_an_unattended_agent_carries_the_unattended_prompt(
     hub: Client, store: Store, window: Window
 ) -> None:
-    """**The identity is shared; the live loop is not.**
+    """**The maker's head is `opening_messages`'s, claim and all.**
 
-    A task runs as the agent, so the agent server cannot tell a task's
-    `_check_new_input` call from the main conversation's.  The task server keeps
-    the hub's declaration but backs it with a refusal: the call must not pop a
-    queued message out of the main loop's inbox and hand it to this task's
-    model — the peer the message was from would be answered by a turn that never
-    saw it, and its line would be marked drawn.
+    The task rendered the agent's prompt by hand, so it lacked the `headless`
+    paragraph an ordinary turn of the same conversation carries — a task is
+    never more attended than the agent it stands in for.
     """
-    calling = ScriptedTurn(
-        result=StreamChatResult(
-            text="",
-            usage=Usage(),
-            tool_calls=(ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}),),
-            stop_reason="tool_calls",
-        )
-    )
-    built = build(calling, text_turn("done"), hub=hub, context=store, window=window)
+    from slife2.libs.host.runtime import AgentClaim, write_claim
 
+    write_claim(AgentClaim.now(AGENT, headless=True))
+    built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
     await settle(built)
 
-    results = [
-        str(message.content)
-        for message in built.messages()
-        if getattr(message, "role", "") == "tool"
-    ]
-    assert any("not available in an agent task" in text for text in results), results
+    system = built.messages()[0]
+    assert system.role == "system"
+    assert "Nobody is watching this conversation" in str(system.content)
 
 
 async def test_the_context_is_rebuilt_exactly_once(
@@ -465,9 +635,11 @@ async def test_the_context_is_rebuilt_exactly_once(
     await settle(built)
 
     assert len(store.ask.calls) == 1
-    # And it was asked about the *user message*, passed beside the list rather
-    # than inside it, because a rebuild replaces the list wholesale.
-    assert store.ask.calls[0].startswith("▸ Agent task: research")
+    # The decision reads the conversation; the task's own opening is its last
+    # user message, not a prompt passed beside the list.
+    assert any(
+        "▸ Agent task: research" in str(message) for message in store.ask.calls[0]
+    )
 
 
 async def test_the_context_it_runs_on_is_the_agents_own(
@@ -520,7 +692,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     """`turn_ids` was tolerated where `messages` beside it was validated.
 
     So an answer carrying messages and no ids was adopted as a context whose
-    turns nothing could name, and the task's loop and the store disagreed about
+    turns nothing could name, and the task's turn and the store disagreed about
     what it held from that point on — the identical deformation the agent
     server's `_adopt` was fixed for.  Both halves of one answer are read the same
     way: a missing or null `turn_ids` is refused, naming the payload
@@ -534,7 +706,7 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
         hub=hub,
         context=Store(
             client=UnreadableStore(restore={"messages": [], "turns": []}),
-            ask=Discriminator(),
+            ask=DecisionModel(),
         ),
     )
     await start(built)
@@ -580,6 +752,58 @@ async def test_the_marker_says_which_task_it_was_and_when(
     assert payload["status"] == "finished"
     assert payload["started_at"]
     assert payload["finished_at"]
+
+
+async def test_a_running_task_is_not_reported_with_a_finish_time(
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**`finished_at` is empty until the task stops** — the field's contract,
+    and the loop's stamp does not bend it: the moment is written when the loop
+    returns, but the status stays `running` through the hand-over, so a status
+    read in that window carried a finish time beside `running`, two
+    contradictory facts.  The report withholds the stamp while the status is
+    `running`; the marker, which claims the outcome the answer will have,
+    carries it — and the settled report and the marker agree on the moment.
+
+    The hand-over is gated to hold the task in that window: the delivery is
+    where a successful loop is still `running`, and the gate is what makes the
+    read land inside it rather than race it.
+    """
+    import slife2.plugins.agent_task.server as module
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    real_hand_over = module.hand_over
+
+    async def gated_hand_over(*args: Any, **kwargs: Any) -> None:
+        entered.set()
+        await release.wait()
+        await real_hand_over(*args, **kwargs)
+
+    monkeypatch.setattr(module, "hand_over", gated_hand_over)
+    built = build(text_turn("done"), hub=hub, context=store, window=window)
+    await start(built)
+    await asyncio.wait_for(entered.wait(), timeout=10)
+
+    async with Client(built.mcp) as client:
+        running = await ask(client, AGENT_TASK_STATUS, {"name": "research"})
+        listed = await ask(client, AGENT_TASK_LIST)
+    assert running["status"] == "running"
+    assert running["finished_at"] == "", "a running task reported a finish time"
+    assert listed["tasks"][0]["finished_at"] == ""
+
+    release.set()
+    answer = await settle(built)
+    assert answer["status"] == "finished"
+    assert answer["finished_at"]
+    await wait_for_handover(window)
+
+    text = window.handed[0]["text"]
+    payload = json.loads(text[len(MARKER_PREFIX) : text.index("]")])
+    assert payload["status"] == "finished"
+    assert payload["finished_at"] == answer["finished_at"], (
+        "the marker and the settled report disagree about when the work ended"
+    )
 
 
 async def test_a_task_that_fails_still_answers(
@@ -631,7 +855,7 @@ async def test_the_cap_is_read_off_the_config_of_the_call(
     so a limit read off the *daemon's* boot config bounds a call by a number an
     operator wrote in a directory this caller has never heard of, and an edit to
     the file never reaches the call that enforces it.  Every other config read in
-    this server is `live()`'s (`model_for`, `run_loop`), and the sibling agent
+    this server is `runtime.current()`'s (`run_loop`), and the sibling agent
     server reads its own cap the same way.
 
     Two homes' configs in one assertion: the config this process started on says
@@ -721,6 +945,7 @@ async def test_a_cancelled_task_holds_no_handle(
 
     assert made[0].handle is None, "a cancelled task still holds its coroutine"
     assert made[0].text == ""
+    assert made[0].tap is None, "a finished task still holds its whole event stream"
 
 
 async def test_the_cap_refuses_the_task_past_it(hub: Client, store: Store) -> None:
@@ -861,29 +1086,21 @@ async def test_the_cap_counts_only_the_callers_homes_tasks(
 # ── two tasks, one agent ─────────────────────────────────────────────────────
 
 
-async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
+async def test_two_tasks_decide_privately_and_leave_the_conversation_alone(
     hub: Client, window: Window
 ) -> None:
-    """**`restore` and `rebuild` are one step, and a snapshot is not a decision.**
+    """**A task's rebuild is a clone: it cannot move the agent's live context.**
 
-    A rebuild's target is built from the list its *own* restore read, so a task
-    that interleaves those two calls with another task's writes a list decided
-    against a conversation that has moved — and the writer whose write lands
-    last is the one whose snapshot is older.  What the store then holds is the
-    older decision, and the next `restore` (an idle reap, a restart, a new
-    terminal) rebuilds the conversation from it: a task's work dropped from the
-    context with nothing anywhere saying so.
+    Two tasks of one agent may decide differently about the same conversation —
+    the cap allows `max_running` of them.  Each decision is the task's own: the
+    first keeps one of the two turns, the second clears its clone.  What the
+    store holds afterwards is **unchanged**: the two turns the agent saved, in
+    the order it saved them.  A task records nothing, so a turn that leaves no
+    record must not change what the conversation comes back to.
 
-    The cap allows `max_running` tasks for one agent, so this is a state two
-    calls can reach.  The agent server holds its `Loop.lock` across exactly these
-    two calls; a task is the agent's own work, so this server holds its own lock
-    the same way — one agent's pre-turn work at a time.
-
-    Two turns are in the conversation, and the two tasks decide differently about
-    them: the first keeps one of them, the second clears the context.  What the
-    store holds afterwards is the *second* task's decision — and a build without
-    the lock leaves the first task's, written from a snapshot taken before the
-    second had even read one.
+    The lock this test used to exercise is gone with the write it protected:
+    `restore` is a read and `rebuild` publishes nothing, so the two tasks can
+    interleave their pre-turn work without either seeing the other's decision.
     """
     from slife2.libs.host.paths import agent_dir
     from slife2.libs.store.db import TurnStore
@@ -895,22 +1112,22 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
     gate = asyncio.Event()
     keep_one = ""
 
-    async def discriminating(
-        agent: str, subagent: str, model: str, messages: Any, prompt: str
+    async def deciding(
+        agent: str, subagent: str, model: str, messages: Any, *, usage: str = ""
     ) -> str:
-        """The first task parks inside its rebuild; the second clears it."""
-        asked.append(prompt)
+        """The first task parks inside its rebuild; the second clears its own."""
+        asked.append("")
         if len(asked) == 1:
             parked.set()
             await gate.wait()
             return keep_one
         second_in.set()
-        return '{"context": "clear"}'
+        return '{"keep": {"action": "clear"}, "recall": {}}'
 
     async with Client(
-        build_context(default_config(), embedder=StubEmbedder(), ask=discriminating)
+        build_context(default_config(), embedder=StubEmbedder(), ask=deciding)
     ) as context_client:
-        store = Store(client=context_client, ask=Discriminator())
+        store = Store(client=context_client, ask=DecisionModel())
         async with Client(context_client.transport) as writer:
             ids = []
             for word in ("alpha", "beta"):
@@ -927,9 +1144,10 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
                     meta=conversation_meta(AGENT),
                 )
                 ids.append(stored.data["turn_id"])
-        # A keep-list for the first task's own decision: one of the two turns,
-        # which is a *write* against the two that are in hand.
-        keep_one = json.dumps({"context": [ids[0]]})
+        # The first task's own decision keeps one of the two turns.
+        keep_one = json.dumps(
+            {"keep": {"action": "ids", "turn_ids": [ids[0]]}, "recall": {}}
+        )
 
         built = build(
             text_turn("one answered"),
@@ -941,22 +1159,32 @@ async def test_the_pre_turn_work_of_two_tasks_does_not_interleave(
         await start(built, "one")
         await asyncio.wait_for(parked.wait(), timeout=_T.timeouts.work.hub)
         await start(built, "two")
-        # **The second task's snapshot is taken here, or not at all.**  Its
-        # rebuild is in flight when the discriminator is asked, so its `restore`
-        # has already read the list — and that read is what the first task's
-        # write would have to land before to be an *interleaving* rather than a
-        # sequence.  With the lock this never arrives, because the second task is
-        # waiting on the first: a bounded wait, so the case the fix removes is a
-        # fact instead of a hope, and the assertion below does not depend on it.
+        # The second task's snapshot is taken while the first is parked: with
+        # the write gone there is nothing to serialise, so its own rebuild runs.
         for _ in range(100):
             if second_in.is_set():
                 break
             await asyncio.sleep(0.01)
         gate.set()
         await wait_for_handover(window, 2)
+        assert len(built.backend.calls) == 2, "one model call per task"
 
     turns = TurnStore(agent_dir(AGENT) / "turns.db").context_turns()
-    assert turns == [], "the conversation holds the decision that was made last"
+    assert turns == ids, "a task does not move the conversation's live context"
+
+    # Each task ran on its own decision: the first kept alpha, the second
+    # cleared its clone.  The opening prompt names the task, so the calls are
+    # identified without relying on scheduling order.
+    by_name: dict[str, str] = {}
+    for messages, _tools in built.backend.calls:
+        text = "\n".join(str(message.content) for message in messages)
+        for name in ("one", "two"):
+            if f"Agent task: {name}" in text:
+                by_name[name] = text
+    assert "alpha is here" in by_name["one"]
+    assert "beta is here" not in by_name["one"], "the first task's own keep-list"
+    assert "alpha is here" not in by_name["two"]
+    assert "beta is here" not in by_name["two"], "the second task's own clear"
 
 
 # ── stopping one ─────────────────────────────────────────────────────────────
@@ -1009,6 +1237,7 @@ async def test_a_name_nobody_knows_answers_unknown(hub: Client, store: Store) ->
         asked = await ask(client, AGENT_TASK_STATUS, {"name": "nothing"})
     assert stopped["status"] == "unknown"
     assert asked["status"] == "unknown"
+    assert stopped["task_id"] == asked["task_id"] == task_id_for("nothing")
 
 
 # ── the way back ─────────────────────────────────────────────────────────────
@@ -1210,12 +1439,12 @@ async def test_a_trim_that_could_not_run_says_so_rather_than_going_quiet(
     `error`, naming the task, because the loaded set is one list for the whole
     system.  Registered as a fallback in SDD Appendix C.
     """
-    import slife2.plugins.agent_task.server as module
+    import slife2.libs.turn.runtime as runtime_module
 
     async def no_hub(_client: Any) -> dict[str, Any]:
         raise ConnectionError("the hub is gone")
 
-    monkeypatch.setattr(module, "unload_tools", no_hub)
+    monkeypatch.setattr(runtime_module, "unload_tools", no_hub)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
@@ -1242,14 +1471,14 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     failure is not a verdict).  The skip is still best-effort and said at
     `error`, naming the task, because the trim is post-turn bookkeeping.
     """
-    import slife2.plugins.agent_task.server as module
+    import slife2.libs.turn.runtime as runtime_module
 
     async def no_names(_client: Any) -> dict[str, Any]:
         # Every key but the one the trim acts on: the same silence an empty list
         # makes, from an answer that says nothing at all.
         return {"refused": [], "not_loaded": [], "text": "the list is fine"}
 
-    monkeypatch.setattr(module, "unload_tools", no_names)
+    monkeypatch.setattr(runtime_module, "unload_tools", no_names)
     caplog.set_level(logging.ERROR, logger="slife2.plugins.agent_task.server")
     built = build(text_turn("three tries"), hub=hub, context=store, window=window)
     await start(built)
@@ -1354,3 +1583,568 @@ async def test_a_hand_back_that_could_not_land_says_why(
         assert "could not be handed back" in caplog.text
     finally:
         async_tasks._tasks.pop(task_id, None)  # noqa: SLF001
+
+
+# ── watching a task ──────────────────────────────────────────────────────────
+
+
+async def test_a_watch_opens_with_the_brief_and_replays_a_turn_it_joined(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A task has no stored conversation, so the brief is its history.
+
+    The turn in flight is in the tap, and a watcher that joins after the model
+    has been called is handed the context decision and the deltas it already
+    produced — not just the tail.  The tap's start is the `TaskBrief`, which is
+    the one frame a task's own caller never needs and a watcher cannot infer.
+    """
+    built = build(
+        text_turn("abcdef", delay=0.05), hub=hub, context=store, window=window
+    )
+    await start(built)
+    await wait_for_call(built)
+
+    async with watching(built) as (frames, call):
+        first = await wait_for_frame(frames, Snapshot)
+        assert first.turns == [], "a task records nothing to open with"
+
+        brief = await wait_for_frame(frames, TaskBrief)
+        assert brief.name == "research"
+        assert brief.description == DESCRIPTION
+        assert brief.status == "running", "the status the task had when it began"
+
+        # The rebuild's pair is in the tap even though it ran after this
+        # watcher joined — the other half of the replay.
+        await wait_for_rebuild(frames)
+        finished = await wait_for_frame(frames, TurnFinished)
+        assert finished.text == "abcdef"
+        closed = await wait_for_frame(frames, Closed)
+        assert "finished" in closed.reason
+        assert any(isinstance(item, TextDelta) for item in frames)
+
+        result = await asyncio.wait_for(call, timeout=10)
+
+    assert result.data == {"closed": True}
+    await wait_for_handover(window)
+
+
+async def test_a_watch_of_a_stopped_task_says_what_happened(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A late watch is answered rather than refused.
+
+    The task is still in the registry until the retired cap forgets it, so the
+    screen opens on the brief with the final status and the sentence its ending
+    carried.  There are no events to replay: a task's turn is gone with the
+    coroutine that ran it.
+    """
+    built = build(text_turn("done"), hub=hub, context=store, window=window)
+    await start(built)
+    await wait_for_handover(window)
+    await settle(built)
+
+    async with watching(built) as (frames, call):
+        result = await asyncio.wait_for(call, timeout=10)
+
+    assert result.data == {"closed": True}
+    assert [type(item) for item in frames] == [Snapshot, TaskBrief, Closed]
+    brief = frames[1]
+    assert brief.status == "finished"
+    assert "delivered" in frames[2].reason
+
+
+async def test_cancelling_a_watched_task_closes_with_cancelled(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A cancelled task has no answer and no hand-over; the watcher is told."""
+    built = build(text_turn("abcdef", delay=0.1), hub=hub, context=store, window=window)
+    await start(built)
+    await wait_for_call(built)
+
+    async with watching(built) as (frames, call):
+        await wait_for_frame(frames, TaskBrief)
+        async with Client(built.mcp) as client:
+            stopped = await ask(client, AGENT_TASK_CANCEL, {"name": "research"})
+        assert stopped["status"] == "cancelled"
+
+        closed = await wait_for_frame(frames, Closed)
+        result = await asyncio.wait_for(call, timeout=10)
+
+    assert result.data == {"closed": True}
+    assert closed.reason == "the task was cancelled"
+
+
+async def test_a_cancelled_runs_finally_leaves_the_replacements_watch_alone(
+    hub: Client, store: Store, window: Window, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The old turn's ending must not end the new task's watch.**
+
+    `agent_task_cancel` writes `cancelled` synchronously, but the cancelled
+    coroutine's `finally` runs later — and the name is startable again the
+    moment the status is not `running`.  When the new task's `start_tap` has
+    replaced the tap, the old `finally` closing and dropping by key alone sent
+    the new task's watchers the old task's `Closed` and took the new tap's
+    replay from later joiners (`WatchHub.drop_if`'s reason).
+
+    The two hand-overs are gated to make the window deterministic: the first
+    holds the old run *after* its cancellation and *before* its `finally`,
+    the second holds the new task mid-delivery so a late watcher joins while
+    its tap is still the live one.  The old `finally` then runs against the
+    replacement's tap, and the assertions are what it must leave alone.
+    """
+    import slife2.plugins.agent_task.server as module
+
+    made: list[Any] = []
+    real_task = module.AgentTask
+
+    def recording(**fields: Any) -> Any:
+        task = real_task(**fields)
+        made.append(task)
+        return task
+
+    monkeypatch.setattr(module, "AgentTask", recording)
+
+    first_entered = asyncio.Event()
+    first_held = asyncio.Event()
+    first_release = asyncio.Event()
+    second_entered = asyncio.Event()
+    second_release = asyncio.Event()
+    real_hand_over = module.hand_over
+    deliveries = 0
+
+    async def gated_hand_over(*args: Any, **kwargs: Any) -> None:
+        nonlocal deliveries
+        deliveries += 1
+        if deliveries == 1:
+            first_entered.set()
+            try:
+                # Never set: the cancellation is what ends this wait, and the
+                # except below holds the run before its `finally` runs.
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                first_held.set()
+                await first_release.wait()
+                raise
+        if deliveries == 2:
+            second_entered.set()
+            await second_release.wait()
+        await real_hand_over(*args, **kwargs)
+
+    monkeypatch.setattr(module, "hand_over", gated_hand_over)
+    built = build(
+        text_turn("old answer"),
+        text_turn("new answer"),
+        hub=hub,
+        context=store,
+        window=window,
+    )
+    await start(built)
+    await asyncio.wait_for(first_entered.wait(), timeout=10)
+
+    async with Client(built.mcp) as client:
+        stopped = await ask(client, AGENT_TASK_CANCEL, {"name": "research"})
+    assert stopped["status"] == "cancelled"
+    await asyncio.wait_for(first_held.wait(), timeout=10)
+    old_handle = made[0].handle
+    assert old_handle is not None
+
+    # The name is free again: a second task under it, with its own tap.  It
+    # runs its turn and parks in its hand-over, still `running`.
+    await start(built)
+    assert made[1].tap is not made[0].tap
+    await asyncio.wait_for(second_entered.wait(), timeout=10)
+
+    async with watching(built) as (frames1, call1):
+        await wait_for_frame(frames1, TaskBrief)
+        # The old run's finally runs now, against the replacement's tap.
+        first_release.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await old_handle
+
+        # A watcher joining after the old finally still replays the new
+        # task's turn from its start — the tap the old drop would have taken.
+        async with watching(built) as (frames2, call2):
+            await wait_for_rebuild(frames2)
+            second_release.set()
+            closed2 = await wait_for_frame(frames2, Closed)
+            assert "finished" in closed2.reason
+            assert "cancelled" not in closed2.reason
+            result2 = await asyncio.wait_for(call2, timeout=10)
+        assert result2.data == {"closed": True}
+
+        # The watcher that was there when the old finally ran was not closed
+        # by the old task's ending; it ends with the new task's own.
+        closed1 = await wait_for_frame(frames1, Closed)
+        assert "cancelled" not in closed1.reason, (
+            "the cancelled task's finally closed the replacement's watcher"
+        )
+        assert "finished" in closed1.reason
+        result1 = await asyncio.wait_for(call1, timeout=10)
+
+    assert result1.data == {"closed": True}
+    await wait_for_handover(window)
+    assert len(window.handed) == 1, "the cancelled task delivered an answer"
+    assert window.handed[0]["text"].endswith("new answer")
+
+
+# ── the turn a task stands in for ────────────────────────────────────────────
+
+SUBAGENT = "scout"
+
+
+def a_subagent(*, role: str = "researcher") -> None:
+    """A subagent record in the test's home, which is what makes the name one.
+
+    A subagent with no model runs where its maker runs (`SubagentSpec`), so the
+    record changes the prompt and the role and leaves the model at the default —
+    which is what this test is about.
+    """
+    statefile.write(
+        subagent_file(AGENT, SUBAGENT),
+        {"name": SUBAGENT, "model": "", "role": role},
+    )
+
+
+def tool_turn(*calls: ToolCall, usage: Usage | None = None) -> ScriptedTurn:
+    """One scripted model response that calls tools, then a text turn follows."""
+    return ScriptedTurn(
+        result=StreamChatResult(
+            text="",
+            tool_calls=calls,
+            stop_reason="tool_calls",
+            usage=usage or Usage(),
+        ),
+        chunks=[Chunk(text="")],
+    )
+
+
+def tool_result(messages: list[Any], name: str) -> Any:
+    """The result of the call to *name* in one model call's message list.
+
+    The turn opens with `_context_rebuild`'s harness pair, so the first tool
+    message is not the one a test about `_check_new_input` or `attach_image`
+    wants; the pair's id is what tells them apart.
+    """
+    ids = {
+        call.id
+        for message in messages
+        if message.role == "assistant"
+        for call in message.tool_calls
+        if call.name == name
+    }
+    return next(
+        message
+        for message in messages
+        if message.role == "tool" and message.tool_call_id in ids
+    )
+
+
+def declaring_agent(reached: list[str]) -> FastMCP:
+    """The agent server's *declarations* for the four live-conversation tools.
+
+    The hub must advertise the names — a task's registry replaces their bodies
+    and takes their declarations from the hub — and reaching one of these bodies
+    is the aliasing the task's own bodies exist to prevent.  So every body
+    records itself, and a test asserts the list stayed empty.
+    """
+    mcp = FastMCP("agent")
+
+    @mcp.tool(name=CHECK_NEW_INPUT, meta=FOR_THE_MODEL)
+    async def check_new_input(ctx: Context) -> str:
+        reached.append(CHECK_NEW_INPUT)
+        return "the agent's queued message"
+
+    @mcp.tool(name=ATTACH_IMAGE, meta=FOR_THE_MODEL)
+    async def attach_image(ctx: Context, sources: list[str]) -> dict[str, Any]:
+        reached.append(ATTACH_IMAGE)
+        return {"attached": [], "refused": []}
+
+    @mcp.tool(name=TURN_COMPACT, meta=FOR_THE_MODEL)
+    async def turn_compact(ctx: Context) -> str:
+        reached.append(TURN_COMPACT)
+        return "the agent's compaction"
+
+    @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
+    async def context_rebuild(ctx: Context) -> str:
+        reached.append(CONTEXT_REBUILD)
+        return "the agent's rebuild"
+
+    return mcp
+
+
+def hub_declaring_them(reached: list[str]) -> Client:
+    """A hub whose `agent` is `declaring_agent` and whose others are the usual."""
+    from slife2.plugins.toolhub.server import build_server as build_hub
+
+    base = default_config()
+    return Client(
+        build_hub(
+            base,
+            transports=plugin_transports(
+                base, {"agent": lambda _settings: declaring_agent(reached)}
+            ),
+            embedder=StubEmbedder(),
+        )
+    )
+
+
+async def test_a_subagents_task_runs_on_the_subagents_own_conversation(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """**The maker is a conversation, not an agent name.**
+
+    A subagent that starts a task is asking for a turn of *its* conversation:
+    `subagent.j2` with its role, the subagent's context, and the subagent's plan.
+    The answer still reaches the agent's window — a subagent has none of its own
+    — but the turn is the subagent's, which is what the prompt and the restored
+    history are here to prove.
+    """
+    a_subagent(role="researcher")
+    async with Client(store.client.transport) as writer:  # the same store
+        await writer.call_tool(
+            "remember",
+            {
+                "agent": AGENT,
+                "subagent": SUBAGENT,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "scout settled on three retries",
+                    }
+                ],
+                "who_helped": SUBAGENT,
+                "channel": "subagent:scout",
+                "created_at": "2026-10-12T09:00:00+08:00",
+                "completed_at": "2026-10-12T09:00:01+08:00",
+            },
+            meta=conversation_meta(AGENT, SUBAGENT),
+        )
+
+    built = build(text_turn("three"), hub=hub, context=store, window=window)
+    async with Client(built.mcp) as client:
+        await client.call_tool(
+            AGENT_TASK_START,
+            {"name": "research", "description": DESCRIPTION},
+            meta=conversation_meta(AGENT, SUBAGENT),
+        )
+    await settle(built)
+
+    messages = built.messages()
+    system = str(messages[0].content)
+    assert "one of jack's subagents" in system, system
+    assert "your role is researcher" in system, system
+    assert any(
+        "scout settled on three retries" in str(message.content) for message in messages
+    ), "the task ran on the subagent's context, not the agent's"
+    # The answer goes to the only window there is: the agent's.
+    assert window.handed[0]["agent"] == AGENT
+
+
+async def test_a_task_has_no_cut_in_and_takes_nothing_from_the_maker(
+    store: Store, window: Window
+) -> None:
+    """`_check_new_input` in a task answers "nothing waiting" — and reaches no
+    agent server.
+
+    A task is one user message and one turn: it has no inbox, and the message
+    queue the agent server holds is its maker's, not the task's.  The tool keeps
+    its declaration (the hub advertises it to every model), and its body is the
+    task's own — so the agent server's `_check_new_input`, which would take the
+    maker's queued message, is never called.
+    """
+    reached: list[str] = []
+    hub = hub_declaring_them(reached)
+    async with hub:
+        built = build(
+            tool_turn(ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={})),
+            text_turn("done"),
+            hub=hub,
+            context=store,
+            window=window,
+        )
+        await start(built)
+        await settle(built)
+
+    assert reached == [], "the task reached the agent server's cut-in"
+    tool = tool_result(built.messages(), CHECK_NEW_INPUT)
+    assert NOTHING_WAITING in str(tool.content), "the view carries the id footnote"
+
+
+async def test_a_task_compacts_itself_at_the_threshold(
+    store: Store, window: Window
+) -> None:
+    """**A task is one turn with no record**, so a turn that overflows has no
+    next turn to recover on.  The same automatic pass the agent server runs
+    keeps it alive: the harness asks, the selector drops, the answer arrives.
+
+    The names the hub declares for `_turn_compact` stay the hub's; the body is
+    the task's own, so the agent server's compaction is never reached.
+    """
+    reached: list[str] = []
+    hub = hub_declaring_them(reached)
+    high = Usage(prompt_tokens=500, completion_tokens=100)
+    async with hub:
+        built = build(
+            tool_turn(
+                ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}), usage=high
+            ),
+            tool_turn(
+                ToolCall(id="c2", name=CHECK_NEW_INPUT, arguments={}), usage=high
+            ),
+            text_turn("done"),
+            hub=hub,
+            context=store,
+            window=window,
+            compact_at=0.0005,
+        )
+        await start(built)
+        await settle(built)
+
+    assert reached == [], "the task reached the agent server's compaction"
+    assert store.select is not None and store.select.calls, "the harness asked"
+    calls = [
+        call
+        for message in built.messages()
+        if message.role == "assistant"
+        for call in message.tool_calls
+    ]
+    assert not any(call.id in {"c1", "c2"} for call in calls), (
+        "the dropped exchanges are out of the view the last call ran on"
+    )
+    assert not any(
+        message.role == "assistant" and "[MESSAGE:" in str(message.content)
+        for message in built.messages()
+    ), "an annotation is never written into the model's own words"
+    assert window.handed and "done" in window.handed[-1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_task_stops_asking_a_failed_selector(hub, window) -> None:
+    """**A task is one turn, so a failing selector must not be asked again.**
+
+    The threshold stays crossed after the first failure; without the hold the
+    task would pay for the same failing provider at every iteration it has
+    left.  The rule is the agent server's, reached through the same helper.
+    """
+    from slife2.plugins.context.server import build_server as build_context
+
+    asked: list[str] = []
+
+    async def broken(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: Any,
+        selectable: list[str],
+        *,
+        usage: str = "",
+        previous: str = "",
+        repair: str = "",
+    ) -> str:
+        asked.append(usage)
+        raise RuntimeError("the provider is down")
+
+    high = Usage(prompt_tokens=500, completion_tokens=100)
+    decision = DecisionModel()
+    async with Client(
+        build_context(
+            default_config(), embedder=StubEmbedder(), ask=decision, select=broken
+        )
+    ) as client:
+        context = Store(client=client, ask=decision, select=None)
+        async with hub:
+            built = build(
+                tool_turn(
+                    ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}), usage=high
+                ),
+                tool_turn(
+                    ToolCall(id="c2", name=CHECK_NEW_INPUT, arguments={}), usage=high
+                ),
+                text_turn("done"),
+                hub=hub,
+                context=context,
+                window=window,
+                compact_at=0.0005,
+            )
+            await start(built)
+            await settle(built)
+
+    assert len(asked) == 1, "the failed selector was not asked again"
+    pairs = [
+        message
+        for message in built.messages()
+        if message.role == "assistant"
+        for call in message.tool_calls
+        if call.name == TURN_COMPACT
+    ]
+    assert len(pairs) == 1, "one pair, carrying the failure"
+
+
+async def test_a_tasks_attach_image_lands_on_its_own_next_call(
+    store: Store, window: Window
+) -> None:
+    """The picture goes on the task's *own* model call, which is the next one.
+
+    A task's single user message is the rendered description, so that is where
+    `attach_image` injects — the task's list is the only list its next request
+    carries.  The agent server's version, which would inject into the maker's
+    live loop, is never reached.
+    """
+    reached: list[str] = []
+    hub = hub_declaring_them(reached)
+    source = "data:image/png;base64,AAAA"
+    async with hub:
+        built = build(
+            tool_turn(
+                ToolCall(id="c1", name=ATTACH_IMAGE, arguments={"sources": [source]})
+            ),
+            text_turn("I see it"),
+            hub=hub,
+            context=store,
+            window=window,
+        )
+        await start(built)
+        await settle(built)
+
+    assert reached == [], "the task reached the agent server's attach_image"
+    messages = built.messages()
+    opening = [message for message in messages if message.role == "user"][0]
+    assert isinstance(opening.content, list), "the task's message carries the parts"
+    urls = [
+        part["image_url"]["url"]
+        for part in opening.content
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    ]
+    assert urls == [source]
+    tool = tool_result(messages, ATTACH_IMAGE)
+    assert json.loads(without_id(tool.content)) == {
+        "attached": [source],
+        "refused": [],
+    }
+
+
+async def test_a_task_of_a_subagent_that_is_gone_does_not_recreate_the_name(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """A name with no record is not a conversation, and a task does not make one.
+
+    The record's *existence* is what makes a directory a subagent's; a task that
+    ran on a removed name would restore a conversation whose store recreates the
+    directory without a record, and that blocks the name for `subagent_create`
+    and `subagent_remove` for ever.  So the task fails with a message — which is
+    the one thing it can still deliver.
+    """
+    built = build(text_turn("never reached"), hub=hub, context=store, window=window)
+    async with Client(built.mcp) as client:
+        await client.call_tool(
+            AGENT_TASK_START,
+            {"name": "research", "description": DESCRIPTION},
+            meta=conversation_meta(AGENT, SUBAGENT),
+        )
+    stopped = await settle(built)
+
+    assert stopped["status"] == "failed"
+    assert not subagent_file(AGENT, SUBAGENT).parent.exists(), (
+        "the task recreated a record-less subagent directory"
+    )
+    assert "no subagent" in window.handed[0]["text"]

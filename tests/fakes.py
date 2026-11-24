@@ -1,10 +1,11 @@
 """Test doubles.
 
-Five seams get faked, and each one exists because something real and slow sits
+Six seams get faked, and each one exists because something real and slow sits
 behind it: the model (an HTTP call to a provider), the embedding model (another
-one), the agent server (a socket), the window's own inbox (another socket, and
-one the window *holds open* rather than calls), and the observer (nothing — but a
-recorder is how a test reads what happened).
+one), the agent server (a socket), the agent-task server's list (another
+socket), the window's own inbox (another socket, and one the window *holds
+open* rather than calls), and the observer (nothing — but a recorder is how a
+test reads what happened).
 
 Plus one that is not a seam but a *shape*: the set of plugins a toolhub will
 ask for tools.  It is here because three test modules need it and none of them
@@ -28,11 +29,11 @@ from fastmcp.tools import Tool
 
 from slife2.libs.host.config import Config
 from slife2.libs.model.base import Chunk, Stream
+from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.events import TurnEvent
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec
 from slife2.libs.turn.watch import WatchItem
-from slife2.plugins.tui.server import NOTE, Handover
-from slife2.tui.client import TurnReply
+from slife2.tui.client import Conversation, TurnReply
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
@@ -186,6 +187,9 @@ class FakeAgentClient:
         #: window opened after a restart sees it.  Empty is the real answer for
         #: a name that has never run, and so is the default.
         self.turns: list[dict[str, Any]] = []
+        #: And the plan that came with it.  Empty is a real answer — a
+        #: conversation with no plan — so the strip is hidden by default.
+        self.plan: list[dict[str, str]] = []
         #: How many times the history was read, so a test can prove a window
         #: reads it once rather than once per connection.
         self.reads = 0
@@ -205,11 +209,11 @@ class FakeAgentClient:
             raise self._connect_error
         self.connected = True
 
-    async def transcript(self) -> list[dict[str, Any]]:
+    async def transcript(self) -> Conversation:
         if not self.connected:
             raise ConnectionError("not connected")
         self.reads += 1
-        return list(self.turns)
+        return Conversation(list(self.turns), [dict(item) for item in self.plan])
 
     async def close(self) -> None:
         self.connected = False
@@ -348,6 +352,40 @@ class FakeWatchClient:
         """Push one item, as the server's progress stream does."""
         assert self.on_item is not None, "nothing has started watching"
         self.on_item(item)
+
+
+class FakeAgentTaskClient:
+    """An :class:`~slife2.tui.client.AgentTaskClient` with a scripted list.
+
+    The list is what the picker reads; the watch screen is handed a
+    `FakeWatchClient` separately, because the app opens a connection of its own
+    for the stream.  The two fakes are two lifetimes, which is the design the
+    real clients have.
+    """
+
+    def __init__(self, *, connect_error: Exception | None = None) -> None:
+        self.connect_error = connect_error
+        self.connected = False
+        self.closed = False
+        #: What `tasks` answers with — the rows `agent_task_list` returns.
+        #: Empty is the real answer for an agent running nothing.
+        self.tasks_answer: list[dict[str, Any]] = []
+        self.reads = 0
+
+    async def connect(self) -> None:
+        if self.connect_error is not None:
+            raise self.connect_error
+        self.connected = True
+
+    async def close(self) -> None:
+        self.connected = False
+        self.closed = True
+
+    async def tasks(self) -> list[dict[str, Any]]:
+        if not self.connected:
+            raise ConnectionError("not connected")
+        self.reads += 1
+        return [dict(one) for one in self.tasks_answer]
 
 
 class FakeWindowClient:
@@ -491,27 +529,26 @@ class StubEmbedder:
 
 
 async def keep_the_context(
-    agent: str, subagent: str, model: str, messages: list[Any], prompt: str
+    agent: str, subagent: str, model: str, messages: list[Any], *, usage: str = ""
 ) -> str:
-    """A discriminator that answers "keep what is in hand" — `{}`.
+    """A decision model that keeps every turn in hand and recalls nothing.
 
     **The context plugin's other real seam, and the one that is easy to leave
     open.**  `build_server` takes `ask`, and an un-injected one is a *real model
     call*; these tests take their addresses from the config, so a plugin built
     without it reaches whatever is listening on the model server's port — which,
     on a machine with the daemons up, is a real provider.  What the rebuild then
-    does is up to that model, and `{"context": "clear"}` empties the list: the
-    next turn runs on its own message and nothing else, so a test asserting that
-    the context survives fails for a reason that has nothing to do with the
-    server under test.  Intermittent, because the answer is.
+    does is up to that model, and a clear action empties the list: the next turn
+    runs on its own message and nothing else, so a test asserting that the
+    context survives fails for a reason that has nothing to do with the server
+    under test.  Intermittent, because the answer is.
 
-    `{}` and not a failure: "a decision that asks for exactly what is in hand
-    rebuilds nothing at all" is the behaviour those tests are written against,
-    and it is the same default `Replies` falls back to in
-    `tests/plugins/context/test_context_server.py`, which varies the *answer*
-    rather than the seam.
+    The no-change answer and not a failure: "a decision that asks for exactly
+    what is in hand rebuilds nothing at all" is the behaviour those tests are
+    written against.  `recall: {}` is answered as well as `keep`, because the
+    schema requires both halves.
     """
-    return "{}"
+    return '{"keep": {"action": "keep"}, "recall": {}}'
 
 
 @dataclass

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -101,10 +102,12 @@ class ToolCall:
         the wire format requires — the awkwardness is theirs, and this method is
         the single place it is dealt with.
 
-        `ensure_ascii=True` keeps the payload pure ASCII.  It crosses a UTF-8
-        JSON-RPC boundary either way, but the same string can also land in a
-        server log on a console whose codepage is not UTF-8, and a mojibake log
-        line is a worse failure than an escaped one.
+        **The encoding we do is ASCII**, so a payload this serializer builds
+        survives a server log on a console whose codepage is not UTF-8 — a
+        mojibake log line is a worse failure than an escaped one.  A damaged
+        call's `raw_arguments` is the exception: it is the wire's own text,
+        kept so the stored turn records what the model actually wrote, and it
+        is forwarded as it arrived.
         """
         rendered = (
             self.raw_arguments
@@ -132,8 +135,23 @@ class ToolCall:
         The same reading is in `read_arguments`, and it is the same sentence the
         LLM server uses when it assembles a damaged provider stream: one rule,
         whichever hop the call came through.
+
+        **The nesting is checked too.**  A `function` that is not a mapping is
+        not a call this build can read: reaching into it raised
+        `AttributeError`, which is not the `KeyError` the model client turns
+        into its named "a model server from another build" refusal.  It is a
+        shape refusal, so it raises `KeyError` rather than inventing a call.
         """
-        function = raw.get("function") or {}
+        if not isinstance(raw, Mapping):
+            raise KeyError(f"a tool call is not an object but {type(raw).__name__}")
+        function = raw.get("function")
+        if function is None:
+            function = {}
+        elif not isinstance(function, Mapping):
+            raise KeyError(
+                "a tool call's `function` is not an object but "
+                f"{type(function).__name__}"
+            )
         call_id = str(raw.get("id") or "")
         name = str(function.get("name") or "")
         raw_args = function.get("arguments")
@@ -198,6 +216,24 @@ class Message:
     #: has lost the reasoning has a hole in it, and the hole is exactly where
     #: the reader was looking.
     thinking: str = ""
+    #: The provider's own reasoning payload for this assistant turn, exactly as
+    #: it arrived — opaque to this build and returned unmodified by the adapter
+    #: that wrote it.
+    #:
+    #: Two wires require this, and neither accepts the readable `thinking` in its
+    #: place: Anthropic's Messages API rejects a tool loop whose assistant
+    #: thinking blocks were not returned beside the tool results (the signed
+    #: blocks must go back unmodified), and OpenAI's Responses API rejects one
+    #: whose reasoning items were dropped when `store: false`.  The drop was
+    #: deliberate and tested, and it is why a first-party reasoning model failed
+    #: on the second call of every tool loop.
+    #:
+    #: Shaped `{"model": <the API model that produced it>, "blocks": [<opaque>]}`
+    #: rather than a bare list: a conversation can be moved to another model
+    #: (`model_switch`), and a signed block replayed to a model that did not
+    #: produce it is a 400.  Each adapter sends the blocks only when the model
+    #: matches the one it is calling.  Empty means none.
+    reasoning: dict[str, Any] | None = None
     #: Assistant turns only — the calls this turn is asking for.
     tool_calls: list[ToolCall] = field(default_factory=list)
     #: Tool turns only — which call this is the result of.
@@ -205,15 +241,25 @@ class Message:
     #: Where the message came in on, for the turns the harness wrote rather than
     #: the model.
     #:
-    #: **Display metadata, and the one field here that a provider never sees.**
-    #: A message that cut into a running turn is written as a tool pair, and the
-    #: tool result carries the words but not the channel they arrived on; the
-    #: line a rebuilt transcript draws for that pair needs the channel to wear
-    #: the right bubble, so it rides the message.  `to_wire` deliberately omits
+    #: **Display metadata and the record, and the one field here a provider
+    #: never sees.**  A message that cut into a running turn is written as a
+    #: tool pair, and the channel is how a screen tells a real delivery from a
+    #: `_check_new_input` pair that took nothing; the pair's answer is drawn as
+    #: the harness note, so this rides the message for the record and that check
+    #: rather than for a bubble.  `to_wire` deliberately omits
     #: it — the model's request has no such field — and `to_record` is what
     #: keeps it in the turn log.  Empty for every message that did not cut in,
     #: which is every message a model or a person wrote.
     channel: str = ""
+    #: The message's id in the live view: `{turn_id}.{index}` for a historical
+    #: turn's message, `cur.{index}` for one of the turn running.  **Derived and
+    #: never stored**, like the `[TURN:]` footnote: `messages_from_turns` sets it
+    #: from the row, `compact.view` derives the running turn's from its offset,
+    #: and the view that annotates a message recomputes it.  `to_wire` and
+    #: `to_record` both omit it; the model sees the `[MESSAGE:{"id": …}]` prefix
+    #: the view writes into the content, which is the same id in the one place
+    #: the model reads.  Empty for the system prompt, which is not addressable.
+    mid: str = ""
 
     def to_wire(self) -> dict[str, Any]:
         """Render as the message our own hop carries.
@@ -241,6 +287,8 @@ class Message:
 
         if self.thinking:
             payload["thinking"] = self.thinking
+        if self.reasoning:
+            payload["reasoning"] = self.reasoning
         if self.tool_calls:
             payload["tool_calls"] = [c.to_wire() for c in self.tool_calls]
         if self.tool_call_id is not None:
@@ -251,7 +299,7 @@ class Message:
         """The stored shape: the wire's, plus the metadata only a reader needs.
 
         **One method rather than a second writer in the turn log.**  The store
-        is handed messages as dicts (`slife2.plugins.agent.server.record`), and
+        is handed messages as dicts (`slife2.plugins.agent.recording.Recorder.record`), and
         a display field added at that call site would be a second answer to what
         a message is — on the path that has to agree with the live list exactly.
         So the wire stays the model's shape and this adds what the record keeps
@@ -301,10 +349,33 @@ class Message:
             role=cast(Role, role),
             content=content,
             thinking=str(raw.get("thinking") or ""),
+            reasoning=_reasoning_payload(raw.get("reasoning")),
             tool_calls=tool_calls,
             tool_call_id=raw.get("tool_call_id"),
             channel=str(raw.get("channel") or ""),
+            mid=str(raw.get("_mid") or ""),
         )
+
+
+def _reasoning_payload(raw: Any) -> dict[str, Any] | None:
+    """A message's opaque reasoning payload, read as absent when it is not one.
+
+    **Opaque is not unreadable.**  This build never looks inside the envelope,
+    but it does know its shape — a mapping with a `blocks` list — because the
+    adapters depend on that to find it.  A value of another shape is damage
+    from another build; it is named and dropped rather than passed to a
+    provider that would answer with a 400 about a field nobody wrote.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict) and isinstance(raw.get("blocks"), list):
+        return raw
+    logger.warning(
+        "a message carried a reasoning payload this build cannot read (%r); "
+        "dropping it",
+        type(raw).__name__,
+    )
+    return None
 
 
 @dataclass(frozen=True)
@@ -418,6 +489,10 @@ class StreamChatResult:
     #: the display channel for a fact about the record — which is the mistake
     #: this class exists to prevent, one field over.
     thinking: str = ""
+    #: The provider's own reasoning payload, as `Message.reasoning` carries it.
+    #: `{}` when there is none, so the wire keeps one type per key rather than a
+    #: null this build never writes.
+    reasoning: dict[str, Any] = field(default_factory=dict)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
 
@@ -426,6 +501,7 @@ class StreamChatResult:
             "text": self.text,
             "tool_calls": [c.to_wire() for c in self.tool_calls],
             "thinking": self.thinking,
+            "reasoning": self.reasoning,
             "usage": self.usage.to_wire(),
             "stop_reason": self.stop_reason,
         }
@@ -437,20 +513,61 @@ class StreamChatResult:
         `None` is FastMCP's "the far end sent no structured content" and reads
         as an empty result; the caller that cannot tell that from an empty
         answer must guard the shape before it gets here (`slife2.clients.model`).
-        A mapping must carry every key `to_wire` writes: a hole is not an empty
-        answer, and defaulting it would invent one.
+
+        **A mapping must carry every key `to_wire` writes, in the shape it
+        writes.**  A hole and a null are two spellings of a value this build
+        cannot read: `to_wire` never emits either, so defaulting one would
+        invent an empty answer out of another build's unreadable one — the
+        confident negative SDD Appendix C forbids.  The value check is one rule
+        for all six keys rather than a special case per null the field names.
         """
         if raw is None:
             return cls()
-        missing = sorted(
-            {"text", "tool_calls", "thinking", "usage", "stop_reason"} - raw.keys()
-        )
+        shape: dict[str, type] = {
+            "text": str,
+            "tool_calls": list,
+            "thinking": str,
+            "reasoning": dict,
+            "usage": dict,
+            "stop_reason": str,
+        }
+        missing = sorted(shape.keys() - raw.keys())
         if missing:
             raise KeyError(f"stream_chat result is missing {', '.join(missing)}")
+        wrong = sorted(
+            key for key, kind in shape.items() if not isinstance(raw[key], kind)
+        )
+        if wrong:
+            raise KeyError(
+                f"stream_chat result has no readable {', '.join(wrong)}: this "
+                "build writes one value of a known shape for every key, and "
+                "this is not one"
+            )
+        if not all(isinstance(call, dict) for call in raw["tool_calls"]):
+            raise KeyError("stream_chat result has a tool call that is not an object")
+        if raw["reasoning"] and not isinstance(raw["reasoning"].get("blocks"), list):
+            raise KeyError("stream_chat result has no readable reasoning")
+        # **The usage counts are integers, not text a cast accepts.**  The
+        # shape table only says the usage is a mapping; `int("12")` would read
+        # a foreign build's string as a measurement and `int("abc")` raised a
+        # `ValueError` past the client's `KeyError` guard.  A hole or a
+        # non-integer is this build's "cannot read it" sentence.
+        bad = sorted(
+            key
+            for key in Usage().to_wire()
+            if not isinstance(raw["usage"].get(key), int)
+            or isinstance(raw["usage"].get(key), bool)
+        )
+        if bad:
+            raise KeyError(
+                "stream_chat result has no readable usage "
+                + ", ".join(f"`{key}`" for key in bad)
+            )
         return cls(
-            text=str(raw["text"] or ""),
-            tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"] or []),
-            thinking=str(raw["thinking"] or ""),
+            text=raw["text"],
+            tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"]),
+            thinking=raw["thinking"],
+            reasoning=raw["reasoning"],
             usage=Usage.from_wire(raw["usage"]),
-            stop_reason=str(raw["stop_reason"] or ""),
+            stop_reason=raw["stop_reason"],
         )

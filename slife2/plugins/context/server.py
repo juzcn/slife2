@@ -16,27 +16,46 @@ a server.  `TurnStore` is therefore imported by the process that writes it, and
 this plugin is a serve face over that import: one holder of the schema, one
 embedder hop, one startup pass over every file, for the half it owns.
 
-The two decisions, and where they sit in a turn
------------------------------------------------
-`restore` runs when a conversation starts, and `rebuild` before every turn:
+The two decision models, and where they sit in a turn
+-----------------------------------------------------
+`restore` runs when a conversation starts.  After it, both model decisions are
+made through this plugin: `rebuild` for `_context_rebuild` at the first
+boundary, and `select_live` for `_turn_compact` when the turn crosses
+`agent.compact_at`:
 
 ```
 send_message
   └─ the first message for a key → restore      ← the exit-time context, replayed
-  └─ per turn, inside the lock, before the user's message:
-       rebuild                                  ← keep ∪ recall, one model call
+  └─ per turn, inside the lock:
        run the turn (the loop appends the message)
-       save                                       the new id joins the live list
+       first boundary → _context_rebuild        ← keep ∪ recall, one decision call
+       each compact_at crossing → _turn_compact ← what the turn still needs,
+                                                  one decision call
+       save                                     the new id joins the live list
 ```
 
-**Both are the harness's API and neither is the model's** — which is not the same
-thing as a *harness tool*: those are LLM-visible and auto-invoked, and these two
-are never in the model's list at all (`slife2.libs.turn.tools` is where the two words are
-told apart).  The model has `turn_list`
-and `turn_read` — a model that can read its history is the point of a turn log —
-and it has no `rebuild`: what the context *is* is not something a model gets to
-ask for, and the footnote it reads on each turn is how it says what it wants kept
-without ever calling anything (`slife2.libs.turn.context`).
+**The two decisions are one contract.**  `_ask_tool` builds the forced request,
+`_ask_model` and `_ask_selector` keep only their schema, instruction and log
+subject; SDD §5.3 states the contract both answer to.  **The answer is raw
+arguments and is not parsed here**: the harness calls `_context_rebuild` /
+`_turn_compact` with them, and those tools check legality and answer with a
+tool error when the arguments are wrong.  The agent reads that error and can
+correct the call itself.  There is no repair round and no second check.
+
+**A decision that could not answer is still a tool call.**  The harness wraps
+the provider's failure text into the selection it passes on, so the pair carries
+a failure the agent sees rather than an empty call; `rebuild` keeps the context
+in hand and `select_live` compacts nothing, as before.
+
+**`restore` is the harness's API and not the model's.**  `rebuild` is this
+plugin's API and not the model's either — but it is reached through
+`_context_rebuild`, a *harness tool*: LLM-visible, auto-invoked at the first
+boundary, and written into the conversation as a pair whose answer reports what
+was kept and recalled (`slife2.libs.turn.tools` tells the two words apart).  The
+model has `turn_list`, `turn_read`, `_context_rebuild` and `_turn_compact`; the
+decision model still decides the selection, and the footnote it reads on each
+turn is how it says what it wants kept without calling anything
+(`slife2.libs.turn.context`).
 
 What is deliberately absent
 ---------------------------
@@ -52,16 +71,16 @@ the persisted list and the write that maintains it, which both are.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from fastmcp import Client, Context, FastMCP
 from fastmcp.exceptions import ToolError
 
-import slife2.helpers.timeouts as _T
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import (
@@ -73,6 +92,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import agents_dir, turn_dbs
+from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
     close_server,
@@ -83,19 +103,28 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     unreadable,
 )
+from slife2.libs.plugin.vocabulary import TURN_SUMMARIZE
+from slife2.libs.store.answer import search_answer
 from slife2.libs.store.db import (
     StaleSchema,
     TurnStore,
     assistant_message,
+    read_store_for,
     store_for,
     user_message,
 )
-from slife2.libs.store.index import Embedder, page_limit
-from slife2.libs.store.textindex import terms
+from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit, time_window
+from slife2.libs.store.textindex import EmptyQuery, terms
 from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
-from slife2.libs.turn.messages import StreamChatResult, Usage
+from slife2.libs.turn.messages import StreamChatResult, ToolSpec, Usage
 from slife2.libs.turn.tokens import estimate_turn_tokens
+from slife2.libs.turn.tools import (
+    CONTEXT_REBUILD,
+    CONTEXT_REBUILD_TEXT,
+    TURN_COMPACT,
+    TURN_COMPACT_TEXT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +133,11 @@ SERVER_NAME = CONTEXT_SERVER_NAME
 #: This server's key in the config's `servers:` table, and the name the agent
 #: server connects to it by.
 CONFIG_KEY = "context"
+
+#: The page a `turn_list` that names no size gets — the same convention every
+#: listing in this system uses (`slife2.libs.paging.page_window`): a caller
+#: that names no size must not get the smallest legal page.
+DEFAULT_TURN_PAGE = 20
 
 #: How much of a candidate a cross-encoder reads.  The turn's own exchange is
 #: what relevance is judged on; a tool result would swamp it (results are
@@ -150,13 +184,106 @@ INSTRUCTIONS = (
     "conversation is made of, and no model calls them."
 )
 
-#: The discriminator call, as a seam: the conversation and the input in, whatever
-#: the model said out.  A test injects one; production uses the model server
+
+#: The decision-model call, as a seam: the conversation in, the decision tool's
+#: raw argument text out.  A test injects one; production uses the model server
 #: named by the conversation's model.
-Discriminator = Callable[
-    [str, str, str, list[dict[str, Any]], str],
-    Awaitable[str],
-]
+#:
+#: **One call, and no parse.**  The text is handed to the tool the arguments are
+#: for; that tool checks legality and answers with a tool error when they are
+#: wrong.  There is no repair round and no second check here.
+class DecisionModel(Protocol):
+    def __call__(
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        usage: str = "",
+    ) -> Awaitable[str]: ...
+
+
+class Selector(Protocol):
+    """The live compaction selector, as a seam: the view and its candidates in,
+    the selection tool's raw argument text out.
+
+    One call and no parse, for `DecisionModel`'s reason: `_turn_compact` checks
+    the arguments it receives.
+    """
+
+    def __call__(
+        self,
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        selectable: list[str],
+        *,
+        usage: str = "",
+    ) -> Awaitable[str]: ...
+
+
+async def _ask_tool(
+    config: Config,
+    clients: dict[str, Client],
+    opening: asyncio.Lock,
+    agent: str,
+    subagent: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    tool_name: str,
+    tool_text: str,
+    parameters: dict[str, Any],
+    instruction: str,
+    kind: str,
+) -> str:
+    """One forced tool call, and nothing listening to it.
+
+    **The call is structured.**  The one tool advertised is the caller's, forced
+    by `tool_choice`, with the reply schema as its `parameters`; the instruction
+    travels as a system message.  A model left free in a tool-heavy conversation
+    continues the conversation's own calls instead of deciding; a forced tool
+    has nowhere else to put the answer.
+
+    **The tool is named, not run.**  The forced name is the real tool's
+    (`_context_rebuild` / `_turn_compact`), but this function talks to the model
+    server directly and never the toolhub: what comes back is a tool *call*, and
+    its arguments are the decision the caller applies.  Nothing in this path
+    dispatches a tool, so a name that is also a live tool executes nothing.
+
+    **The answer is the raw argument text, unchecked.**  No parser runs here and
+    nothing is asked twice: the tool the arguments are for checks them, and a
+    refusal is that tool's error result.  A provider that answers with prose or
+    another tool is `Unanswered`, which the caller reports the same way.
+
+    **Thinking is off, and the temperature is zero.**  A thinking endpoint
+    rejects a forced `tool_choice` (DeepSeek answers 400), and the structured
+    call is what makes the answer readable; the turn's own calls keep the
+    configured thinking.  A decision is a selection, not prose, so sampling can
+    only add variance to the same answer — 0 overrides the model's configured
+    temperature for this call.
+
+    The transport's rules — the kept client, the silence, the absence of a
+    timeout and the refusal of an unreadable answer — are `_stream_chat`'s.
+    """
+    tool = ToolSpec(name=tool_name, description=tool_text, parameters=parameters)
+    asked = [*messages, {"role": "system", "content": instruction}]
+    result = await _stream_chat(
+        config,
+        clients,
+        opening,
+        agent,
+        subagent,
+        model,
+        asked,
+        tools=[tool.to_wire()],
+        tool_choice=tool_name,
+        thinking="disabled",
+        kind=kind,
+    )
+    return decision_arguments(result, tool_name)
 
 
 async def _ask_model(
@@ -167,27 +294,120 @@ async def _ask_model(
     subagent: str,
     model: str,
     messages: list[dict[str, Any]],
-    user_input: str,
+    *,
+    usage: str = "",
 ) -> str:
-    """One `stream_chat` call, with no tools and nothing listening to it.
+    """The historical-turn decision, as `_context_rebuild`'s raw arguments.
 
-    **No progress handler**, which is what makes the call silent: the server
-    reports progress only to a caller that asked for a token, so a discriminator
-    turn reaches no transcript and no observer by construction rather than by a
-    filter somebody has to remember.
+    The forced tool is the one the model already knows — the same name, the
+    same description and the same schema it calls in a turn.  **The live
+    context is the input, as the turn runs it**: the decision is about turns,
+    and a turn's tool exchanges are part of what the model reads.  The
+    instruction follows as a system message; `usage` is the context figure it
+    prints — the same one the status bar and the selector read.  The call rules
+    are `_ask_tool`'s, and the answer is unchecked: the tool checks it.
+    """
+    return await _ask_tool(
+        config,
+        clients,
+        opening,
+        agent,
+        subagent,
+        model,
+        messages,
+        tool_name=CONTEXT_REBUILD,
+        tool_text=CONTEXT_REBUILD_TEXT,
+        parameters=decisions.RECALL_REPLY,
+        instruction=decisions.decision_instruction(usage, CONTEXT_REBUILD),
+        kind="decision",
+    )
+
+
+async def _ask_selector(
+    config: Config,
+    clients: dict[str, Client],
+    opening: asyncio.Lock,
+    agent: str,
+    subagent: str,
+    model: str,
+    messages: list[dict[str, Any]],
+    selectable: list[str],
+    *,
+    usage: str = "",
+) -> str:
+    """The live selector's forced tool call, over the view the caller annotated.
+
+    **The forced tool is `_turn_compact`** — the name, description and schema
+    the model already calls in a turn.  **The ids are already on the messages.**
+    The live view writes each message's `[MESSAGE:{"id": …}]` annotation before
+    the request, so this call adds nothing: the selector reads the ids the
+    turn's own model reads.  The instruction states the task, the marker and the
+    context figure the caller measured — the same figure the status bar and the
+    turn prompt show; the rules (the fixed two, the tool-exchange legality) are
+    the schema's, `decisions.LIVE_REPLY`.  The call rules are `_ask_tool`'s, and
+    the answer is unchecked: `_turn_compact` checks it.
+
+    `selectable` is the seam's candidate set, handed to an injected selector
+    so a test can script an answer against it; the instruction does not list it,
+    because every message already carries its id.
+    """
+    return await _ask_tool(
+        config,
+        clients,
+        opening,
+        agent,
+        subagent,
+        model,
+        messages,
+        tool_name=TURN_COMPACT,
+        tool_text=TURN_COMPACT_TEXT,
+        parameters=decisions.LIVE_REPLY,
+        instruction=decisions.decision_instruction(usage, TURN_COMPACT),
+        kind="compactor",
+    )
+
+
+async def _stream_chat(
+    config: Config,
+    clients: dict[str, Client],
+    opening: asyncio.Lock,
+    agent: str,
+    subagent: str,
+    model: str,
+    asked: list[dict[str, Any]],
+    *,
+    tools: list[dict[str, Any]],
+    tool_choice: str,
+    thinking: str,
+    kind: str,
+) -> StreamChatResult:
+    """One silent `stream_chat` call: the transport both decisions share.
+
+    **The call is structured and silent.**  `tools` is the one decision tool and
+    `tool_choice` forces it, so the provider returns a tool call rather than
+    content; `thinking` is the per-call override that makes a forced choice
+    legal on a thinking endpoint.  No progress handler is passed, which is what
+    makes the call silent: the server reports progress only to a caller that
+    asked for a token, so a decision reaches no transcript and no observer by
+    construction rather than by a filter somebody has to remember.
 
     The client is opened once per *model server* and kept for the process — the
     agent server's arrangement, for the agent server's reason: a handshake per
     call is a handshake per call.  Keyed by URL because a server speaks one wire
     format for every provider that uses it.
 
+    **No timeout of its own.**  This is a model call like the turn's own, so it
+    is bounded where every model call is — the provider's own limits inside the
+    model server — and a slow answer only makes the turn late.  A second, shorter
+    clock here was a knob with no job: it turned a working-but-slow provider
+    into a refused decision, and the refusal looked exactly like a broken one.
+
     **An answer this build cannot read is refused, not read as a silent one.**
     FastMCP leaves `CallToolResult.data` as `None` whenever the far end sent no
     structured content, and `StreamChatResult.from_wire(None)` builds an empty
     result — so a model server from another build would arrive here as "the model
-    answered with nothing": `_discriminate` logs `recall_discriminator_unparsed`
-    and keeps the context, and every rebuild for the rest of the session does the
-    same, with the log pointing at the model's output rather than at the
+    answered with nothing": the caller raises, logs the call as failed and keeps
+    the context, with the log pointing at the model's output rather than at the
     transport.  `slife2.clients.model` raises for exactly this on the loop's own
     hop, and this is the same check with the same sentence, because the cause is
     the same: a daemon from another build.
@@ -200,12 +420,7 @@ async def _ask_model(
                 url,
                 name=API_SERVER_NAMES[provider.api],
                 fallback_tool="stream_chat",
-                timeout=_T.timeouts.work.model_call,
             )
-    asked = [
-        *messages,
-        {"role": "user", "content": decisions.instruction(user_input)},
-    ]
     result = await clients[url].call_tool(
         "stream_chat",
         {
@@ -214,22 +429,69 @@ async def _ask_model(
             "agent": agent,
             "subagent": subagent,
             # The model server's usage line says whose call it served and what
-            # kind: this one is the recall decision, and reading it apart from
-            # the turn's own calls is the whole reason the word travels.
-            "kind": "discriminator",
-            "tools": [],
+            # kind: reading the decision apart from the turn's own calls is the
+            # whole reason the word travels.
+            "kind": kind,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "thinking": thinking,
+            # **Zero sampling.**  The decision is a selection, so the same
+            # conversation should produce the same answer; a provider that is
+            # configured for variety is overridden for this call only.
+            "temperature": 0.0,
             "messages": asked,
         },
-        timeout=_T.timeouts.work.model_call,
     )
     if not isinstance(result.data, dict):
         raise unreadable("the model server", "return a stream_chat result", result.data)
     try:
-        return StreamChatResult.from_wire(result.data).text
+        return StreamChatResult.from_wire(result.data)
     except KeyError as exc:
         raise unreadable(
             "the model server", "return a stream_chat result", result.data
         ) from exc
+
+
+class Unanswered(RuntimeError):
+    """A decision reply that is not the forced call: the provider answered,
+    but not with the call this decision can read.
+
+    **An answer, not a provider failure.**  No tool call at all, or a call to
+    another tool — the continuation a tool-heavy conversation falls into, which
+    is the failure the forced choice exists to prevent.  Reading the other
+    call's arguments as a decision would attribute a `{}` or an empty selection
+    to the model, so the reason is reported and no arguments are handed on; the
+    harness passes the failure to the tool instead of an empty call.
+
+    **The reason is the payload**, and it is the only one read: the two callers
+    (`_decide`, `_select_live`) log it and the tool reports it.  The model's own
+    argument text and the tool it called instead were computed and carried
+    here, and no reader ever took them.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def decision_arguments(result: StreamChatResult, expected: str) -> str:
+    """The decision tool's arguments, as the raw text the tool will check.
+
+    **A call is the decision, and it has to be the forced tool's.**  A reply
+    that is not that call is an `Unanswered`: no call is a model that answered
+    in prose, and another tool is the continuation the forced choice exists to
+    prevent.  A damaged call (the expected tool, unreadable arguments) keeps the
+    model's own argument text (`raw_arguments`), so the tool that receives it
+    names what was wrong.
+    """
+    if not result.tool_calls:
+        raise Unanswered("the reply held no tool call")
+    call = result.tool_calls[0]
+    if call.name != expected:
+        raise Unanswered(f"the reply called {call.name!r}, not {expected!r}")
+    if call.raw_arguments is not None:
+        return call.raw_arguments
+    return json.dumps(call.arguments, ensure_ascii=False)
 
 
 def build_server(
@@ -237,7 +499,8 @@ def build_server(
     *,
     source: Callable[[], Config] | None = None,
     embedder: Embedder | None = None,
-    ask: Discriminator | None = None,
+    ask: DecisionModel | None = None,
+    select: Selector | None = None,
 ) -> FastMCP:
     """Build the context server.
 
@@ -273,6 +536,15 @@ def build_server(
     #: is re-embedding turns that do not exist yet.
     synced: set[Path] = set()
 
+    #: **The check and the sync are one step per file.**  Two callers reaching
+    #: a file created after the startup pass together would both run `indexed`
+    #: — the membership check sits before a network-length await — and both
+    #: place vectors for the same turns: `turn_chunk` has no uniqueness on
+    #: `(turn_id, chunk_index)`, so the duplicates persist, consume KNN places
+    #: and inflate the index's vector count.  A lock per path makes the second
+    #: caller wait and then see the mark.
+    syncing: dict[Path, asyncio.Lock] = {}
+
     async def indexed(store: TurnStore, model: Embedder) -> None:
         """Bring one file up to date with `model`, or say why it cannot be."""
         await store.sync_indexes(model)
@@ -285,11 +557,31 @@ def build_server(
         synced.add(store.path)
         logger.info("indexed %s (%s)", store.path, status)
 
+    async def sync_once(store: TurnStore) -> None:
+        """Bring one file up to date once, whoever asks first (`syncing`)."""
+        if store.path in synced:
+            return
+        lock = syncing.setdefault(store.path, asyncio.Lock())
+        async with lock:
+            if store.path not in synced:
+                await indexed(store, await embedding.get())
+
     async def store_of(agent: str, subagent: str) -> TurnStore:
         """One conversation's store, with its indexes brought up to date."""
         store = await off_loop(store_for, agent, subagent)
-        if store.path not in synced:
-            await indexed(store, await embedding.get())
+        await sync_once(store)
+        return store
+
+    async def read_store_of(agent: str, subagent: str) -> TurnStore | None:
+        """As `store_of`, for a read: `None` when the conversation was never written.
+
+        **A read must not create the conversation it is reading.**  See
+        `slife2.libs.store.db.read_store_for` — a stale subagent name would
+        otherwise come back as a directory with no record.
+        """
+        store = await off_loop(read_store_for, agent, subagent)
+        if store is not None:
+            await sync_once(store)
         return store
 
     @asynccontextmanager
@@ -330,7 +622,7 @@ def build_server(
         finally:
             # Both halves of what this process holds open: the embedder it opened
             # for the startup pass, and one connection per model server it was
-            # asked to discriminate with.  Cleared as well as closed, because
+            # asked to decide with.  Cleared as well as closed, because
             # this hook is not the process's lifetime over the in-memory
             # transport — a client left in place is one the next session is
             # handed already shut, and every `rebuild` of it would fail at its
@@ -467,7 +759,7 @@ def build_server(
         ctx: Context,
         since: str | None = None,
         until: str | None = None,
-        limit: int = 20,
+        limit: int = DEFAULT_TURN_PAGE,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Browse what was said before, newest first, one line per turn.
@@ -483,31 +775,43 @@ def build_server(
                 Omit for no lower bound.
             until: Upper bound on the same grammar. A date means the whole day.
                 Omit for no upper bound.
-            limit: How many turns this page may hold.
+            limit: How many turns this page may hold. Omit for the default
+                page; zero or less means the same.
             offset: How many turns to skip — that is how you page back.
 
         Returns:
-            `entries` — `turn_id`, `created_at`, `user_message`,
-            `assistant_message` and `token_count` (the turn's own estimated size)
-            per turn — and `total`, how many turns match the filters, so
-            `offset + len(entries) < total` says whether more remain.
+            `entries` — `turn_id`, `created_at`, `user_message` and
+            `assistant_message` per turn — and `total`, how many turns match the
+            filters, so `offset + len(entries) < total` says whether more remain.
         """
-        # `store_for` and not `store_of`: reading history needs the turn table
-        # and nothing else, so it must not need an embedding model.  A browse
-        # that failed because the embeddings endpoint was down would be a read
-        # coupled to a write's dependency.  Building the store is still a
-        # blocking call — it opens the file and runs the schema — so it goes off
-        # the loop like every other one here.
+        # `read_store_for` and not `store_of`: reading history needs the turn
+        # table and nothing else, so it must not need an embedding model.  A
+        # browse that failed because the embeddings endpoint was down would be
+        # a read coupled to a write's dependency.  Nor may it create the file:
+        # a browse of a conversation that has never run is the empty page, not
+        # a store this call invented (`read_store_for`).  Building the store is
+        # still a blocking call — it opens the file and runs the schema — so it
+        # goes off the loop like every other one here.
         agent, subagent = _caller(ctx)
-        store = await off_loop(store_for, agent, subagent)
+        # **The window is the caller's input, so it is judged before the history
+        # is.**  A spelling the grammar cannot place is refused even when the
+        # conversation has never run and the page is empty — the refusal is
+        # about what was asked, not about what was found.
+        time_window(since, until)
+        # The applied numbers are the answer's, so a caller pages by the size
+        # this call actually used (`page_window`'s convention).
+        size, start = page_window(limit, offset, unset=DEFAULT_TURN_PAGE, cap=MAX_PAGE)
+        store = await off_loop(read_store_for, agent, subagent)
+        if store is None:
+            return {"entries": [], "total": 0, "limit": size, "offset": start}
         records, total = await off_loop(
-            store.turns, since=since, until=until, limit=limit, offset=offset
+            store.turns, since=since, until=until, limit=size, offset=start
         )
         return {
             "entries": [record.to_listing() for record in records],
             "total": total,
-            "limit": page_limit(limit),
-            "offset": max(0, offset),
+            "limit": size,
+            "offset": start,
         }
 
     @mcp.tool(meta=FOR_THE_MODEL)
@@ -517,68 +821,66 @@ def build_server(
         Everything it holds, in the order it happened: what was said, every
         assistant message, the tool calls and their answers. Your own history,
         like `turn_list` — an id resolves inside it and nowhere else.
-        `token_count` is how large this turn is, estimated from its messages.
 
         Args:
             turn_id: The turn to read, as `turn_list` reported it.
         """
         agent, subagent = _caller(ctx)
-        # `store_for`, for the reason `turn_list` gives: a read of one turn does
-        # not need the embedding model, only the table the turn is in.
-        store = await off_loop(store_for, agent, subagent)
-        record = await off_loop(store.turn, turn_id)
+        # `read_store_for`, for the reason `turn_list` gives: a read of one turn
+        # does not need the embedding model, only the table the turn is in — and
+        # a conversation that was never written has no turn to find.
+        store = await off_loop(read_store_for, agent, subagent)
+        record = await off_loop(store.turn, turn_id) if store is not None else None
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
         wire = record.to_wire()
-        # **The two stored counts answer questions about the context this read
-        # does not return.**  `token_count` was the bill for every model call the
-        # turn made, each carrying the conversation of its moment; `context_tokens`
-        # was that conversation's final size. A detached turn has neither, so what
-        # the reader gets is the turn's own size — estimated from the messages it
-        # is about to read — and no context size at all.
-        wire["token_count"] = estimate_turn_tokens(record.messages)
+        # **The bill fields answer the operator's question, not this reader's.**
+        # `token_count` was the sum of every model call the turn made, each
+        # carrying the conversation of its moment; `context_tokens` was that
+        # conversation's final size; `usage` is the price.  A reader of this
+        # turn acts on its content, and the result is bounded before it enters
+        # the conversation.  `who_helped` is the same name on every row of this
+        # file, so a read of that conversation gains nothing from it.
+        wire.pop("token_count", None)
         wire.pop("context_tokens", None)
-        # **`who_helped` is the same name on every row of this file** — the agent
-        # the conversation belongs to — so a read of that conversation gains
-        # nothing from it.
         wire.pop("who_helped", None)
-        # **`usage` is a bill, not a fact about the turn.**  It sums what the
-        # model calls cost when the turn ran, which is the operator's question;
-        # a reader choosing what to do with the turn has `token_count` for its
-        # size and nothing to do with the price.
         wire.pop("usage", None)
         return wire
 
     @mcp.tool(meta=FOR_THE_MODEL)
     async def turn_search(
         ctx: Context,
-        query: str = "",
+        keywords: list[str] | None = None,
         sentences: list[str] | None = None,
         since: str | None = None,
         until: str | None = None,
         limit: int = 10,
+        exclude_context: bool = False,
     ) -> dict[str, Any]:
         """Search your own history by what a turn was about, or by what it did.
 
-        Words and meaning decide the answer together: the words and exact
-        strings a turn is found by — what was asked and answered, and the tool
-        calls and their results — and what it was about. A path, a command, an
-        error string or a tool name from the record is therefore as searchable
-        as the subject the turn discussed. A turn both find ranks first. Each hit
-        is the one line `turn_list` gives, plus `similarity` — the meaning score
-        when meaning measured the turn, `null` when only its words matched.
-        Read one whole with `turn_read`.
+        Words and meaning decide the answer together: `keywords` are the words
+        and exact strings a turn is found by — what was asked and answered, and
+        the tool calls and their results — and `sentences` are what it was
+        about. A path, a command, an error string or a tool name from the record
+        is therefore as searchable as the subject the turn discussed. A turn
+        both find ranks first. Each hit is the one line `turn_list` gives, plus
+        `similarity` — the meaning score when meaning measured the turn, `null`
+        when only its words matched. Read one whole with `turn_read`.
 
-        **A hit need not contain the query words.**  Meaning ranks the nearest
+        **A hit need not contain the keywords.**  Meaning ranks the nearest
         turns whether or not they carry them, and a low `similarity` says the
         words were not found; there is no exact-only mode, so a nonsense query
         can come back with the history's closest turns.
 
+        The whole log is searched by default, the turns the conversation is
+        already running on included; `exclude_context` leaves those out.
+
         Args:
-            query: Words to look for — names, paths, an exact string. They rank
-                turns that carry them first, but they are not a filter: when
-                `sentences` is empty the same words are also read by meaning, so
-                a hit may be a turn that does not contain them.
+            keywords: Words to look for — names, paths, an exact string. They
+                rank turns that carry them first, but they are not a filter:
+                when `sentences` is empty the same words are also read by
+                meaning, so a hit may be a turn that does not contain them.
             sentences: What to recall, in your own words, one sentence per idea.
                 Read by meaning; another sentence is another chance to be found.
             since: Lower bound on when the turn was written — an ISO date or
@@ -588,22 +890,46 @@ def build_server(
             until: Upper bound on the same grammar. A date means the whole day.
                 Omit for no upper bound.
             limit: How many hits this page may hold.
+            exclude_context: Leave the turns the conversation is already
+                running on out of the answer. False by default: a turn in the
+                context is still one you may want to read or name.
 
         Returns:
-            `entries` — `turn_id`, `created_at`, `user_message`,
-            `assistant_message`, `token_count` (the turn's own estimated size)
-            and `similarity` per hit, best first — and `limit`.
+            The one search answer: `results` — `turn_id`, `created_at`,
+            `user_message`, `assistant_message` and `similarity` per hit, best
+            first — `best` (the highest meaning score on the page, `null` when
+            no hit was scored by meaning), `confidence` (`sure`, `weak` or
+            `none`: how sure this page is), `browsed` (always false here;
+            `turn_list` is the browse) and `limit` (the page size this answer
+            was cut to).
         """
         agent, subagent = _caller(ctx)
+        words = [word for word in (keywords or []) if terms(word)]
         asked = [sentence.strip() for sentence in (sentences or []) if sentence.strip()]
-        if not asked and not terms(query):
+        if not words and not asked:
             raise ToolError(
-                "turn_search needs something to look for — a sentence, a keyword "
-                "phrase, or `turn_list` to browse the history without one."
+                "turn_search needs something to look for — `keywords`, "
+                "`sentences`, or `turn_list` to browse the history without one."
             )
-        store = await store_of(agent, subagent)
+        store = await read_store_of(agent, subagent)
+        if store is None:
+            # A conversation that was never written has no history to search,
+            # and the answer is the empty page rather than a store invented to
+            # have searched it — the window is still judged first, for
+            # `turn_list`'s reason.
+            time_window(since, until)
+            return search_answer([], scores=[], worded=False, limit=page_limit(limit))
+        # The store's keyword leg reads one string, and its terms are ANDed
+        # either way; those same words are the meaning query when no sentence is
+        # given.
+        query = " ".join(words)
         # The search runs on the caller's `keyword_weight`, the same vote the
         # rebuild's recall reads: one home, one weight between the legs.
+        # **The live list is the caller's choice, not the tool's rule.**  A turn
+        # in the context is still history the model may want to read or name,
+        # so it is included unless `exclude_context` asks otherwise; only the
+        # rebuild's recall treats "in hand" as "not missing" (`_recall_into`).
+        live = await off_loop(store.context_turns) if exclude_context else []
         ranked = (
             await store.recall(
                 query=query,
@@ -612,6 +938,7 @@ def build_server(
                 since=since,
                 until=until,
                 limit=limit,
+                exclude=live,
                 keyword_weight=current().context.keyword_weight,
             )
         )[: page_limit(limit)]
@@ -629,9 +956,28 @@ def build_server(
             entry = record.to_listing()
             entry["similarity"] = similarity
             entries.append(entry)
-        return {"entries": entries, "limit": page_limit(limit)}
+        # **Word evidence comes from the keyword leg, not from a missing
+        # score.**  A hit found by both legs carries the meaning score, so a
+        # page whose every hit really does contain the words has no `None`
+        # similarity — and reporting `confidence: none` for an exact match
+        # hides the one certain fact the page has.  The page's own ids are what
+        # is asked about: evidence outside the page is not evidence about it.
+        worded = bool(
+            words
+            and await off_loop(
+                store.matched_words,
+                query,
+                [entry["turn_id"] for entry in entries],
+            )
+        )
+        return search_answer(
+            entries,
+            scores=[entry["similarity"] for entry in entries],
+            worded=worded,
+            limit=page_limit(limit),
+        )
 
-    @mcp.tool(meta=FOR_THE_MODEL)
+    @mcp.tool(name=TURN_SUMMARIZE, meta=FOR_THE_MODEL)
     async def turn_summarize(
         ctx: Context,
         turn_id: int | None = None,
@@ -658,10 +1004,14 @@ def build_server(
             written now — and `turn_id`, which is `null` for a captured one.
         """
         agent, subagent = _caller(ctx)
-        summary = (summary or "").strip()
-        tags = (tags or "").strip()
+        # **`None` means "not named", `""` means "clear this field".**  The
+        # coercion to `""` made a tags-only call an explicit clear of the
+        # summary (and the reverse), because the store reads `None` as "keep
+        # what is there" — the documented rule the tool was erasing.
+        summary = None if summary is None else summary.strip()
+        tags = None if tags is None else tags.strip()
         if not summary and not tags:
-            raise ToolError("turn_summarize needs a summary and/or tags")
+            raise ToolError(f"{TURN_SUMMARIZE} needs a summary and/or tags")
         if turn_id is None:
             return {
                 "status": "captured",
@@ -704,118 +1054,71 @@ def build_server(
     def _rows(store: TurnStore, turn_ids: list[int]) -> list[dict[str, Any]]:
         return [record.to_wire() for record in store.turns_by_ids(turn_ids)]
 
+    def _decision_words(decision: Decision) -> str:
+        """The decision's two fields as `recall_decided` spells them.
+
+        **The fields are otherwise invisible.**  `rebuild` reports its outcome
+        (`turns`, `recalled`) and the two fields that chose it are consumed and
+        dropped, so a line reading `turns=0 recalled=0` could not say whether
+        the model cleared the turns, kept none to begin with, or what it went to
+        the log for.  That was the question a live turn raised and no artifact
+        could answer.
+
+        The keep list's boundary values are spelled the way the reply spells
+        them (`KEEP_ALL` / `KEEP_NONE`) rather than as `None` and `[]`, because
+        the reader is comparing this line with the model's own answer.  An
+        absent recall is `none`; a present one is the condition as JSON, so a
+        sentence with Chinese in it stays readable in the log.
+        """
+        if decision.keep is None:
+            keep = decisions.KEEP_ALL
+        elif not decision.keep:
+            keep = decisions.KEEP_NONE
+        else:
+            keep = ",".join(str(turn_id) for turn_id in decision.keep)
+        recall = (
+            "none"
+            if decision.recall is None
+            else json.dumps(decision.recall, ensure_ascii=False)
+        )
+        return f"keep={keep} recall={recall}"
+
     def _in_hand(
         messages: Sequence[dict[str, Any]],
         turn_ids: Sequence[int],
+        outside: int,
         rerank: str = "",
+        reason: str = "",
     ) -> dict[str, Any]:
         """The answer when the turns in hand are what the turn runs on.
 
-        **Four of `rebuild`'s exits are this one outcome** — a discriminator
-        that decided nothing, a decision that asks for nothing, a decision that
-        equals what is held, and a selection that cannot be fetched — and they
-        are one dict because they are one thing: nothing was fetched, nothing
-        was written, and the caller's list stands.  Spelled out four times they
-        were four chances to describe that differently, and four places to add a
-        key to.
+        **Two of `rebuild`'s exits are this one outcome** — a decision that asks
+        for nothing, and one whose recall ran and found nothing — and they are
+        one dict because nothing was fetched, nothing was written, and the
+        caller's list stands.  A selection that cannot be applied is not this
+        answer: it raises a `ToolError` naming why, which the agent reads and
+        can correct.
 
-        A compare-and-set that lost is the fifth exit and **not** this answer:
-        the store holds a different conversation, so `_adopt_stored` fetches it
-        and hands that to the caller; it falls back here only when the store's
-        list has turned out to be the caller's after all.
-
-        There is no fifth exit named "the switch is off": `ContextSettings` has
-        no switch, and nothing here reads one.  The discriminator that answers
-        nothing is the fourth, and `rebuild` logs it as its own reason
-        (`no_decision`, not `context_sufficient`) because it is not a decision
-        the model made.
-
-        `kept` is what the caller in hand, `recalled` none of it — and the two
-        together are what `rebuild` always reports, so a reader of the answer never
-        has to know which of the five ways it was reached to read the counts.
-
-        `rerank` is the stage's report when a recall *did* run and the
-        selection still equals what is in hand.  The exits that never asked
-        for a recall leave it empty; they did not lose a reranker, they never
-        needed one.
+        `kept` is what the caller has in hand, `recalled` none of it; `in_hand`
+        is the number before the decision, and `outside` is the log beyond it.
+        `reason` is `"asked"` or `"recalled"` for the log.  `rerank` is the
+        stage's report when a recall ran and found nothing; the exits that never
+        asked for one leave it empty, because they never needed a ranker.
         """
         return {
             "messages": list(messages),
             "turn_ids": list(turn_ids),
             "changed": False,
             "kept": len(turn_ids),
+            "in_hand": len(turn_ids),
+            "outside": outside,
             "recalled": 0,
             "rerank": rerank,
-        }
-
-    async def _adopt_stored(
-        store: TurnStore,
-        messages: list[dict[str, Any]],
-        carried: int,
-        stale_ids: Sequence[int],
-    ) -> dict[str, Any]:
-        """The conversation **as the store holds it**, for a rebuild that lost.
-
-        The plugin is the list's owner, and a compare-and-set that lost means
-        the caller's snapshot is no longer it.  Returning the snapshot (the
-        `unfetchable` answer) would leave the caller one step behind the store
-        for ever: its `expected` would mismatch on every later turn, so no
-        rebuild could ever publish again, and a task's decision would silently
-        disable the agent's recall until a restart.  So the stored list is
-        fetched and rendered here instead — the caller adopts it, the turn runs
-        on the conversation it is really part of, and the next snapshot matches.
-
-        The two halves of `rebuild`'s contract are kept: the head comes from
-        the caller (it is not a turn), and the carried tail is re-appended
-        verbatim (it has no turn to be rebuilt from).  What is not kept is the
-        decision — the model's answer was composed against a conversation that
-        has moved, and applying it would be the very overwrite the guard
-        refused.  `kept` is the list now in hand and `recalled` is zero because
-        this rebuild fetched no recall of its own.
-
-        A stored id with no row is the damaged-log case `restore` already drops
-        from the caller's list.  The persisted list is repaired to the surviving
-        ids here, under the same compare-and-set, because leaving it naming a
-        row that is gone would make every later `expected` mismatch and disable
-        the recall for the life of the file.  A repair that itself loses to a
-        newer writer keeps the caller's list and waits for the next rebuild.
-        """
-        current = await off_loop(store.context_turns)
-        if list(current) == list(stale_ids):
-            return _in_hand(messages, stale_ids)
-        rows = await off_loop(_rows, store, current) if current else []
-        if len(rows) != len(current):
-            # **The stored list names a row the log no longer holds.**  `restore`
-            # already dropped it from the caller's list, but the persisted one
-            # still names it — and a compare-and-set against the caller's list
-            # can then never match again, so every later rebuild would abandon
-            # its recall silently, for the life of the file.  Publish the
-            # surviving ids under the same compare-and-set, so the store and the
-            # caller agree again and a newer writer still wins.
-            surviving = [int(row["turn_id"]) for row in rows]
-            repaired = await off_loop(
-                store.set_context_turns, surviving, expected=current
-            )
-            if repaired is None:
-                logger.warning("recall_abandoned reason=stored_list_damaged")
-                return _in_hand(messages, stale_ids)
-            current = repaired
-        rebuilt = decisions.consistent(
-            decisions.messages_from_turns(rows, head=_head(messages))
-        )
-        if carried > 0:
-            rebuilt.extend(dict(message) for message in messages[-carried:])
-        return {
-            "messages": rebuilt,
-            "turn_ids": list(current),
-            "changed": True,
-            "kept": len(current),
-            "recalled": 0,
-            # No recall of this rebuild's ran — the decision was discarded with
-            # the snapshot it was composed against — but the key is part of the
-            # answer's shape the caller reads strictly (`rebuild_into`), so it
-            # is written as the empty report rather than left absent.
-            "rerank": "",
+            "decision": "",
+            # The no-op answers cut nothing: the fit is the changed path's, and
+            # its count there is the harness's edit.
+            "fitted": 0,
+            "reason": reason,
         }
 
     @mcp.tool
@@ -855,7 +1158,12 @@ def build_server(
             boundaries are the record's and not the model's.  One read answers
             both readers for that reason.
         """
-        store = await store_of(agent, subagent)
+        store = await read_store_of(agent, subagent)
+        if store is None:
+            # A conversation that was never written is this list unchanged — the
+            # honest answer for a genuinely new key, and for a subagent that has
+            # been removed, whose name must not be recreated by a read.
+            return {"messages": list(messages), "turn_ids": [], "turns": []}
         turn_ids = await off_loop(store.context_turns)
         if not turn_ids:
             return {"messages": list(messages), "turn_ids": [], "turns": []}
@@ -869,146 +1177,255 @@ def build_server(
         )
         return {"messages": rebuilt, "turn_ids": restored, "turns": rows}
 
-    def _window(model: str) -> int:
-        """How many tokens the model this conversation runs on can hold.
+    def _configured_prompt_window(model: str) -> int:
+        """The prompt budget the config gives *model*: window minus `max_tokens`.
 
-        Zero when the config does not say, which is a real answer and not a
-        missing one: the budget is a fraction of a window, and a window nobody
-        declared is a budget nobody can compute.  The caller drops the token cap
-        and the configured pool's width is the only bound left, rather than
-        inventing a number — a guessed window is a context silently sized
-        against a model that is not the one answering.
+        **The fallback for a caller that names none.**  The turn-running
+        callers pass the conversation's own budget (`prompt_window`), because
+        that is the number the conversation was started on and an edit must not
+        reach a turn already running.  A direct RPC caller — a test, a tool —
+        has no conversation, and `0` asks this plugin to resolve the model's
+        from the caller's home config.  The model entry states the window and
+        the loader refuses an entry that does not, so this is a real number.
 
-        **A model the config cannot resolve is not that answer.**  A broad
-        `except` would fold a `ConfigError` in with a declared-absent window, and
-        a broken config would silently drop the token cap and let a recall spend
-        by retrieval width instead of by a budget — the overfill a declared
-        window would have stopped.  A window that cannot be *asked for* is a
-        failure, not a zero (SDD Appendix C: a weaker path is not a substitute
-        for a missing capability).
+        **A model the config cannot resolve is a failure, not a zero.**  A
+        window that cannot be *asked for* fails the rebuild — its tool result
+        is the sentence the model reads, and the turn keeps the context it had
+        — rather than leaving a recall to spend by retrieval width with no
+        token cap (SDD Appendix C: a weaker path is not a substitute for a
+        missing capability).
         """
-        return int(current().resolve(model)[2].context_window)
+        return int(current().resolve(model)[2].prompt_window)
 
-    async def _discriminate(
+    async def _decide(
         agent: str,
         subagent: str,
         model: str,
         messages: list[dict[str, Any]],
-        user_input: str,
-    ) -> Decision | None:
-        """One model call: what to keep, and what to recall.  `None` if unusable.
+        usage: str = "",
+    ) -> tuple[str, str]:
+        """The decision model's raw arguments, and why there are none.
 
-        **Never raises and never retries.**  A timeout, a provider failure and a
-        reply that is not the requested object all return `None`, and the
-        caller's fallback — keep the context — is perfectly good, so retrying
-        would double the pre-turn latency of a call whose answer nobody needed.
-
-        The instruction travels as a user message *appended to the conversation*,
-        which is what lets a follow-up be recognised as one: the subject of "what
-        about the other one" is in the list above it and nowhere else.
+        **One call, no parse, no repair.**  The arguments go to `_context_rebuild`
+        as they came; that tool checks them and answers with a tool error when
+        they are wrong.  This only reports a provider failure or a reply that is
+        not the forced call — the two cases in which there are no arguments to
+        hand on.
         """
         try:
-            text = await asyncio.wait_for(
-                ask_model(agent, subagent, model, messages, user_input),
-                timeout=current().context.timeout,
-            )
-        except TimeoutError:
-            logger.info("recall_discriminator_failed reason=timeout")
-            return None
+            text = await ask_model(agent, subagent, model, messages, usage=usage)
+            # The raw answer, for whoever is already looking at the protocol.
+            logger.debug("recall_decision_reply %r", text)
+            return text, ""
+        except Unanswered as exc:
+            logger.info("recall_decision_unanswered reason=%s", exc.reason)
+            return "", exc.reason
         except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
-            logger.info("recall_discriminator_failed reason=%s", type(exc).__name__)
-            logger.debug("the discriminator call raised", exc_info=True)
-            return None
-        decision = decisions.parse(text)
-        if decision is None:
-            logger.info("recall_discriminator_unparsed")
-        return decision
+            logger.info("recall_decision_failed reason=%s", decisions.failure_text(exc))
+            logger.debug("the decision call raised", exc_info=True)
+            return "", decisions.failure_text(exc)
 
-    #: The discriminator call: a test's, or one client per model server kept for
+    #: The decision-model call: a test's, or one client per model server kept for
     #: the process.
     model_clients: dict[str, Client] = {}
     opening = asyncio.Lock()
-    ask_model: Discriminator = injected or (
-        lambda agent, subagent, model, messages, prompt: _ask_model(
-            current(), model_clients, opening, agent, subagent, model, messages, prompt
+    ask_model: DecisionModel = injected or (
+        lambda agent, subagent, model, messages, *, usage="": _ask_model(
+            current(),
+            model_clients,
+            opening,
+            agent,
+            subagent,
+            model,
+            messages,
+            usage=usage,
         )
     )
 
+    #: The live selector: a test's, or the same client arrangement one call
+    #: further, with its own instruction and its own `kind`.
+    selector_injected = select
+    select_model: Selector = selector_injected or (
+        lambda agent, subagent, model, messages, selectable, *, usage="": _ask_selector(
+            current(),
+            model_clients,
+            opening,
+            agent,
+            subagent,
+            model,
+            messages,
+            selectable,
+            usage=usage,
+        )
+    )
+
+    async def _select_live(
+        agent: str,
+        subagent: str,
+        model: str,
+        messages: list[dict[str, Any]],
+        selectable: list[str],
+        usage: str = "",
+    ) -> tuple[str, str]:
+        """The selector's raw arguments, and why there are none.
+
+        One call, no parse, no repair: `_turn_compact` checks the arguments the
+        same way it checks the model's own call.
+        """
+        try:
+            text = await select_model(
+                agent, subagent, model, messages, selectable, usage=usage
+            )
+            logger.debug("live_selector_reply %r", text)
+            return text, ""
+        except Unanswered as exc:
+            logger.info("live_selector_unanswered reason=%s", exc.reason)
+            return "", exc.reason
+        except Exception as exc:  # noqa: BLE001 — a fallback, not a failure mode
+            logger.info("live_selector_failed reason=%s", decisions.failure_text(exc))
+            logger.debug("the selector call raised", exc_info=True)
+            return "", decisions.failure_text(exc)
+
     @mcp.tool
-    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
-        """Clear a conversation's live context, and keep every turn of it.
+    async def decide(
+        agent: str,
+        messages: list[dict[str, Any]],
+        subagent: str = "",
+        model: str = "",
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+    ) -> dict[str, Any]:
+        """One decision-model call, as the raw arguments of `_context_rebuild`.
 
-        Called by the agent server's `reset`, and it is the second half of what
-        that tool means: a conversation is forgotten by dropping the loop *and*
-        the list, because a list left behind is a conversation that restores
-        itself on the next prompt.
+        Called by the agent server's automatic boundary, not by a model: the
+        harness asks here first, then calls `_context_rebuild` with these
+        arguments, so the tool pair carries a selection from the start.  **The
+        answer is not parsed here**: the tool checks it, and a wrong answer is
+        that tool's error result, which the agent reads and corrects.
 
-        **The turns are not deleted.**  They are the log, and the log is storage
-        rather than state: `turn_list` goes on finding all of them, and what
-        changed is only which of them this conversation is made of.  There is
-        deliberately no tool here that deletes a turn — that is a request with a
-        different blast radius and nobody has needed it.
+        The conversation is the input, exactly as the turn holds it.  No store
+        is read and nothing is written.  `arguments` is the forced call's raw
+        argument text (`""` when the provider failed or answered with no call);
+        `decision` is `""` for an answer, otherwise why there is none.
 
         Args:
             agent: Whose conversation.
+            messages: The conversation as the caller holds it.
             subagent: Which of that agent's conversations; empty for its own.
-
-        Returns:
-            `turn_ids`: the list as it stands now, which is always `[]`.
+            model: Which model this conversation runs on, as `provider/model`.
+            context_tokens: The last LLM call's measured size.
+            prompt_window: The space a request's prompt has, in tokens.
         """
-        store = await store_of(agent, subagent)
-        written = await off_loop(store.set_context_turns, [])
-        logger.info("forgot the context of %s", describe((agent, subagent)))
-        return {"turn_ids": written}
+        if prompt_window <= 0:
+            prompt_window = _configured_prompt_window(model)
+        usage, _used = decisions.context_usage(context_tokens, prompt_window)
+        arguments, status = await _decide(agent, subagent, model, messages, usage)
+        return {"arguments": arguments, "decision": status}
+
+    @mcp.tool
+    async def select_live(
+        agent: str,
+        messages: list[dict[str, Any]],
+        selectable: list[str],
+        prompt_window: int,
+        model: str = "",
+        subagent: str = "",
+        context_tokens: int = 0,
+    ) -> dict[str, Any]:
+        """Decide which of a running turn's live messages it no longer needs.
+
+        Called by the agent server's and an agent task's automatic boundary
+        **before `_turn_compact` is called**, not by a model: the ids are the
+        live view's, each message already carries its `[MESSAGE:{"id": …}]`, and
+        nothing is stored with them.  `messages` is the view — the list the
+        model will run on, not the turn's record — and `selectable` names the
+        ids that are candidates.
+
+        `context_tokens` is the conversation's last measured call and
+        `prompt_window` the space its prompt has: the same pair the status bar
+        shows, rendered by the same `context_usage`, so the selector and the
+        person read one figure.
+
+        **The answer is not parsed here**: `arguments` is the forced call's raw
+        argument text and `decision` is `""` for an answer, otherwise why there
+        is none.  `_turn_compact` checks the arguments against the view; an
+        unknown id or a split tool exchange is that tool's error result, and the
+        agent corrects it.  The harness never applies a selection of its own.
+
+        Args:
+            agent: Whose conversation.
+            messages: The view the turn is running on, in order.
+            selectable: The live ids the model may drop.
+            prompt_window: The space a request's prompt has, in tokens.
+            model: Which model this conversation runs on, as `provider/model`.
+            subagent: Which of that agent's conversations; empty for its own.
+            context_tokens: The last call's measured size.
+        """
+        usage, _used = decisions.context_usage(context_tokens, prompt_window)
+        arguments, status = await _select_live(
+            agent, subagent, model, messages, selectable, usage
+        )
+        return {"arguments": arguments, "decision": status}
 
     @mcp.tool
     async def rebuild(
         agent: str,
         messages: list[dict[str, Any]],
         turn_ids: list[int],
-        prompt: str = "",
         subagent: str = "",
         model: str = "",
         carried: int = 0,
-        expected: list[int] | None = None,
+        publish: bool = True,
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+        selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Decide what the next turn runs on: keep ∪ recall.
+        """Decide what this turn runs on: keep ∪ recall.
 
-        Called **once per turn, before the user's message is appended** — before,
-        because this replaces the message list wholesale and anything appended
-        first would be destroyed by it.
+        Called from `_context_rebuild`, **after** the turn's message was
+        appended — at the first boundary, or mid-turn after a cut-in.  The
+        current turn has no id and is not in `turn_ids`; `carried` carries it
+        back verbatim, so the selection is the historical turns only.
 
         One model call decides: which of the turns in hand to keep, and what to
         recall from the turn log.  The two are joined by id and never reconciled,
         so an empty recall is harmless and only an explicit `"clear"` empties the
-        context (`slife2.libs.turn.context` is where that is argued).  What was
-        kept is excluded from the recall: the decision's two halves are one
-        answer, and a turn in both would spend retrieval depth and budget on
-        something the union would collapse anyway.  When the decision asks in
-        sentences, the input is read by meaning beside them, so the model's
-        paraphrase is never the only way the subject is asked for.
+        context (`slife2.libs.turn.context` is where that is argued).  Every
+        turn in hand is excluded from the recall: the decision model read all of
+        them, so a turn it dropped from the keep-list was dropped deliberately,
+        and a turn in both would spend retrieval depth and budget on something
+        the union would collapse anyway.  The conversation is the input; there is
+        no separate prompt, and the decision's sentences are the recall's
+        questions.
+
+        **The decision is shown how full the context is.**  `context_tokens` is
+        the last LLM call's size and `prompt_window` the space the prompt has:
+        the same pair the status bar shows, rendered by the same
+        `context_usage`, so the decision model and the person read one figure.
 
         **A decision that asks for exactly what is in hand rebuilds nothing at
         all**, which is the common case and what keeps a call this expensive from
         being paid for nothing.
 
+        **A private rebuild chooses and publishes nothing.**  It exists for the
+        agent task, whose turn leaves no record: the task needs a decided
+        context for its own turn, and the conversation it stands in for must not
+        be moved by a turn that is not part of its sequence.  The answer has the
+        same shape; only the write is absent.
+
         Args:
             agent: Whose conversation.
             messages: The conversation as the caller holds it.  This is what the
-                discriminator reads — not a re-render of the stored turns, which
+                decision model reads — not a re-render of the stored turns, which
                 would be a second opinion about what is in hand.
             turn_ids: The turns those messages came from, in order.  The
                 keep-list is read as an intersection with this, so an id that has
                 left the context cannot be kept by naming it.
-            prompt: What the user just said.  Passed **beside** the messages and
-                not inside them, because this runs before the caller appends it
-                — that order is the whole reason the argument exists, and reading
-                it back out of the list would be reading the previous turn's.
             subagent: Which of that agent's conversations; empty for its own.
             model: Which model this conversation runs on, as `provider/model`.
-                The window the selection is sized against is *this* model's, so
-                an empty reference is sized against the config's default and says
-                so in the log.
+                The budget the recall is sized against is the caller's
+                `prompt_window` — the conversation's own terms — and the model
+                reference is what the decision call and the log name.
             carried: How many messages at the **end** of `messages` no turn in
                 `turn_ids` accounts for.  They are re-appended verbatim after the
                 rebuilt turns, which is what keeps a cancelled turn's repair —
@@ -1017,87 +1434,197 @@ def build_server(
                 A count rather than a list, because the caller is the party that
                 knows what it appended and a list of messages sent twice is a
                 second copy to keep in step.
-            expected: The live-context list the caller last read — `restore`'s
-                `turn_ids`, as they stood when these messages were taken.  The
-                two callers that run a conversation's pre-turn work are separate
-                processes, so a turn can be saved between one's `restore` and
-                its `rebuild`; with this the write is a compare-and-set, and
-                `changed` is false when the conversation moved in a way this
-                decision cannot account for.  Omitted — a direct call, a test —
-                the write is the old unconditional one.
+            publish: Whether this decision is written back to the conversation's
+                live-context list.  **A private rebuild is a clone**: an agent
+                task records nothing, so its context selection must not move the
+                conversation it stands in for.  The selection is returned to the
+                caller and nothing is written.
+            context_tokens: The last LLM call's size, for the decision's own
+                figure.
+            prompt_window: The space a request's prompt has, in tokens.
+            selection: The internal selection to apply as it came —
+                `context`/`recall`, as `rebuild_selection` maps the model's
+                `keep`/`recall` arguments — or None to let the decision model
+                choose (the direct RPC path; both turn-running servers pass the
+                selection they were given).  A selection this build cannot read
+                is a tool error the caller corrects, not a decision call.
 
         Returns:
             `messages` (what the turn should run on), `turn_ids` (what it was
-            built from), `changed` (whether anything moved), `recalled` (how
-            many of the selected turns came from the turn log rather than from
-            in hand), and `rerank` — `""` when the cross-encoder ran or no
-            question was asked, otherwise `"unavailable"`, `"failed"` or
-            `"empty"`: the recall kept its fused order and the caller shows
-            that rather than swallowing it.
+            built from), `changed` (whether anything moved), `kept` (how many
+            of the turns in hand survived the decision), `in_hand` (how many
+            the caller held before it), `outside` (how many turns the log holds
+            beyond the context — the recall's domain), `recalled` (how many of
+            the selected turns came from the turn log rather than from in
+            hand), `rerank` —
+            `""` when the cross-encoder ran or no question was asked, otherwise
+            `"unavailable"`, `"failed"` or `"empty"`: the recall kept its fused
+            order and the caller shows that rather than swallowing it — and
+            `decision`, `""` when there was a decision, otherwise why there was
+            none (the provider's failure text or the parser's refusal): the
+            recall never ran, and `recalled: 0` would otherwise read as one
+            that found nothing.  `fitted` is how many of the selection's oldest
+            turns the prompt budget cut to make it sendable; it is the
+            harness's edit and the report names it.
         """
         store = await store_of(agent, subagent)
-        decision = await _discriminate(agent, subagent, model, messages, prompt)
-        # **Two ways to have no decision, and the log keeps them apart.**  Both
-        # fall back to the turns in hand, and neither may be reported as the
-        # other: this line is the only sight anybody gets of the discriminator
-        # (`recall_discriminator_failed` and `_unparsed` are written a moment
-        # above and say *why* there was none), and a single `context_sufficient`
-        # for both would make counting "the model decided the context was enough"
-        # count every timeout and every unreadable reply as a decision the model
-        # never made.  A decision that asks for nothing is the model's word; no
-        # decision at all is the transport's silence.
-        if decision is None:
-            logger.info("recall_not_needed reason=no_decision")
-            return _in_hand(messages, turn_ids)
-        if decision.asks_for_nothing:
-            # The ordinary case, and the one this fallback is for: the turns in
-            # hand are the answer.  Nothing is fetched, nothing is rendered,
-            # nothing is written — and the list already on disk still describes
-            # what the caller is holding.
-            logger.info("recall_not_needed reason=context_sufficient")
-            return _in_hand(messages, turn_ids)
+        # **The recall's domain is the whole log outside the context.**  Every
+        # turn not in hand is a candidate the recall condition filters; the
+        # retrieval legs page that set, but the denominator the report counts
+        # against is the set itself.  One COUNT, read here rather than per
+        # answer, because the same figure is what the model's "recalled 0/N" is
+        # read from.
+        outside = max(await off_loop(store.count) - len(turn_ids), 0)
+        # **A caller that names no budget gets the model's.**  The turn-running
+        # servers pass the conversation's own; a direct RPC caller has none, and
+        # `0` asks for the config's — which is also the one path that must fail
+        # loudly when the model cannot be resolved.
+        if prompt_window <= 0:
+            if not model:
+                logger.info("recall_window_default_model")
+            prompt_window = _configured_prompt_window(model)
+        # **The conversation is the input.**  The rebuild runs at the first
+        # boundary, after the turn's message was appended (or mid-turn, after a
+        # cut-in); there is no separate prompt to pass.
+        usage, _used = decisions.context_usage(context_tokens, prompt_window)
+        # **The budget is the prompt's, and it binds the kept turns too.**  A
+        # selection heavier than the ceiling is cut from its oldest end before
+        # the recall spends anything; a recall alone cannot repair a base that
+        # is already too large.  `0` is "the caller did not say" (a direct RPC
+        # caller): nothing is fitted and nothing is recalled rather than a
+        # context emptied against an unknown budget.
+        budget = (
+            int(prompt_window * current().context.ceiling) if prompt_window > 0 else 0
+        )
 
+        async def fitted(ids: list[int]) -> tuple[list[int], int]:
+            """One selection cut to the prompt budget, oldest end first."""
+            if budget <= 0:
+                return list(ids), 0
+            costs = await off_loop(_cost_of, store, ids)
+            return await off_loop(decisions.fit_recent, ids, costs, budget)
+
+        if selection is not None:
+            # **The caller's selection** — the model's own call, or the harness
+            # carrying the selection the decision model returned.  A refusal is
+            # a tool error: this caller handed in the arguments.
+            decision, refusal = decisions.parse_with_reason(
+                json.dumps(dict(selection), ensure_ascii=False)
+            )
+            if decision is None:
+                raise ToolError(f"the selection could not be read: {refusal}")
+        else:
+            # **A direct RPC caller that asked the decision model.**  The agent
+            # loop never uses this path: its harness calls the `decide` tool
+            # first and passes the selection, so the tool pair carries the
+            # arguments from the start.  Here the raw answer is mapped to the
+            # internal selection and read by the same parser as any other.  A
+            # failure is the tool's error, with the reason — the agent reads it
+            # where it reads every other tool's error and can call again.
+            raw, status = await _decide(agent, subagent, model, messages, usage)
+            if not raw:
+                logger.info("recall_not_needed reason=no_decision")
+                raise ToolError(f"the decision model did not answer: {status}")
+            try:
+                try:
+                    arguments = json.loads(raw)
+                except ValueError:
+                    raise ValueError("the reply is not one JSON object") from None
+                if not isinstance(arguments, dict):
+                    raise ValueError("the reply is not one JSON object")
+                used = decisions.rebuild_selection(
+                    arguments.get("keep"),
+                    arguments.get("recall"),
+                )
+            except ValueError as exc:
+                logger.info("recall_decision_unreadable reason=%s", exc)
+                raise ToolError(f"the selection could not be read: {exc}") from None
+            decision, refusal = decisions.parse_with_reason(
+                json.dumps(used, ensure_ascii=False)
+            )
+            if decision is None:
+                logger.info("recall_not_needed reason=no_decision")
+                raise ToolError(f"the selection could not be read: {refusal}")
+        # **What was decided, before what it led to.**  Every line below reports
+        # an outcome — `recall_not_needed`, `recall_abandoned`, `recall_rebuilt`
+        # — and none of them carries the two fields that chose it.  A live
+        # rebuild that logged `turns=0 recalled=0` was indistinguishable from a
+        # model that kept nothing and one that cleared what it had, which is the
+        # question this line exists to answer without a replay.
+        logger.info("recall_decided %s", _decision_words(decision))
         # A keep-list is an **intersection** with what is in hand.  A model that
         # names a turn it can no longer see has made a mistake it cannot be told
         # about — there is no turn to refuse — so the id is dropped and the log
         # says so, which is where whoever has to explain a missing turn looks.
         in_hand = {int(turn_id) for turn_id in turn_ids}
-        base = (
-            list(turn_ids)
-            if decision.keep is None
-            else [turn_id for turn_id in decision.keep if turn_id in in_hand]
-        )
-        unknown = (
-            []
-            if decision.keep is None
-            else [turn_id for turn_id in decision.keep if turn_id not in in_hand]
-        )
-        if unknown:
-            logger.info("recall_kept_ids_unknown ids=%s", unknown)
-
+        fitted_out = 0
         recalled: list[int] = []
         rerank = ""
-        if decision.recall is not None:
-            recalled, rerank = await _recall_into(
-                store, decision.recall, base, model, prompt
+        if decision.asks_for_nothing:
+            # The ordinary case, and the one this fallback is for: the turns in
+            # hand are the answer.  The one exception is a selection heavier
+            # than the prompt budget — a restore of a list chosen under a wider
+            # window, or one turn that grew past it — and then the window's
+            # bound wins: the oldest turns are cut and the answer says how many.
+            base, fitted_out = await fitted(list(turn_ids))
+            if not fitted_out:
+                logger.info("recall_not_needed reason=context_sufficient")
+                return _in_hand(messages, turn_ids, outside, reason="asked")
+            logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
+        else:
+            base = (
+                list(turn_ids)
+                if decision.keep is None
+                else sorted(turn_id for turn_id in decision.keep if turn_id in in_hand)
             )
+            unknown = (
+                []
+                if decision.keep is None
+                else [turn_id for turn_id in decision.keep if turn_id not in in_hand]
+            )
+            if unknown:
+                logger.info("recall_kept_ids_unknown ids=%s", unknown)
+            if decision.keep is not None and decision.keep and not base:
+                # **A keep-list that named nothing in hand did not say "clear".**
+                # Every id was a turn this conversation no longer holds — a
+                # miscopied or hallucinated number — so the intersection is empty
+                # only because the ids were unknown.  Emptying a context nobody
+                # asked to empty is the one outcome this fallback refuses: the
+                # explicit clear is the empty list, and a selection that cannot
+                # be acted on is the tool's error, named for the agent to correct.
+                logger.info("recall_kept_nothing_known ids=%s", decision.keep)
+                raise ToolError("the keep-list named no turn in hand")
+            base, fitted_out = await fitted(base)
+            if fitted_out:
+                logger.info("recall_fitted kept=%d dropped=%d", len(base), fitted_out)
+            if decision.recall is not None:
+                recalled, rerank = await _recall_into(
+                    store, decision.recall, base, turn_ids, prompt_window
+                )
 
         target = decisions.union(base, recalled)
-        if target == sorted(in_hand):
+        if fitted_out == 0 and target == sorted(in_hand):
             # The decision happens to equal what is in hand even though it was
             # asked for — same set, so the same context, and re-rendering it
             # would only cost a fetch and a write.
             logger.info("recall_not_needed reason=context_unchanged")
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            return _in_hand(
+                messages,
+                turn_ids,
+                outside,
+                rerank=rerank,
+                reason="recalled" if decision.recall is not None else "asked",
+            )
 
         rows = await off_loop(_rows, store, target)
         if len(rows) != len(target):
             # A named turn with no row: the list and the log disagree, which
-            # means a file was rebuilt or pruned underneath.  Keeping the context
-            # is the answer, because a context assembled from part of a selection
-            # is neither what the model decided nor what it had.
+            # means a file was rebuilt or pruned underneath.  The selection
+            # cannot be applied, so it is the tool's error and the context is
+            # not written — a context assembled from part of a selection is
+            # neither what the model decided nor what it had.
             logger.warning("recall_abandoned reason=unfetchable")
-            return _in_hand(messages, turn_ids, rerank=rerank)
+            raise ToolError("the selected turns could not be fetched")
 
         rebuilt = decisions.consistent(
             decisions.messages_from_turns(rows, head=_head(messages))
@@ -1111,38 +1638,35 @@ def build_server(
         # the run is the end.**  Nothing here can check that: the ids and the
         # messages arrive as two shapes and are joined by neither, so a caller
         # whose unbacked messages sat somewhere else would be handed back the
-        # wrong slice and told nothing.  `slife2.plugins.agent.server.rebuild_into`
-        # is the one caller, and `Loop.covered` is where it keeps the run at the
-        # end — a turn that follows unbacked messages does not join `turn_ids`,
-        # which is what keeps the count honest.
+        # wrong slice and told nothing.  `AgentCore.context_rebuild` is the
+        # caller that can pass a nonzero `carried`, and `Loop.covered` is where
+        # it keeps the run at the end — a turn that follows unbacked messages
+        # does not join `turn_ids`, which is what keeps the count honest.  An
+        # agent task's own `context_rebuild` carries its opening the same way
+        # with `publish=False`; it records nothing, but it still has a turn.
         if carried > 0:
             rebuilt.extend(dict(message) for message in messages[-carried:])
-        # Published before the caller is told, and a failure here **fails the
-        # turn**.  The list is authoritative (SDD §5.5): the caller adopts
-        # this answer as its context, so returning the in-memory rebuild while
-        # the *persisted* list did not move leaves the two disagreeing, and the
-        # next start replays the stale one — a conversation that comes back one
-        # turn short, silently.  The caller that cannot have the write is told
-        # rather than handed a context the log will not have on the next start.
-        #
-        # **A write that lost the conversation is not that failure.**  With
-        # `expected` the store answers `None` when the list is no longer the one
-        # the caller read — a turn saved, a reset, another rebuild — and then
-        # this decision applies to nothing.  But the caller's snapshot is not
-        # the answer either: the store holds the conversation as it is now, and
-        # returning the stale list would leave the caller's `expected` behind
-        # the store on *every* later turn, refusing every rebuild for the life
-        # of the loop.  So the authoritative list is fetched and rendered here,
-        # and the caller adopts it: the turn runs on the conversation it is
-        # really part of, and the next rebuild's snapshot matches again.
-        written = await off_loop(store.set_context_turns, target, expected=expected)
-        if written is None:
-            logger.warning("recall_abandoned reason=context_moved")
-            return await _adopt_stored(store, messages, carried, turn_ids)
+        # **A private rebuild stops here.**  The decision belongs to the
+        # caller's own turn and is returned without a write: a task records
+        # nothing, so its selection must not move the conversation it stands in
+        # for.
+        if publish:
+            # Published before the caller is told, and a failure here **fails
+            # the rebuild**.  The list is authoritative (SDD §5.5): the caller
+            # adopts this answer as its context, so returning the in-memory
+            # rebuild while the *persisted* list did not move leaves the two
+            # disagreeing, and the next start replays the stale one — a
+            # conversation that comes back one turn short, silently.  The
+            # caller that cannot have the write is told — and keeps the context
+            # it had — rather than handed a context the log will not have on
+            # the next start.
+            await off_loop(store.set_context_turns, target)
         logger.info(
-            "recall_rebuilt turns=%d recalled=%d",
+            "recall_rebuilt turns=%d recalled=%d fitted=%d published=%s",
             len(target),
             len(set(recalled) - set(base)),
+            fitted_out,
+            publish,
         )
         return {
             "messages": rebuilt,
@@ -1152,22 +1676,37 @@ def build_server(
             # reaching this point means the list this turn runs on is not the one
             # the conversation had — which is the whole of what this reports.
             "changed": True,
-            # What survived the decision, and what came back from the log.  The
-            # two add to `len(target)`, which is what the turn runs on.
+            # What survived the decision, what came back from the log, and what
+            # the caller held before it.  `kept` and `in_hand` together let the
+            # report say "kept 0/5": a clear must not read as an empty history.
+            # `outside` is the rest of the log, which the recall condition
+            # filters — the "90" in "recalled 0/90".
             "kept": len(base),
+            "in_hand": len(turn_ids),
+            "outside": outside,
             "recalled": len(set(recalled) - set(base)),
             # The precision stage's report — empty when it ran or no question
             # was asked.  A recall that kept the fused order is a fact the
             # caller shows, not one it silently absorbs.
             "rerank": rerank,
+            # There *was* a decision — this path is only reached past the
+            # `None` branch — so no failure is owed to the caller.
+            "decision": "",
+            # How many turns the prompt budget cut from the selection's oldest
+            # end, or 0.  The harness's edit, named: it is the window's doing,
+            # not a selection the model made.
+            "fitted": fitted_out,
+            # A changed answer has no no-op to name; the key is present so the
+            # shape is one shape (`_in_hand` carries the exit's name).
+            "reason": "",
         }
 
     async def _recall_into(
         store: TurnStore,
         condition: dict[str, Any],
         base: list[int],
-        model: str,
-        prompt: str,
+        in_hand: Sequence[int],
+        prompt_window: int,
     ) -> tuple[list[int], str]:
         """Run one recall condition, fit it, and report the rerank stage.
 
@@ -1183,8 +1722,8 @@ def build_server(
         their union (twice the configured width for one question, more for
         several); `min_similarity` drops measured noise; the cross-encoder
         reorders the survivors and drops those below `rerank_min_score`; the
-        kept turns' estimated cost is subtracted from `ceiling × window`, and
-        the budget spends what is left.  **No count cuts the selection**: a
+        kept turns' estimated cost is subtracted from
+        `ceiling × prompt_window`, and the budget spends what is left.  **No count cuts the selection**: a
         turn that passed both floors is a turn the budget may buy, and a count
         applied after the ranker would discard relevant turns on the strength
         of an order the chronological rebuild does not keep.
@@ -1196,34 +1735,32 @@ def build_server(
         before every turn.
 
         Every cap here is the caller's and not the store's, for the split of
-        duties: the store ranks, the policy caps, and the policy depends on a
-        model's window and on what the decision kept — neither of which the
-        store knows.
+        duties: the store ranks, the policy caps, and the policy depends on the
+        conversation's prompt budget and on what the decision kept — neither of
+        which the store knows.
 
         **One budget, and it is the ceiling's.**  The kept turns are estimated
         first, and the recall may spend what they leave below
-        `ceiling × window` — no second fraction of its own.  Keeping less
+        `ceiling × prompt_window` — no second fraction of its own.  Keeping less
         leaves the recall more; a kept context at the ceiling leaves it
-        nothing, so the two halves cannot overfill the window by construction.
+        nothing, so the two halves cannot overfill the prompt budget by
+        construction.  The window minus the completion request is what a
+        provider will accept: sizing against the full window is how a rebuild
+        once produced a request the next call could not send.
 
-        **What was kept is excluded from what is recalled.**  The two halves are
-        joined by id, so a turn in both is one turn; the recall would have spent
-        retrieval depth and a share of the budget on a turn the caller already
-        holds.  The exclusion is handed to the store, which can look past those
-        turns for more rather than filtering a short answer here.
+        **Every turn in hand is excluded from what is recalled.**  The
+        decision model read the whole conversation, so a turn it left out of the
+        keep-list was left out deliberately; a recall that answered a query with
+        it would overturn that, and spend retrieval depth and a share of the
+        budget on a turn the caller already holds.  The exclusion is handed to
+        the store, which can look past those turns for more rather than
+        filtering a short answer here.
 
-        **The person's own words are a question too.**  When the decision asked
-        in sentences, the input joins them: the model's sentence is a paraphrase
-        of what the input points at, and the meaning leg reads the input as it
-        stands.  That gives a sentence recall at least two questions, so the
-        paraphrase is never the only way the subject is found — unless the
-        decision set `prompt_as_sentence` false, which is what it does when the
-        input names nothing ("hi", "continue", "what about the other one?") —
-        the model sees the input and the conversation, so that judgement is its
-        to make.  A keyword-only recall keeps its query as the one meaning
-        question — the phrase is the deliberate one, and a second raw question
-        there can only reorder it — and a period recall is not narrowed by the
-        input at all.
+        **The decision's sentences are the questions.**  There is no separate
+        input to append: the decision model read the conversation, and a
+        sentence it wrote is the subject it chose to ask the log for.  A
+        keyword-only recall keeps its query as the one meaning question, and a
+        period recall has no question at all.
         """
         query = str(condition.get("query") or "")
         raw_sentences = condition.get("sentences")
@@ -1232,22 +1769,6 @@ def build_server(
             for sentence in (raw_sentences if isinstance(raw_sentences, list) else [])
             if str(sentence).strip()
         ]
-        if query and not terms(query):
-            # **A query with no term is not a keyword leg.**  The keyword leg
-            # refuses such a thing — `"***"`, `"—"` — with `EmptyQuery`, and the
-            # store's own contract is that an empty query reaching the full-text
-            # index is a syntax error and embeds to noise.  With a sentence
-            # beside it the recall still asks a question, so only the query is
-            # dropped; without one, dropping the query and running the period
-            # would be a different selection from the one the model asked for,
-            # so the whole recall is dropped and the decision's other half, the
-            # keep-list, runs on its own — SDD §5.5's outcome when a
-            # rebuild cannot do its job: keep the context it had.
-            if not sentences:
-                logger.info("recall_query_has_no_term")
-                return [], ""
-            logger.info("recall_query_dropped")
-            query = ""
         since = condition.get("since") or None
         until = condition.get("until") or None
         anchor = condition.get("anchor") or None
@@ -1258,47 +1779,27 @@ def build_server(
             logger.info("recall_anchor_ignored anchor=%s", anchor)
             anchor = None
 
-        # What the input adds is the docstring's rule; `prompt_as_sentence` is
-        # the decision's say over whether it joins the sentences at all.
+        # The meaning leg's questions are the decision's sentences; a period
+        # recall has no question, and a keyword-only recall has only its query.
         asker = await embedding.get() if (query or sentences) else None
-        include_prompt = condition.get("prompt_as_sentence") is not False
-        if (
-            asker is not None
-            and sentences
-            and include_prompt
-            and prompt.strip()
-            and prompt not in sentences
-        ):
-            if len(prompt) > asker.max_chars:
-                logger.info("recall_prompt_too_long chars=%d", len(prompt))
-            elif terms(prompt):
-                sentences = [*sentences, prompt]
 
-        # The policy is the caller's home's, like the window and the model:
-        # this daemon serves every home, and `context:` is a section of the
-        # caller's `slife2.yaml` (`current`).  Read from the config this process
-        # started on, an edit would reach the window and not the numbers sized
-        # against it, and a second home would be graded by the first home's
-        # ceiling.
+        # The policy is the caller's home's, like the prompt budget: this
+        # daemon serves every home, and `context:` is a section of the caller's
+        # `slife2.yaml` (`current`).  Read from the config this process started
+        # on, an edit would reach the budget and not the numbers sized against
+        # it, and a second home would be graded by the first home's ceiling.
         policy = current().context
-        window = _window(model)
         # What the kept turns already cost, which is what the recall's budget is
         # the headroom *below*.  Summed here and not by the store: the store
         # ranks candidates, and how much room is left is a fact about a
         # selection the caller made.
         base_cost = sum((await off_loop(_cost_of, store, base)).values())
-        if window:
-            # One budget, the ceiling's: what the kept turns leave below it.
-            # A kept context at the ceiling leaves the recall nothing, and one
-            # already over it is a negative budget — both answered by the
-            # `budget <= 0` exit below rather than by a recall that overfills.
-            budget = int(window * policy.ceiling) - base_cost
-        else:
-            # No declared window: no token cap, so the fused pool's width is
-            # the only bound left.  Better a context bounded by retrieval
-            # width than one sized against a window nobody stated.
-            budget = 0
-        if window and budget <= 0:
+        # One budget, the ceiling's: what the kept turns leave below it.
+        # A kept context at the ceiling leaves the recall nothing, and one
+        # already over it is a negative budget — both answered by the
+        # `budget <= 0` exit below rather than by a recall that overfills.
+        budget = int(prompt_window * policy.ceiling) - base_cost
+        if budget <= 0:
             logger.info("recall_no_headroom base=%d", base_cost)
             return [], ""
 
@@ -1306,22 +1807,34 @@ def build_server(
         # count cuts the selection afterwards.  The store applies its own page
         # bound to every query, so a configured width larger than one page is
         # capped there rather than here.
-        ranked = await store.recall(
-            query=query,
-            sentences=sentences,
-            embedder=asker,
-            since=since,
-            until=until,
-            anchor=anchor,
-            limit=policy.recall_page_limit,
-            # The keep-list is what is *in hand*, so it is also what a recall
-            # must not spend retrieval depth or budget on: the union collapses
-            # a turn in both, so retrieving it would spend on something already
-            # held.  The model's keep is the more accurate half of its decision,
-            # which is exactly why the recall is the half that looks elsewhere.
-            exclude=base,
-            keyword_weight=policy.keyword_weight,
-        )
+        try:
+            ranked = await store.recall(
+                query=query,
+                sentences=sentences,
+                embedder=asker,
+                since=since,
+                until=until,
+                anchor=anchor,
+                limit=policy.recall_page_limit,
+                # **What is in hand, not only what was kept.**  The decision
+                # model read every turn in the conversation, so a turn it
+                # dropped was dropped deliberately; and a turn in both would
+                # spend retrieval depth or budget on something already held.  The
+                # exclusion is what makes the recall the half that looks
+                # elsewhere.
+                exclude=in_hand,
+                keyword_weight=policy.keyword_weight,
+            )
+        except EmptyQuery:
+            # **A query with no term is not a keyword leg**, and the store is
+            # the one place that rule is written: beside a sentence it drops
+            # the leg and answers, and without one it refuses.  Dropping the
+            # query here and running the period instead would be a different
+            # selection from the one the model asked for, so the whole recall
+            # is dropped and the keep-list runs alone — SDD §5.5's outcome when
+            # a rebuild cannot do its job: keep the context it had.
+            logger.info("recall_query_has_no_term")
+            return [], ""
         gated = decisions.gate(ranked, policy.min_similarity)
         order = [turn_id for turn_id, _ in gated]
         if not order:
@@ -1346,8 +1859,6 @@ def build_server(
         # list then discards.  A time-ordered pool is bounded the same way, by
         # the budget, from the end its anchor named.
         costs = await off_loop(_cost_of, store, order)
-        if not window:
-            return sorted(order), rerank
         fit = decisions.fit_budget if (query or sentences) else decisions.fit_window
         return fit(order, costs, budget), rerank
 
@@ -1365,7 +1876,7 @@ def build_server(
         **An unavailable or failing reranker is not a failed recall.**  The
         provider may serve no cross-encoder (`rerank_model` empty), the call may
         time out, or the answer may be malformed; all three keep the fused
-        order and log why, in the same spirit as a discriminator that could not
+        order and log why, in the same spirit as a decision that could not
         answer.  A *short* answer is malformed too: it is refused at both hops
         (`slife2.clients.embedder.RemoteEmbedder`, `slife2.plugins.llm.embeddings_server`)
         rather than read as "the missing candidates scored nothing".  What is
@@ -1384,7 +1895,7 @@ def build_server(
         try:
             scored = await embedding.rerank(ask, documents, top_n=len(documents))
         except Exception as exc:  # noqa: BLE001 — an optional stage's failure
-            logger.info("recall_rerank_failed reason=%s", type(exc).__name__)
+            logger.info("recall_rerank_failed reason=%s", decisions.failure_text(exc))
             logger.debug("the rerank call raised", exc_info=True)
             return order, "failed"
         if scored is None:
@@ -1396,7 +1907,7 @@ def build_server(
             return order, "empty"
         kept: list[int] = []
         for index, score in scored:
-            if 0 <= index < len(ids) and score >= policy.rerank_min_score:
+            if score >= policy.rerank_min_score:
                 turn_id = ids[index]
                 if turn_id not in kept:
                     kept.append(turn_id)

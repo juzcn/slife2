@@ -508,30 +508,31 @@ async def test_an_unreadable_trim_answer_is_not_a_trim_that_took_nothing() -> No
     """**A hub that answered, and unreadably, is not a hub that unloaded none.**
 
     `return payload or empty` turned the one answer this pair of functions is
-    built to refuse — `tool_payload`'s `{}`, which is what a shape this build
-    does not know reads as — into the well-formed "nothing was unloaded, no
-    sentence" the `except` above is for.  `trim_answer` then saw an honest
-    no-op, wrote no pair, and the caller logged nothing: the model went on
-    believing it held the tools that had gone, which is the confusion
-    `trim_answer` was written to remove and the sibling paths pin with a test.
-    A call that could not be *made* is still the empty answer; an answer that
-    arrived and cannot be *read* is damage, and damage is the caller's to
-    refuse.
+    built to refuse — a body `tool_payload` cannot read, which used to arrive
+    as `{}` — into the well-formed "nothing was unloaded, no sentence" the
+    `except` above is for.  `trim_answer` then saw an honest no-op, wrote no
+    pair, and the caller logged nothing: the model went on believing it held
+    the tools that had gone, which is the confusion `trim_answer` was written
+    to remove and the sibling paths pin with a test.  A call that could not be
+    *made* is still the empty answer; an answer that arrived and cannot be
+    *read* is damage, and damage is the caller's to refuse.  The shared reader
+    now refuses the body, and `trim_answer` refuses the key-level holes.
     """
 
     class Unreadable(FakeHub):
         async def call_tool(self, name: str, arguments: Any = None, **_: Any) -> Any:
             if name == FUNC_TOOL_UNLOAD:
                 # A hub from another build answering in prose: no payload this
-                # build can read out of it, which is the empty mapping.
+                # build can read out of it.
                 return answer("the tool list is within its budget")
             return await super().call_tool(name, arguments)
 
-    found = await unload_tools(Unreadable())
+    with pytest.raises(UnreadableAnswer, match="answer with a mapping"):
+        await unload_tools(Unreadable())
 
-    assert found == {}, "the unreadable answer is passed on as it is"
+    # The key-level half still refuses a mapping that arrived with holes.
     with pytest.raises(ConnectionError, match="names it unloaded"):
-        trim_answer(found)
+        trim_answer({})
 
 
 def test_the_hub_reaches_the_store_and_nothing_below_it() -> None:

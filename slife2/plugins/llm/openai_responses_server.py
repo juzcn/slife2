@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 from slife2.libs.host.config import ModelSettings, plugin
@@ -40,12 +41,16 @@ from slife2.libs.model.base import Chunk, Finish, ProviderEvent, Streamer, ToolC
 from slife2.libs.turn.messages import Message, ToolSpec, Usage
 from slife2.plugins.llm.server_common import (
     Translate,
+    WireParts,
     build_backend_server,
+    content_parts,
+    forced_tool,
     read_int,
     render_tool_result,
     sdk_client_factory,
     sdk_streamer,
     serve_backend,
+    system_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,77 +68,32 @@ SERVER_NAME = plugin(API).name
 DEFAULT_IMAGE_DETAIL = "auto"
 
 
-def to_responses_parts(content: Any) -> list[dict[str, Any]]:
-    """Neutral content parts as Responses input parts.
-
-    A part this function does not recognise is dropped rather than passed
-    through: an unknown item in the input list is a 400 on every call that
-    carries one, and the neutral form has exactly two kinds because that is what
-    the agent server can produce: `slife2.libs.turn.attachments.parts` builds them.  It is
-    *named* when it is dropped, because a part type this build does not know —
-    an attachment, or a newer kind — otherwise disappears without a word.  A
-    part that is not a mapping at all is dropped and named the same way.
-    """
-    parts: list[dict[str, Any]] = []
-    for part in content or []:
-        if not isinstance(part, dict):
-            logger.warning(
-                "openai-responses: dropping a content part that is %r, not a "
-                "mapping — this API takes input items as mappings only, so it "
-                "cannot be passed through, but the caller's part is now missing",
-                type(part).__name__,
-            )
-            continue
-        match part.get("type"):
-            case "text":
-                text = part.get("text") or ""
-                if text:
-                    parts.append({"type": "input_text", "text": text})
-            case "image_url":
-                image = to_input_image(part.get("image_url"))
-                if image is not None:
-                    parts.append(image)
-            case other:
-                logger.warning(
-                    "openai-responses: dropping a content part of type %r — it "
-                    "is not an item this API takes, so it cannot be passed "
-                    "through, but the caller's attachment is now missing",
-                    other,
-                )
-    return parts
-
-
-def to_input_image(raw: Any) -> dict[str, Any] | None:
-    """An image URL as an `input_image` part, or None if it is not one.
+def _image_fields(url: str) -> dict[str, Any]:
+    """An accepted image URL as the fields of an `input_image` part.
 
     **Both forms go on, and neither is fetched here.**  An inline `data:` URL and
     a remote `http(s)` one are both valid `input_image.image_url` values, and the
     API downloads the remote one on its own side — so passing it through *is* what
     "not fetching" looks like, and dropping it silently would lose the attachment
     the caller sent with nothing anywhere reporting the loss.  That case is
-    exactly what the file tunnel exists to serve (`slife2.libs.turn.attachments` passes an
-    `http(s)` URL through untouched for the provider to fetch).  Anything else — a
-    `file:` URL, a bare word — is an image source in neither form, and is dropped
-    rather than sent to 400 on every call that carries one.
+    exactly what the file tunnel exists to serve (`slife2.libs.turn.attachments`
+    passes an `http(s)` URL through untouched for the provider to fetch).
 
-    It is *named* when it is dropped, by its scheme, for the reason the
-    unrecognised part type one function up is named: an attachment that vanishes
-    without a word is the failure this module cannot see from inside (SDD Appendix C).
+    `detail` is part of the documented shape and `auto` is the documented
+    default, so this says out loud what the provider would have assumed — worth
+    doing for a field whose omission some compatible gateways reject.
     """
-    url = (raw or {}).get("url") if isinstance(raw, dict) else None
-    if not isinstance(url, str) or not url:
-        return None
-    if not url.startswith(("data:", "http://", "https://")):
-        scheme, _, _ = url.partition(":")
-        logger.warning(
-            "openai-responses: dropping an image from a %r source — it is "
-            "neither a `data:` URL nor an http(s) one, so it is not an "
-            "`input_image` this API takes, and the caller's attachment goes "
-            "with it",
-            scheme,
-        )
-        return None
-    return {"type": "input_image", "image_url": url, "detail": DEFAULT_IMAGE_DETAIL}
+    return {"image_url": url, "detail": DEFAULT_IMAGE_DETAIL}
+
+
+#: This wire's part names, and the one part field that is its own: an
+#: `input_image` part carries the whole URL, not Anthropic's split source.
+_WIRE = WireParts(
+    server="openai-responses",
+    text="input_text",
+    image="input_image",
+    image_fields=_image_fields,
+)
 
 
 def to_responses_content(content: Any) -> Any:
@@ -146,10 +106,33 @@ def to_responses_content(content: Any) -> Any:
     """
     if isinstance(content, str):
         return content if content else None
-    return to_responses_parts(content) or None
+    return content_parts(content, _WIRE) or None
 
 
-def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any]]]:
+def reasoning_items(payload: dict[str, Any] | None, model: str) -> list[dict[str, Any]]:
+    """The reasoning items this wire may replay from a message's opaque payload.
+
+    **Only for the model that produced them**, on `Message.reasoning`'s rule;
+    empty `model` means this request did not ask the model to reason and must
+    not replay another one's items.
+
+    Items go back **exactly as received** — that is the API's own instruction,
+    and they are opaque to this build.  A `store: false` request asks for
+    `encrypted_content` beside them (`build_request`), because a stateless
+    server has nothing else to resolve the item against.
+    """
+    if not payload or not model or payload.get("model") != model:
+        return []
+    return [
+        item
+        for item in payload.get("blocks") or []
+        if isinstance(item, dict) and item.get("type") == "reasoning"
+    ]
+
+
+def to_responses_input(
+    messages: list[Message], *, model: str = ""
+) -> tuple[str, list[dict[str, Any]]]:
     """Convert neutral messages into `(instructions, input items)`.
 
     The two halves are separate because this API takes the system prompt as its
@@ -161,48 +144,21 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
     An assistant turn becomes a text item followed by one `function_call` per
     call, in that order — which is the order the API itself emits them in, so a
     history that came from a previous response round-trips unchanged.
+
+    **Its reasoning items go first.**  A reasoning model's second call in a
+    tool loop is a 400 without them when the response was not stored, and the
+    API emitted them before the message and calls it reasons about.
     """
     instructions: list[str] = []
     items: list[dict[str, Any]] = []
 
     for message in messages:
         if message.role == "system":
-            # `instructions` is a string parameter, so a system turn's content
-            # parts have no field to live in — the text in them is taken and the
-            # rest is named.
-            #
-            # **Taken, and not dropped.**  Reading only `str` content meant a
-            # system turn carrying blocks contributed nothing at all, with no
-            # word anywhere: a prompt the caller wrote left the request, and the
-            # model answered a question nobody had asked (SDD Appendix C).  It
-            # is the same neutral `Message` the Anthropic adapter reads and the
-            # same failure it fixed on its own side, so this is the same answer:
-            # the parts come from the converter the other roles use, so a `str`
-            # is one text part and a list is what it says it is, and a part that
-            # is not text is dropped *with a warning*, because no field of
-            # `instructions` can carry it.
-            if isinstance(message.content, str):
-                if message.content:
-                    instructions.append(message.content)
-                continue
-            parts = to_responses_parts(message.content)
-            text = "".join(
-                str(part.get("text") or "")
-                for part in parts
-                if part.get("type") == "input_text"
-            )
-            other = [
-                str(part.get("type"))
-                for part in parts
-                if part.get("type") != "input_text"
-            ]
-            if other:
-                logger.warning(
-                    "openai-responses: a system turn carries %s, which the "
-                    "`instructions` parameter has no field for — the text beside "
-                    "it is kept and these are left out",
-                    ", ".join(other),
-                )
+            # `instructions` is a string parameter, so a system turn's parts are
+            # taken for the text in them and the rest is named — `system_text`
+            # is the one rule both wires that hoist the prompt follow, and it
+            # says why the text is taken rather than dropped.
+            text = system_text(message.content, _WIRE, "`instructions` parameter")
             if text:
                 instructions.append(text)
             continue
@@ -223,6 +179,7 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
             continue
 
         if message.role == "assistant":
+            items.extend(reasoning_items(message.reasoning, model))
             content = to_responses_content(message.content)
             if content is not None:
                 items.append({"role": "assistant", "content": content})
@@ -232,10 +189,19 @@ def to_responses_input(messages: list[Message]) -> tuple[str, list[dict[str, Any
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
-                        # Re-serialised to a JSON string because that is what
-                        # the wire requires — the awkwardness is theirs, and
-                        # this is the one place it is dealt with.
-                        "arguments": json.dumps(call.arguments, ensure_ascii=True),
+                        # A JSON string, because that is what the wire requires
+                        # — the awkwardness is theirs, and this is the one
+                        # place it is dealt with.  **A damaged call's original
+                        # text goes back as it came** (`raw_arguments`), the
+                        # rule `ToolCall.to_wire` states for the chat wire:
+                        # re-serialising its empty dict would send a call the
+                        # model never made, and the repair round (and every
+                        # later replay) would lose the answer being corrected.
+                        "arguments": (
+                            call.raw_arguments
+                            if call.raw_arguments is not None
+                            else json.dumps(call.arguments, ensure_ascii=True)
+                        ),
                     }
                 )
             # An assistant turn with neither text nor calls carries nothing.
@@ -310,9 +276,29 @@ def build_request(
     messages: list[Message],
     tools: list[ToolSpec],
     settings: ModelSettings,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
-    """The request body, containing only what the config asked for."""
-    instructions, items = to_responses_input(messages)
+    """The request body, containing only what the config asked for.
+
+    `tool_choice` names the one tool the call must use and `thinking` overrides
+    the model's configured value for this call; the forced-choice guard is
+    `server_common.forced_tool`.
+    """
+    if thinking and settings.reasoning:
+        settings = replace(settings, thinking=thinking)
+    if temperature is not None:
+        settings = replace(settings, temperature=temperature)
+    forced_tool(tools, tool_choice)
+    reasoning = reasoning_parameter(settings)
+    # A model that did not ask for reasoning is a model to which another one's
+    # items are not ours to send; the empty model makes `reasoning_items` drop
+    # them.
+    instructions, items = to_responses_input(
+        messages, model=settings.model if reasoning is not None else ""
+    )
 
     request: dict[str, Any] = {
         "model": settings.model,
@@ -323,6 +309,8 @@ def build_request(
         request["instructions"] = instructions
     if tools:
         request["tools"] = to_responses_tools(tools)
+        if tool_choice:
+            request["tool_choice"] = {"type": "function", "name": tool_choice}
 
     # Only what was configured.  `None` means "say nothing and let the gateway
     # decide", which is not the same as passing a default — and unlike
@@ -335,13 +323,21 @@ def build_request(
     if settings.max_tokens is not None:
         request["max_output_tokens"] = settings.max_tokens
 
-    reasoning = reasoning_parameter(settings)
     if reasoning is not None:
         request["reasoning"] = reasoning
 
     store = store_parameter(settings)
     if store is not None:
         request["store"] = store
+    # **A stateless request must ask for the reasoning it will have to replay.**
+    # With `store: false` the server keeps nothing, so a reasoning item comes
+    # back without its `encrypted_content` unless this asks for it — and the
+    # next call of a tool loop cannot send back what it never received.  Only
+    # when reasoning was asked for: an endpoint that has no reasoning has no
+    # use for the field, and a partial gateway may refuse the ones it does not
+    # implement.
+    if reasoning is not None and store is False:
+        request["include"] = ["reasoning.encrypted_content"]
     return request
 
 
@@ -356,14 +352,15 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
     and a new `response.*` event is not a reason to fail a turn.
 
     `streamed` is the caller's memory of which **output indexes this stream has
-    already delivered content for** — the function-call arguments and the answer
-    text, whether it arrived as deltas or whole.  It is written here and not at
-    the call site, because this is the only place that knows an event's
-    `output_index`: a `Chunk` carries the index of a *tool call* and nothing at
-    all about which text item it belongs to.  The terminal event reads it to
-    back-fill only what never streamed (`_arguments_that_never_streamed`,
-    `_text_that_never_streamed`), and `response.output_text.done` reads it to
-    avoid repeating text its deltas already delivered.
+    already delivered content for** — the function-call arguments, the answer
+    text and the reasoning, whether it arrived as deltas or whole.  It is
+    written here and not at the call site, because this is the only place that
+    knows an event's `output_index`: a `Chunk` carries the index of a *tool
+    call* and nothing at all about which text item it belongs to.  The terminal
+    event reads it to back-fill only what never streamed
+    (`_arguments_that_never_streamed`, `_text_that_never_streamed`,
+    `_thinking_that_never_streamed`), and the `.done` events read it to avoid
+    repeating content their deltas already delivered.
 
     Two events here are errors rather than results, and both **raise**:
     `response.failed` and a bare `error`.  The alternative — returning an empty
@@ -405,7 +402,42 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         # unreadable in a way that is hard to notice and impossible to undo.
         thinking = getattr(event, "delta", "") or ""
         if thinking:
+            _note_streamed(streamed, event)
             events.append(Chunk(thinking=thinking))
+
+    elif kind in (
+        "response.reasoning_summary_text.done",
+        "response.reasoning_text.done",
+    ):
+        # **The reasoning half of the text back-fill below, per part.**  An
+        # endpoint that assembles the summary and sends it whole has only this
+        # event to send it in: the deltas never came, so `thinking_parts` stays
+        # empty while the `Finish` arrives from `response.completed` anyway,
+        # and the model's working is lost with nothing anywhere saying so — the
+        # answer is right and the thinking line is simply absent.  An index
+        # that never streamed is filled in from it, on
+        # `_text_that_never_streamed`'s rule and for its reason.
+        thinking = getattr(event, "text", "") or ""
+        if thinking and read_int(event, "output_index") not in (streamed or set()):
+            _note_streamed(streamed, event)
+            events.append(Chunk(thinking=thinking))
+
+    elif kind == "response.refusal.delta":
+        # **A refusal is the answer, not a missing one.**  This protocol has a
+        # channel of its own for it (`response.refusal.delta` / `.done`, and a
+        # `refusal` content part on the assembled message), and the answer text
+        # is null beside it.  Ignoring the channel made a refusal into an empty
+        # answer and failed the turn.
+        text = getattr(event, "delta", "") or ""
+        if text:
+            _note_streamed(streamed, event)
+            events.append(Chunk(text=text))
+
+    elif kind == "response.refusal.done":
+        text = getattr(event, "refusal", "") or ""
+        if text and read_int(event, "output_index") not in (streamed or set()):
+            _note_streamed(streamed, event)
+            events.append(Chunk(text=text))
 
     elif kind == "response.output_item.added":
         # A function call opens as its own output item, which is where its
@@ -451,6 +483,8 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         _raise_on_error(response)
         events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_text_that_never_streamed(response, streamed))
+        events.extend(_thinking_that_never_streamed(response, streamed))
+        events.extend(_reasoning_items(response))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_stop_reason(response)))
 
@@ -462,6 +496,8 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
         _raise_on_error(response)
         events.extend(_arguments_that_never_streamed(response, streamed))
         events.extend(_text_that_never_streamed(response, streamed))
+        events.extend(_thinking_that_never_streamed(response, streamed))
+        events.extend(_reasoning_items(response))
         events.extend(_usage_event(response))
         events.append(Finish(stop_reason=_incomplete_reason(response)))
 
@@ -481,12 +517,13 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
 def _note_streamed(streamed: set[int] | None, event: Any) -> None:
     """Remember that this event's output index has delivered its content now.
 
-    One line, and it is a function because it is written in three places for one
-    rule: an *output index* is the position of an item in `response.output`, and
-    both kinds of item — a function call and a message — own exactly one index
-    (see `translate`'s `streamed`).  A stream that never had a memory handed to
-    it is not an error: `translate` is callable without one, and a caller that
-    passes none is a caller with one event and no terminal to back-fill.
+    One line, and it is a function because it is written wherever an event
+    delivers content, for one rule: an *output index* is the position of an
+    item in `response.output`, and each kind of item — a function call, a
+    message, a reasoning item — owns exactly one index (see `translate`'s
+    `streamed`).  A stream that never had a memory handed to it is not an
+    error: `translate` is callable without one, and a caller that passes none
+    is a caller with one event and no terminal to back-fill.
     """
     if streamed is not None:
         streamed.add(read_int(event, "output_index"))
@@ -518,14 +555,98 @@ def _text_that_never_streamed(
     for index, item in enumerate(getattr(response, "output", None) or []):
         if getattr(item, "type", "") != "message" or index in seen:
             continue
+        # **A refusal part is answer text too.**  The assembled message can
+        # carry `{"type": "refusal", "refusal": …}` where a normal answer has
+        # `output_text`; reading only `text` dropped the model's whole output
+        # from the back-fill and recorded an empty answer.
         text = "".join(
-            str(getattr(part, "text", "") or "")
+            str(getattr(part, "text", None) or getattr(part, "refusal", None) or "")
             for part in getattr(item, "content", None) or []
-            if getattr(part, "type", "") == "output_text"
+            if getattr(part, "type", "") in ("output_text", "refusal")
         )
         if text:
             events.append(Chunk(text=text))
     return events
+
+
+def _thinking_that_never_streamed(
+    response: Any, streamed: set[int] | None
+) -> list[ProviderEvent]:
+    """The reasoning of a response whose deltas never came.
+
+    **The reasoning half of the same back-fill**: the thinking parts are
+    assembled from `response.reasoning_summary_text.delta` and
+    `response.reasoning_text.delta` — or, for an endpoint that sends the
+    summary whole, from their `.done` events, which `translate` treats as the
+    same content — so a response that sends neither leaves `thinking_parts`
+    empty while the `Finish` arrives anyway, and the model's working is lost
+    with nothing anywhere saying so.
+
+    The reasoning items in the completed response carry the text, so every
+    output index whose reasoning never streamed is read from here: the
+    `summary` parts and any `content` parts, the same two kinds the deltas
+    arrive as.  One `Chunk` per item rather than one per part, on
+    `_text_that_never_streamed`'s rule — a string the accumulator appends to
+    the same thinking, in order.
+    """
+    seen = streamed or set()
+    events: list[ProviderEvent] = []
+    for index, item in enumerate(getattr(response, "output", None) or []):
+        if getattr(item, "type", "") != "reasoning" or index in seen:
+            continue
+        text = "".join(
+            str(getattr(part, "text", "") or "")
+            for part in (getattr(item, "summary", None) or [])
+            + (getattr(item, "content", None) or [])
+            if getattr(part, "type", "") in ("summary_text", "reasoning_text")
+        )
+        if text:
+            events.append(Chunk(thinking=text))
+    return events
+
+
+def _reasoning_items(response: Any) -> list[ProviderEvent]:
+    """The reasoning items of a completed response, exactly as received.
+
+    **The replay half.**  A reasoning model's next call in a tool loop must be
+    sent the items this one produced — that is the API's documented contract
+    for tool use, and with `store: false` the items carry the encrypted content
+    the request asked for (`build_request`).  They are opaque here: serialised
+    by the SDK's own model dump and replayed by `to_responses_input` untouched.
+
+    Emitted regardless of whether their summary streamed: the readable text and
+    the replayable item are different facts, and the display channel dropping a
+    delta must not cost the conversation the item.
+    """
+    items: list[dict[str, Any]] = []
+    for item in getattr(response, "output", None) or []:
+        if getattr(item, "type", "") != "reasoning":
+            continue
+        wire = _plain(item)
+        if isinstance(wire, dict):
+            items.append(wire)
+    return [Chunk(reasoning=tuple(items))] if items else []
+
+
+def _plain(value: Any) -> Any:
+    """An SDK object as the plain mapping its own encoder would write.
+
+    The SDK's types are Pydantic models and `model_dump` is their wire form;
+    a mapping or a list built by a test is walked the same way.  Anything else
+    is left alone — dropping the item would lose the only replayable copy the
+    conversation will ever have.
+    """
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        try:
+            return dump(exclude_none=True, exclude_unset=True)
+        except TypeError:  # a non-Pydantic double with a same-named method
+            return dump()
+    if isinstance(value, list):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
 
 
 def _arguments_that_never_streamed(
@@ -555,7 +676,18 @@ def _arguments_that_never_streamed(
             events.append(
                 Chunk(
                     tool_call_deltas=(
-                        ToolCallDelta(index=index, arguments_delta=str(arguments)),
+                        ToolCallDelta(
+                            index=index,
+                            # **The whole call, not only its arguments.**  An
+                            # endpoint that assembles the call sends no
+                            # `output_item.added`, so this is the only place
+                            # the accumulator can learn the call's id and name;
+                            # without them the model's legitimate call arrives
+                            # as `name=""` and is answered "unknown tool".
+                            id=getattr(item, "call_id", None),
+                            name=getattr(item, "name", None),
+                            arguments_delta=str(arguments),
+                        ),
                     )
                 )
             )
@@ -658,7 +790,8 @@ def _make_streamer() -> Streamer:
         `streamed` is what a *later* event needs to know about an earlier one —
         which is why it lives across the stream rather than inside `translate`,
         whose only input beyond the event itself is this set
-        (`_arguments_that_never_streamed`, `_text_that_never_streamed`).
+        (`_arguments_that_never_streamed`, `_text_that_never_streamed`,
+        `_thinking_that_never_streamed`).
         """
         streamed: set[int] = set()
 

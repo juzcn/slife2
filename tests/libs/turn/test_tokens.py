@@ -17,6 +17,10 @@ smaller and unbiased where a hand-written ratio is structurally high.
 
 from __future__ import annotations
 
+import hashlib
+import subprocess
+import sys
+
 import pytest
 
 from slife2.libs.turn import tokens
@@ -51,6 +55,13 @@ def test_the_fallback_counts_the_two_scripts_separately() -> None:
         # the estimate — which is the whole point.
         assert tokens.estimate_text_tokens("你好世界") == 4
         assert tokens._by_script(CHINESE) > tokens._by_script(ENGLISH) / 2
+        # **Every non-ASCII character costs at least one token, whatever the
+        # script.**  The old wide-range table omitted emoji (East-Asian-Wide)
+        # and charged Cyrillic, Greek and emoji at a quarter of a token, which
+        # undercounted a real BPE by four to five times — the one direction a
+        # budget cannot afford.
+        assert tokens.estimate_text_tokens("😀" * 8) == 8
+        assert tokens.estimate_text_tokens("Привет") == 6
 
 
 def test_a_special_token_spelling_does_not_raise(real_tokenizer) -> None:
@@ -221,26 +232,171 @@ def test_a_transient_failure_is_retried_after_the_cooldown(
     assert calls == [tokens._ENCODING, tokens._ENCODING], "retried after the cooldown"
 
 
+def test_a_missing_bundle_falls_back_without_asking_tiktoken(
+    monkeypatch, tmp_path, tokenizer_resolver
+) -> None:
+    """**A broken install must not reach the network.**  tiktoken 0.14.0 answers
+    a missing cache file with `requests.get` and *no timeout*, so asking it on a
+    black-holed network hangs the turn forever instead of reaching the script
+    measure.  The resolver checks the cache file first and falls back immediately
+    — `get_encoding` is never asked, and the failure is remembered for the
+    cooldown like any other failed load.
+
+    The directory is pinned with `setenv` rather than left to the resolver's
+    `setdefault`: that write is the code under test's, so `monkeypatch` would not
+    undo it, and a tmp directory left in the process env would be the next
+    test's cache.
+    """
+    import tiktoken
+
+    calls: list[str] = []
+
+    def refuse(name: str):
+        calls.append(name)
+        raise AssertionError("get_encoding was asked with no readable bundle")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))  # an empty directory
+    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
+    monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_failed_at", None)
+
+    assert tokens.estimate_text_tokens(ENGLISH) == tokens._by_script(ENGLISH)
+    assert calls == [], "the load was refused before tiktoken could fetch"
+    assert tokens._failed_at is not None, "the failure is remembered for the cooldown"
+
+
+def test_a_corrupted_bundle_falls_back_without_asking_tiktoken(
+    monkeypatch, tmp_path, tokenizer_resolver
+) -> None:
+    """A hash-mismatched bundle is the same hazard by another road: tiktoken
+    *deletes* a cache file whose content hash is wrong and fetches a fresh one,
+    so the resolver verifies the hash before the load rather than letting the
+    fetch hang the turn."""
+    import tiktoken
+
+    calls: list[str] = []
+
+    def refuse(name: str):
+        calls.append(name)
+        raise AssertionError("get_encoding was asked with a corrupted bundle")
+
+    (tmp_path / tokens._CACHE_KEY).write_bytes(b"not the vocabulary")
+    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
+    monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_failed_at", None)
+
+    assert tokens.estimate_text_tokens(ENGLISH) == tokens._by_script(ENGLISH)
+    assert calls == [], "the load was refused before tiktoken could delete and fetch"
+    assert tokens._failed_at is not None, "the failure is remembered for the cooldown"
+
+
+def _fresh_python(code: str) -> subprocess.CompletedProcess[str]:
+    """Run *code* in a fresh, isolated interpreter — **UTF-8 on both ends**.
+
+    `-X utf8` is the child's half: a piped interpreter on a Chinese Windows
+    encodes stderr in the ANSI code page, so a log line with an em dash arrives
+    as GBK bytes.  `encoding="utf-8"` is the parent's half: without it the
+    reader thread decodes those bytes as UTF-8 and dies, and pytest reports the
+    test as passed with a `PytestUnhandledThreadExceptionWarning` beside it —
+    noise that hides the next real thread failure.
+    """
+    return subprocess.run(
+        [sys.executable, "-I", "-X", "utf8", "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+
+def test_a_missing_bundle_never_touches_the_network() -> None:
+    """The bundle branch itself, in a fresh process: no cache directory
+    configured and no bundled file, so the resolver points tiktoken at the
+    bundle and finds nothing.  `requests.get` is poisoned and `get_encoding`
+    refused — a fetch fails the test rather than hanging it, and the script
+    measure answers."""
+    code = """
+import os
+import tempfile
+from pathlib import Path
+
+os.environ.pop("TIKTOKEN_CACHE_DIR", None)
+
+import requests
+
+def refuse(*args, **kwargs):
+    raise AssertionError("the estimator touched the network")
+
+requests.get = refuse
+
+import tiktoken
+
+def never(name):
+    raise AssertionError("get_encoding was asked with no readable bundle")
+
+tiktoken.get_encoding = never
+
+from slife2.libs.turn import tokens
+
+tokens._BUNDLED_CACHE = Path(tempfile.mkdtemp())
+assert tokens._openai_encoding() is None, "a missing bundle must fall back"
+assert tokens._failed_at is not None
+assert tokens.estimate_text_tokens("hello") == tokens._by_script("hello")
+"""
+    result = _fresh_python(code)
+    assert result.returncode == 0, result.stderr
+
+
 def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
-    """Importing must not fetch megabytes, so a backend never pays for one.
+    """Importing must not parse megabytes, so a backend never pays for one.
 
     `slife2.libs.turn.tokens` is imported by `slife2-context` — and, through it, by
     anything that imports the plugin — so a resolution at module scope would put
-    a network fetch in the start-up of a process that may never size anything.
+    a vocabulary parse in the start-up of a process that may never size anything.
     Asserted in a fresh interpreter, because this one has already estimated.
     """
-    import subprocess
-    import sys
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            "-c",
-            "import slife2.libs.turn.tokens as t; print(t._encoding, t._failed_at)",
-        ],
-        capture_output=True,
-        text=True,
-        check=True,
+    result = _fresh_python(
+        "import slife2.libs.turn.tokens as t; print(t._encoding, t._failed_at)"
     )
+    assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "None None"
+
+
+def test_the_bundled_vocabulary_is_present_and_whole() -> None:
+    """The cache file is package data, and it is the file tiktoken expects.
+
+    The name is tiktoken's cache key (the SHA-1 of the URL) and the content is
+    verified against the hash the resolver checks before the load — the one
+    spelling of it (`tokens._BUNDLED_SHA256`, which the bundle's README also
+    records); a stale or truncated bundle fails here rather than at a user's
+    first recall.
+    """
+    path = tokens._BUNDLED_CACHE / tokens._CACHE_KEY
+
+    assert path.is_file(), f"the bundled vocabulary is missing: {path}"
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == tokens._BUNDLED_SHA256
+
+
+def test_the_bundled_vocabulary_loads_without_a_network() -> None:
+    """**The point of shipping it.**  A cold process resolves the encoding with
+    `requests.get` poisoned, so a cache-key drift or a missing data file fails
+    the suite instead of quietly turning the first recall into a download.
+    """
+    code = """
+import requests
+
+def refuse(*args, **kwargs):
+    raise AssertionError("the estimator touched the network")
+
+requests.get = refuse
+
+from slife2.libs.turn import tokens
+
+encoding = tokens._openai_encoding()
+assert encoding is not None, "the bundled vocabulary did not load"
+assert tokens.estimate_text_tokens("hello") > 0
+"""
+    result = _fresh_python(code)
+    assert result.returncode == 0, result.stderr

@@ -49,7 +49,8 @@ pytestmark = pytest.mark.unit
 
 #: Less than a real poll and less than a real QR poll.  Every wait in these
 #: tests belongs to a background loop, and this is what the loops are hurried
-#: with — through the module constant, which is where each loop reads it.
+#: with — through the registry value (or the retry policy), which is where each
+#: loop reads it.
 QUICK = 0.01
 
 
@@ -216,7 +217,8 @@ def rig(
     bridge: Bridge | None = None,
 ) -> Rig:
     """A plugin over a fresh bridge, with every loop hurried along."""
-    monkeypatch.setattr(_T.timeouts.pacing, "wechat_poll", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing.wechat_retry, "base", QUICK)
+    monkeypatch.setattr(_T.timeouts.pacing.wechat_retry, "cap", QUICK)
     monkeypatch.setattr(_T.timeouts.pacing, "qr_poll", QUICK)
     monkeypatch.setattr(_T.timeouts.pacing, "typing_refresh", QUICK)
     made = Bridge() if bridge is None else bridge
@@ -326,8 +328,23 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
     read as a success.
     """
     async with Client(served()) as client:
-        with pytest.raises(ToolError, match="did not say which conversation"):
-            await ask(client, "wechat_check_status", agent="")
+        # **All four tools, one guard.**  They each carried their own copy of
+        # the read-and-raise, so one could answer differently from the rest.
+        for tool, arguments in (
+            ("wechat_login", {}),
+            ("wechat_check_status", {}),
+            (
+                "wechat_send_message",
+                {
+                    "peer_wechat_id": "peer-1",
+                    "context_token": "ctx-1",
+                    "text": "hi",
+                },
+            ),
+            ("wechat_logout", {}),
+        ):
+            with pytest.raises(ToolError, match="did not say which conversation"):
+                await ask(client, tool, agent="", **arguments)
         named = await ask(client, "wechat_check_status", agent="jack")
 
     assert named["connected"] is False, "and no login was ever scanned"
@@ -378,6 +395,61 @@ async def test_a_scan_becomes_a_saved_login(monkeypatch: pytest.MonkeyPatch) -> 
     # is watching** — the one arrival that is news, as against a saved login
     # picked up at start-up (`test_a_login_resumed_at_start_up_says_nothing`).
     assert made.notes.lines == [("jack", "⚡ Wechat online")]
+
+
+@pytest.mark.asyncio
+async def test_a_login_whose_save_failed_still_polls(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The loop is the login; the file is its record for the next start.**
+
+    `save_session` ran before `watch`, so a full disk at the confirmation left
+    a valid token with nothing polling it: `ready` short-circuits on the token,
+    no later call starts the loop, and `wechat_check_status` answered
+    `connected` with `polling` false and an empty error — a zombie with no
+    visible cause and no recovery.  The loop now starts first, the failed save
+    is a warning naming the file, and the next cursor write saves it again.
+    """
+    bridge = Bridge()
+    bridge.scan = {
+        "status": "confirmed",
+        "bot_token": "bot-token-9",
+        "ilink_user_id": "bot-user-9",
+        "ilink_bot_id": "bot-9",
+    }
+    made = rig(monkeypatch, bridge=bridge)
+    session = made.plugin.session("jack")
+    real_save = wechat.save_session
+    failed = False
+
+    def refuse_once(agent: str, saved: Mapping[str, Any]) -> Path:
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("the disk is full")
+        return real_save(agent, saved)
+
+    monkeypatch.setattr(wechat, "save_session", refuse_once)
+    with caplog.at_level(logging.WARNING, logger="slife2.plugins.wechat.server"):
+        await made.plugin.login(session)
+        try:
+            await until(lambda: session.qr_state == "confirmed")
+            assert session.polling, "a valid token with nothing polling it"
+            facts = await made.plugin.status(session)
+            # The next cursor write repairs the file (`_persist`), so the
+            # login survives the restart the failed save put at risk.
+            bridge.cursor = "cursor-1"
+            await until(lambda: load_session("jack").get("bot_token") == "bot-token-9")
+        finally:
+            await made.close()
+
+    assert facts["connected"] is True
+    assert facts["polling"] is True, "the status reads the loop, not the token alone"
+    assert facts["error"] == ""
+    assert any(
+        str(session_path("jack")) in record.getMessage() for record in caplog.records
+    ), "the failed save left nothing to find"
+    assert load_session("jack").get("get_updates_buf") == "cursor-1"
 
 
 @pytest.mark.asyncio
@@ -484,6 +556,51 @@ async def test_a_new_login_takes_the_state_back_from_the_code_it_replaces(
     assert session.qr_state == "waiting", "the replaced watch's ending survived"
     assert session.qr_error == ""
     assert session.qr_url == "https://example.test/scan-2"
+    await made.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_scan_that_lands_during_the_fetch_is_the_login(
+    monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """**The replaced watch polls through the fetch, and a scan is the answer.**
+
+    Confirming adopts the token and finishes without an await, so a client that
+    is logged in when the fetch returns was confirmed while this call was out.
+    Resetting the state to `waiting` and drawing a replacement code would hide
+    a login already in hand behind a code nobody has to scan; the failed-fetch
+    branch has the same question, and the scan wins there too.
+    """
+    made = rig(monkeypatch)
+    session = made.plugin.session("jack")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        # What the replaced watch does on a scan: adopt the token, then the
+        # state.  There is no await between them, exactly as `_confirmed`.
+        await session.client.start("bot-token-9", "https://example.test")
+        session.qr_state = "confirmed"
+        if fails:
+            raise OSError("the QR endpoint died")
+        return {
+            "qrcode": "QR-2",
+            "qrcode_img_content": "https://example.test/scan-2",
+        }
+
+    monkeypatch.setattr(session.client, "fetch_qrcode", fetch)
+    login = asyncio.create_task(made.plugin.login(session))
+    await entered.wait()
+    release.set()
+    answer = await login
+
+    assert answer["state"] == "connected", fails
+    assert answer["qr"] == "", "there is nothing to scan"
+    assert session.qr_state == "confirmed", "the scan was overwritten"
+    assert session.qr_task is None, "a watch was started for an unneeded code"
     await made.close()
 
 
@@ -922,6 +1039,28 @@ async def test_a_reply_carries_the_peer_and_the_conversation(
     assert 2 in made.bridge.typing
 
 
+def test_envelope_error_prefers_the_text_to_the_numeric_code() -> None:
+    """`errmsg` is the bridge's own words; a numeric `errno`/`retcode` is a number
+    nobody can act on.  The text keys are read most-specific-first, so an envelope
+    carrying both answers with the text — not the code that happened to be listed
+    before it."""
+    assert (
+        ilink.envelope_error({"errno": -14, "errmsg": "session timeout"})
+        == "session timeout"
+    )
+    assert (
+        ilink.envelope_error({"retcode": -1, "errmsg": "rate limited"})
+        == "rate limited"
+    )
+    assert (
+        ilink.envelope_error({"errcode": -14, "errmsg": "session timeout"})
+        == "session timeout"
+    )
+    # A numbers-only envelope still answers tersely, and silence stays silence.
+    assert ilink.envelope_error({"errno": -14}) == "-14"
+    assert ilink.envelope_error({}) == ""
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "envelope",
@@ -1078,9 +1217,10 @@ async def test_a_window_that_is_not_there_fails_the_hand_over(
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(DeliveryFailed, match="could not be reached"):
+    with pytest.raises(DeliveryFailed, match="could not be reached") as failed:
         await made.plugin._deliver_to_window("jack", "hello")
 
+    assert failed.value.unknown is False, "a refusal proves nothing was written"
     assert attempts == _T.timeouts.stream.handover
 
 
@@ -1617,9 +1757,10 @@ async def test_a_hand_over_that_does_not_come_back_is_not_repeated(
     monkeypatch.setattr(handover, "open_server", open_window)
     made = rig(monkeypatch)
 
-    with pytest.raises(DeliveryFailed, match="was not repeated"):
+    with pytest.raises(DeliveryFailed, match="was not repeated") as failed:
         await made.plugin._deliver_to_window("jack", "hello")
 
+    assert failed.value.unknown is True, "a call that did not come back may have landed"
     assert attempts == 1, "an unclassified failure is not retried"
 
 

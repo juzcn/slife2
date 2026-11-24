@@ -57,11 +57,14 @@ from typing import Any
 
 from fastmcp.exceptions import ToolError
 
-import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import CALL_TOOL
 from slife2.libs.host.config import Config, ConfigError, plugin
 from slife2.libs.plugin.audience import conversation_meta
-from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
+from slife2.libs.plugin.protocol import (
+    close_server,
+    open_server,
+    tool_payload_or_empty,
+)
 
 #: The hub's key in `servers:`.  One system fact, not a capability: every job's
 #: model-facing tool path goes through the same process, and the convenience
@@ -148,13 +151,13 @@ async def _peer(url: str, name: str, fallback: str, invoke: Any) -> Any:
 
     One client per call, closed in `finally`: the protocol is stateless here, so
     holding a session between calls buys nothing and goes stale when a plugin is
-    restarted on the same port.  The connect is bounded by `work.hub`; the call
-    itself is not — a job's length is the caller's `_timeout`, and a callee does
-    not invent a total for its caller.
+    restarted on the same port.  The connect is bounded by the hop's own connect
+    clock; the call itself is not — a job's length is the caller's `_timeout`,
+    and a callee does not invent a total for its caller.  A `timeout` passed here
+    would become the session's total per-request deadline (`make_client` states
+    the rule), capping every job call at the connect budget.
     """
-    client = await open_server(
-        url, name=name, fallback_tool=fallback, timeout=_T.timeouts.work.hub
-    )
+    client = await open_server(url, name=name, fallback_tool=fallback)
     try:
         return await invoke(client)
     finally:
@@ -168,8 +171,14 @@ def _answer(result: Any) -> tuple[str, Mapping[str, Any]]:
     content blocks second, for a tool that answers in prose (`skill_use` is the
     shape).  Neither is invented when both are empty: `("", {})` is an honest
     answer and the caller can say so.
+
+    **Prose is an answer here**, not a build mismatch: `call` is the job's
+    general-purpose door onto any server's tool, and `skill_use` is neither the
+    first nor the last tool that answers in text.  `tool_payload` refuses an
+    unreadable mapping everywhere else; this one reader asks for the lenient
+    form (SDD Appendix C).
     """
-    data = tool_payload(result)
+    data = tool_payload_or_empty(result)
     if isinstance(data, dict) and data:
         text = data.get("text")
         return (text if isinstance(text, str) else ""), data

@@ -41,7 +41,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TypeVar
+from typing import Any, Literal, TypeVar
 
 from rich.text import Text
 from textual import events
@@ -55,24 +55,31 @@ from textual.widgets import Static, TextArea
 from slife2.clients.toolclient import ToolCounts
 from slife2.libs.harness.async_tasks import CHANNEL as ASYNC_TOOL_CHANNEL
 from slife2.libs.harness.async_tasks import MARKER_PREFIX as ASYNC_CALL_MARKER
+from slife2.libs.harness.i18n import t
 from slife2.libs.harness.markers import strip as strip_marker
 
-# Imported, never re-spelled.  The module that writes a marker is the one that
-# knows what it looks like, and a prefix typed a second time here is a copy that
-# drifts — into printing the raw marker at somebody, which is the failure these
-# imports exist to prevent.  Taking one off is `slife2.libs.harness.markers.strip`, which is
-# the *shape* rather than any one name, so a third channel is a line here and
-# nothing at all in that module.
+# Imported, never re-spelled.  The names are `slife2.libs.plugin.vocabulary`'s,
+# which is where a writer and a reader meet without the reader loading a server;
+# a prefix typed a second time here is a copy that drifts — into printing the raw
+# marker at somebody, which is the failure these imports exist to prevent.
+# Taking one off is `slife2.libs.harness.markers.strip`, which is the *shape*
+# rather than any one name, so a third channel is a line here and nothing at all
+# in that module.
 from slife2.libs.host.config import LOCAL, LOCAL_AGENT, REMOTE
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_CHANNEL as ASYNC_TASK_CHANNEL,
+)
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_MARKER as ASYNC_TASK_MARKER,
+)
+from slife2.libs.plugin.vocabulary import (
+    WECHAT_CHANNEL,
+    WECHAT_MARKER,
+    WINDOW_CHANNEL,
+)
+from slife2.libs.turn import plan
 from slife2.libs.turn.context import context_usage
-from slife2.plugins.a2a.server import CHANNEL as PEER_CHANNEL
-from slife2.plugins.a2a.server import MARKER_PREFIX as PEER_MARKER
-from slife2.plugins.agent_task.server import CHANNEL as ASYNC_TASK_CHANNEL
-from slife2.plugins.agent_task.server import MARKER_PREFIX as ASYNC_TASK_MARKER
-from slife2.plugins.wechat.server import CONFIG_KEY as WECHAT_CHANNEL
-from slife2.plugins.wechat.server import MARKER_PREFIX as WECHAT_MARKER
-from slife2.tui import notes
-from slife2.tui.i18n import t
+from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
 from slife2.tui.theme import GLYPHS, PALETTE
 
 #: Every marker this window knows how to take back off, handed to `strip_marker`
@@ -83,10 +90,10 @@ MARKERS: tuple[str, ...] = (
     WECHAT_MARKER,
     ASYNC_TASK_MARKER,
     ASYNC_CALL_MARKER,
-    PEER_MARKER,
+    REMOTE.marker,
     # **The local network's, which is a second envelope and not a second name
     # for the remote one.**  The one the *config* owns (`LOCAL.marker`,
-    # `[Subagent:`) is not among the plugins' exports, and missing it draws a
+    # `[Subagent:`) is not among the vocabulary's constants, and missing it draws a
     # subagent's handed-over answer with its raw envelope in front of it — the
     # exact failure the imports above exist to prevent: `channel_prefix` already
     # knows this channel and gives it `Subagent(jill)>`.
@@ -124,10 +131,6 @@ APPROVAL_ARG_LINES = 6
 #: it is the model talking to itself — and past a few hundred characters nobody
 #: is reading it, they are skimming for the shape of it.
 THINKING_PREVIEW_CHARS = 500
-
-#: The channel this window's own turns are sent on (`slife2.tui.client`), and
-#: therefore the one whose messages are the person's own words.
-WINDOW_CHANNEL = "tui"
 
 
 def is_own_channel(channel: str) -> bool:
@@ -167,6 +170,16 @@ def _group_bubble(bubble: str, channel: str) -> str:
     return f"{bubble}({sender}@{group})> "
 
 
+def task_bubble(name: str) -> str:
+    """What an agent task's words wear: `AsyncTask(name)`.
+
+    **One spelling for two readers**: the window's channel prefix and the watch
+    screen's assistant signature both name the task that produced the words.
+    A second spelling here would make one task read as two.
+    """
+    return f"AsyncTask({name})"
+
+
 def channel_prefix(channel: str) -> str:
     """What a turn's channel is called on screen.
 
@@ -198,7 +211,7 @@ def channel_prefix(channel: str) -> str:
         # the words and nothing else (`slife2.plugins.agent_task.server`), and the bubble
         # is deliberately *not* the key spelled again: `agent-task:research` is
         # an address, and what a person is being told is who answered.
-        return f"AsyncTask({channel.split(':', 1)[1]})> "
+        return f"{task_bubble(channel.split(':', 1)[1])}> "
     if channel.startswith(f"{ASYNC_TOOL_CHANNEL}:"):
         # A background tool call of this conversation's own — the other half of
         # the pair above, and named the same way: the tool is what a person
@@ -217,7 +230,7 @@ def channel_prefix(channel: str) -> str:
         # the group vocabulary deliberately does not tell them apart
         # (`slife2.libs.host.config.LOCAL.group_bubble`).
         return _group_bubble(LOCAL.group_bubble, channel)
-    if channel.startswith(f"{PEER_CHANNEL}:"):
+    if channel.startswith(f"{REMOTE.channel}:"):
         # A peer agent.  The name is in the channel because a hand-over carries
         # the channel and the words and nothing else — the marker beside the
         # message is taken back off (it is what a *reply* needs, which nothing a
@@ -367,6 +380,15 @@ class ChatView(VerticalScroll):
         self._agent = agent
         self._streaming: AssistantMessage | None = None
         self._streaming_text = ""
+        #: The part of the answer already drawn in blocks a note closed
+        #: mid-stream.  A note lands between two pieces of a streaming answer,
+        #: so the authoritative `finish_assistant` text is written as its suffix
+        #: — writing it whole drew the prefix a second time.  **Bounded to the
+        #: model call in flight**: the answer is the *last* call's text
+        #: (`slife2.libs.turn.loop.TurnResult`), so what an earlier iteration
+        #: streamed is not a prefix of it — `add_tool_start` and a note that
+        #: marks a new call close an iteration and start this account over.
+        self._turn_drawn = ""
         #: What this turn's bill turned out to be, held until there is a block to
         #: print it under.  `set_usage` is called by `TurnFinished`, which arrives
         #: *before* the turn's answer does, so a turn that has streamed no text
@@ -388,10 +410,6 @@ class ChatView(VerticalScroll):
         #: restore turns it off, mounts the whole history and scrolls exactly
         #: once at the end — a scroll per widget is what makes a rebuild jitter.
         self._autoscroll = True
-        #: The last rerank status this view said.  `ContextChosen` arrives once
-        #: per turn, and a provider with no cross-encoder would otherwise write
-        #: the same line before every one; what is news is the change.
-        self._rerank_status = ""
 
     # --- following the tail --------------------------------------------------
 
@@ -538,6 +556,7 @@ class ChatView(VerticalScroll):
         so the two cannot answer differently.
         """
         self._turn_open = False
+        self._turn_drawn = ""
         self._close_block()
         # **A new turn, so the previous turn's panels are no longer addressable.**
         # This is the one place a turn begins on this view — live and rebuilt go
@@ -546,32 +565,6 @@ class ChatView(VerticalScroll):
         # earlier panel and the map cannot outlive the turn it belongs to.
         self._tools.clear()
         self._user_line(text, moment, footnote, channel)
-
-    def add_cut_in(
-        self,
-        text: str,
-        moment: datetime | str | None = None,
-        channel: str = WINDOW_CHANNEL,
-    ) -> None:
-        """A message that arrived mid-turn, drawn inside the turn that took it.
-
-        **It is a user line and it does not close the turn.**  `add_user` is the
-        only other writer of this shape, and it ends the turn (`_turn_open =
-        False`) and forgets the open panels (`_tools.clear()`), because it opens
-        a new one.  A cut-in belongs to the turn already running: the answer
-        still arriving has to land in the block below this line, and the tool
-        panels that turn opened are still addressable.  So this closes the
-        current *block* — the text run that ended when the message arrived — and
-        nothing else.
-
-        **Why this exists at all.**  A cut-in is written into the conversation as
-        a harness tool pair, so a display with no vocabulary for it could draw
-        only a tool panel (which it is not) or nothing (SDD §14.2).  The words
-        are already in the record; this is the line that says so while they
-        arrive.
-        """
-        self._close_block()
-        self._user_line(text, moment, "", channel)
 
     def _user_line(
         self,
@@ -582,10 +575,8 @@ class ChatView(VerticalScroll):
     ) -> None:
         """The one rendering of a message somebody sent.
 
-        `add_user` and `add_cut_in` differ only in what they do to the turn
-        around this line; the line itself is one function so the bubble, the
-        marker strip and the timestamp cannot come to two answers about the same
-        channel.
+        `add_user` is the only writer of this shape now; the mid-turn message is
+        a harness note (`add_note`, `new_call=True`) rather than a user line.
         """
         if not is_own_channel(channel):
             text = strip_marker(text, *MARKERS)
@@ -602,24 +593,14 @@ class ChatView(VerticalScroll):
             line.append(f" {footnote}", f"italic {PALETTE['dim']}")
         self._add(Static(line), "user-message")
 
-    def note_rerank(self, status: str) -> None:
-        """A recall that could not use its cross-encoder, said once per change.
-
-        The status arrives with every rebuild and is `""` when the stage ran.
-        A provider with no `rerank_model` would otherwise write the same line
-        before every turn, and a line that repeats is a line a reader stops
-        seeing.  So the note is the *change*: the first failure, a different
-        failure, or a recovery — the last says nothing, because "the ranker
-        worked" is not news about this turn; it only clears the state so a
-        later failure is news again.
-        """
-        if status == self._rerank_status:
-            return
-        self._rerank_status = status
-        if status:
-            self.add_note(notes.rerank(status))
-
-    def add_note(self, text: str, *, ends_turn: bool = False) -> None:
+    def add_note(
+        self,
+        text: str,
+        *,
+        ends_turn: bool = False,
+        new_call: bool = False,
+        channel: str | None = None,
+    ) -> None:
         """A line from the harness rather than from anyone in the conversation.
 
         **The brackets are applied here, and every harness line wears them.**
@@ -629,11 +610,21 @@ class ChatView(VerticalScroll):
         passing text that already carried them would be a caller spelling the
         format a second time, and a caller that forgot them would leave a line
         nothing marks as the harness's.  The words inside are
-        `slife2.tui.notes`' (or a plugin's, for a line that arrived over the
-        wire).
+        `slife2.libs.harness.notes`' (or a plugin's, for a line that arrived over the
+        wire); a pair's own answer — a compaction's sentence, a cut-in's message
+        — is the tool's and is passed through as it came.
+
+        **`channel` is for a note that carries delivered words.**  A channel
+        prefixes its hand-over with the marker its model reader needs
+        (`slife2.libs.harness.markers`), and that envelope is not what the
+        person was sent: the bubble strips it (`ChatView.add_user`) and a note
+        drawn from the same message does the same.  The strip is conditioned on
+        the channel being somebody else's, because text a person typed that
+        merely begins like a marker is their own words.  `None` — the default —
+        is a pure harness note, which never carries one.
 
         **The turn stays open by default, and that is load-bearing.**  A note
-        lands *inside* a turn that is still going: the discriminator's `[kept …]`
+        lands *inside* a turn that is still going: `_context_rebuild`'s report
         arrives before the first delta, and everything the model then streams has
         to flow into the block under it — closing the turn here would make
         `append_text` drop the rest of the answer as though it belonged to
@@ -644,31 +635,24 @@ class ChatView(VerticalScroll):
         open would let a delta already in the pump for it be drawn under this
         line as though the turn had gone on — the trigger the module docstring
         names for the finish boundary, arriving from the other side.
+
+        `new_call` is for a note that *is* a model-call boundary: a message that
+        cut in was taken at a tool boundary, and the answer after it is the next
+        call's text rather than a suffix of what streamed before — so the
+        drawn-prefix account starts over instead of accumulating.
         """
+        if channel is not None and not is_own_channel(channel):
+            text = strip_marker(text, *MARKERS)
         if ends_turn:
             self._turn_open = False
+        elif new_call:
+            self._turn_drawn = ""
+        elif self._turn_open:
+            # The note lands inside the answer; remember what the block it
+            # closes already holds so the final text is not drawn twice.
+            self._turn_drawn += self._streaming_text
         self._close_block()
         self._add(Static(plain(f"[{text}]", PALETTE["dim"])), "system-message")
-
-    def add_picker(self, picker: ModelPicker) -> ModelPicker:
-        """Mount the model picker inline, at the tail.
-
-        **Nothing is closed for it**, unlike every message above: a picker
-        opened while an answer is streaming belongs *between* two pieces of that
-        answer, and `_close_block` would end the block the rest of the answer
-        still has to arrive in — under a second signature, because a block is
-        opened by the first thing that has something to put in it.
-        """
-        return self._add(picker, "model-picker")
-
-    def add_conversation_picker(self, picker: ConversationPicker) -> ConversationPicker:
-        """Mount the subagent picker inline, at the tail.
-
-        **Nothing is closed for it**, for `add_picker`'s reason exactly: an
-        answer that is still streaming stays above the question, and the line
-        the decision leaves appears under it.
-        """
-        return self._add(picker, "conversation-picker")
 
     def add_approval(self, prompt: ApprovalPrompt) -> ApprovalPrompt:
         """Mount an approval row inline, at the tail.
@@ -679,7 +663,7 @@ class ChatView(VerticalScroll):
         """
         return self._add(prompt, "approval-prompt")
 
-    def add_error(self, text: str) -> None:
+    def add_error(self, text: str, *, ends_turn: bool = True) -> None:
         """A harness line whose news is bad — `add_note`'s shape, in red.
 
         **The same bracket as a note, on purpose.**  Both are the harness
@@ -687,8 +671,16 @@ class ChatView(VerticalScroll):
         says that without a second format for a reader to learn.  The glyph sits
         inside the bracket, where the bracket is the format rather than part of
         the message.
+
+        `ends_turn` is `add_note`'s: a management error (a model list that
+        failed, a switch that did not land) arrives in the middle of a streaming
+        answer and must not end it; a turn's own failure does.  Keeping the turn
+        open records the drawn prefix so `finish_assistant` writes only the rest.
         """
-        self._turn_open = False
+        if ends_turn:
+            self._turn_open = False
+        elif self._turn_open:
+            self._turn_drawn += self._streaming_text
         self._close_block()
         line = Text.assemble(
             (f"[{GLYPHS['failed']} ", f"bold {PALETTE['red']}"),
@@ -706,7 +698,7 @@ class ChatView(VerticalScroll):
         leave it to be closed again by anything that writes a line first:
         `add_note` closes the block it is given, so a note arriving before the
         first delta would leave an empty assistant block in the transcript, a
-        blank gap between the prompt and the answer.  The discriminator's note
+        blank gap between the prompt and the answer.  The decision model's note
         is such a line, and so is `[interrupted]` on a turn that streamed
         nothing before it was interrupted.
 
@@ -716,6 +708,7 @@ class ChatView(VerticalScroll):
         """
         self._close_block()
         self._turn_open = True
+        self._turn_drawn = ""
         # A turn opens with no bill of its own.  `set_usage` fills this in, and
         # a count left over from a turn that never closed (a cancel, an error)
         # would otherwise print under this one's answer.
@@ -773,6 +766,11 @@ class ChatView(VerticalScroll):
         previous turn's block (see :meth:`set_usage`).
         """
         self._turn_open = False
+        # The authoritative text covers what the closed blocks already hold;
+        # only its remainder belongs to the block this call finishes.
+        drawn, self._turn_drawn = self._turn_drawn, ""
+        if drawn and text.startswith(drawn):
+            text = text[len(drawn) :]
         if self._streaming is None and not text:
             self._pending_usage = 0
             self._close_block()
@@ -828,6 +826,12 @@ class ChatView(VerticalScroll):
         if self._streaming is not None:
             self._streaming.collapse_thinking()
         self._close_block()
+        # The same distinction for the drawn-prefix account: what a note
+        # recorded before this panel belongs to the call that just ended, and
+        # the authoritative answer is the *last* call's text — carrying the
+        # earlier words forward would trim a final answer that happens to
+        # begin with them (`finish_assistant`).
+        self._turn_drawn = ""
         widget = ToolCallWidget(
             call_id=call_id,
             name=name,
@@ -848,10 +852,12 @@ class ChatView(VerticalScroll):
         elapsed_ms: int,
     ) -> None:
         # A miss is a result with no panel of *this* turn to complete: an id this
-        # turn never started, or the same id twice.  The map is cleared as each
-        # turn opens (`add_user`), so a call id reused by a later turn can never
-        # find the earlier turn's panel here.
-        widget = self._tools.get(call_id)
+        # turn never started, or the same id twice.  The panel is removed as it
+        # is completed — leaving it in the map made the second result complete
+        # the same widget again, a claim the "twice" half of this comment says
+        # cannot happen.  The map is cleared as each turn opens (`add_user`), so
+        # a call id reused by a later turn cannot find the earlier panel either.
+        widget = self._tools.pop(call_id, None)
         if widget is None:  # pragma: no cover - a result without a start
             return
         # `ok` is the positive phrasing and `set_complete` wants the negative
@@ -900,11 +906,9 @@ class ChatView(VerticalScroll):
         lines = []
         for widget in self.query(
             ".user-message, .assistant-message, .system-message, .tool-call, "
-            ".model-picker, .conversation-picker, .approval-prompt"
+            ".approval-prompt"
         ):
             if isinstance(widget, ToolCallWidget):
-                lines.append(widget.plain_text())
-            elif isinstance(widget, (ModelPicker, ConversationPicker)):
                 lines.append(widget.plain_text())
             elif isinstance(widget, Static):
                 lines.append(content_text(widget.content))
@@ -1300,6 +1304,25 @@ class HistoryInput(TextArea):
         self._index = -1
         self._draft = ""
 
+    def check_consume_key(self, key: str, character: str | None = None) -> bool:
+        """Whether this prompt takes *key* before the window's bindings do.
+
+        **The approval row's answers are the window's while it is up.**  `y`,
+        `n` and `Esc` answer the question the model is parked on, and the focus
+        is moved here by any printable keystroke (`redirect_printable`) — before
+        this, the next `y` was inserted into the draft instead of answering, and
+        `Esc` cancelled the whole turn.  So the prompt yields those three keys
+        only while an undecided `ApprovalPrompt` is on the screen; with no
+        question up they are ordinary input, and a draft keeps every letter.
+        """
+        if key in ("y", "n", "escape") and self._answering():
+            return False
+        return super().check_consume_key(key, character)
+
+    def _answering(self) -> bool:
+        """Whether an approval is waiting for these keys right now."""
+        return any(prompt.pending for prompt in self.screen.query(ApprovalPrompt))
+
     async def _on_key(self, event) -> None:
         """Enter submits, wherever the cursor happens to be.
 
@@ -1449,35 +1472,128 @@ class ModelChoice:
     #: The config's `name:` where it wrote one, and empty where it did not: a
     #: row shows a name only for a model somebody took the trouble to name.
     label: str = ""
+    #: The model's declared window, which the picker's own line shows.
     context_window: int = 0
+    #: The space a prompt has (`window - max_tokens`), which is what the status
+    #: bar's percentage is measured against: a provider counts the requested
+    #: completion against the same window, so the full window is not available
+    #: to a request.
+    prompt_window: int = 0
     thinking: bool = False
     vision: bool = False
 
 
-class ModelPicker(Static):
-    """The models this config defines, inline in the transcript.
+def keep_line_visible(widget: Widget, line: int) -> None:
+    """Scroll *widget* so content line *line* is inside its visible window.
 
-    The interaction is fixed: `↑`/`↓` move a cursor, `Enter` picks, `Esc`
-    cancels, the row re-renders itself to a status line once decided, and the
-    caller mounts it, focuses it and awaits the future it was handed.  The
-    cursor opens on the model the conversation is already on, so a bare `Enter`
-    is a no-op rather than a surprise.  **A conversation on a model this list
-    does not offer has no such row**, so the cursor starts under nothing, the row
-    says which model is missing, and `Enter` picks nothing — rather than
-    defaulting to the first model and switching the conversation onto it.
+    **The question strip is capped, so the cursor can leave the window.**  The
+    cap is what keeps a long list from pushing the transcript off the screen;
+    this is what keeps every row reachable through it — a cursor moved below
+    the fold is a choice nobody can read.  *line* is the row's index in the
+    rendered body, which the caller builds and so knows.
 
-    **The bindings are `priority`, and that is what makes the keys the picker's.**
-    The priority pass runs before the focused widget, and the widget that would
-    otherwise take them is the prompt — a `TextArea` whose `↑`/`↓` reach back
-    through the draft's history, which is the wrong list to move while a model
-    is being chosen.
+    Called after the body changes and once after mount.  The first call can
+    arrive before the first layout has given the widget a height; it asks
+    again once that has happened, and only while the widget is still mounted.
+    """
+    visible = widget.content_size.height
+    if visible <= 0:
+        if widget.is_mounted:
+            widget.call_after_refresh(keep_line_visible, widget, line)
+        return
+    top = int(widget.scroll_y)
+    if line < top:
+        widget.scroll_to(y=line, animate=False)
+    elif line >= top + visible:
+        widget.scroll_to(y=line - visible + 1, animate=False)
+
+
+def keep_cursor_visible(picker: Widget, line: int) -> None:
+    """Scroll a picker's strip so the cursor's content line is in view.
+
+    The scroller is the strip (`QuestionStrip`), not the picker: a `Static`
+    capped in height does not count its hidden rows in its virtual size, so the
+    strip is what measures the picker's full body.  The picker's line is offset
+    by the margin and border above it, which is what the strip's content
+    coordinates need.
+    """
+    strip = picker.parent
+    if not isinstance(strip, Widget):
+        return
+    keep_line_visible(strip, line + picker.styles.margin.top + picker.styles.gutter.top)
+
+
+class _Question[AnswerT](Static):
+    """A row that asks one question and resolves one future once.
+
+    **Once, because the blur that follows every decided question would
+    otherwise set the same future a second time** — and a resolved future
+    raises rather than shrugs.
+
+    **And a future that is *gone* is not a decision to report.**  Quitting
+    while the question is open unmounts the widget and cancels the worker
+    parked on this future, which cancels the future itself; the blur that
+    shutdown then delivers arrives with nothing to resolve it into, and
+    `set_result` on a cancelled future raises `InvalidStateError` — out of the
+    message pump, as a traceback at exit instead of a clean quit.
+    """
+
+    def __init__(self, future: asyncio.Future[AnswerT]) -> None:
+        super().__init__("")
+        self._future = future
+        self._decided = False
+
+    def _settle(self, answer: AnswerT) -> bool:
+        """Resolve the future once.  True when this call was the decision."""
+        if self._decided:
+            return False
+        self._decided = True
+        if not self._future.done():
+            self._future.set_result(answer)
+        return True
+
+    def _body(self) -> Text:
+        """The row as it stands.
+
+        **Not `_render`**, which is the name this wants and cannot have: Textual
+        has one, it is the hook `get_content_height` calls to measure a widget,
+        and overriding it makes this class return a `Text` where the framework
+        wants a visual — a layout crash at the first resize, nowhere near the
+        line that caused it.
+        """
+        raise NotImplementedError
+
+    def plain_text(self) -> str:
+        """What this row shows, for the transcript's own `plain_text`."""
+        return content_text(self.content)
+
+
+class _Picker[ChoiceT](_Question[ChoiceT | None]):
+    """A question with rows: a cursor, four keys, and one future.
+
+    `↑`/`↓` move a cursor, `Enter` picks the row under it, `Esc` chooses
+    nothing, and the caller mounts the picker in the question strip, focuses it
+    and awaits the future it was handed.
+
+    **The bindings are `priority`, and that is what makes the keys the
+    picker's.**  The priority pass runs before the focused widget, and the
+    widget that would otherwise take them is the prompt — a `TextArea` whose
+    `↑`/`↓` reach back through the draft's history, which is the wrong list to
+    move while a question is being chosen.
 
     **Losing focus without a decision cancels.**  A picker is dismissed by a
     click on the transcript as easily as by `Esc`, and one left undecided is
-    worse than a wasted keystroke: the future would never resolve, so the app's
-    `Ctrl+S` would stay latched and every later press would do nothing.  A
-    decided picker ignores the blur, which is what makes the refocus after a
+    worse than a wasted keystroke: its future would never resolve, so the key
+    that opened it would stay latched and every later press would do nothing.
+    A decided picker ignores the blur, which is what makes the refocus after a
     pick harmless.
+
+    **A choice writes no line of its own and re-renders nothing.**  The app
+    removes the widget; what the choice changed is the server's fact and the
+    window's note, and a cancelled question reports on nothing.
+
+    Subclasses supply `_body` — a title line, then one line per row — and,
+    when the question has an answer already in force, `_opening_cursor`.
     """
 
     can_focus = True
@@ -1491,94 +1607,114 @@ class ModelPicker(Static):
 
     def __init__(
         self,
-        choices: Sequence[ModelChoice],
-        active: str,
-        future: asyncio.Future[ModelChoice | None],
+        choices: Sequence[ChoiceT],
+        future: asyncio.Future[ChoiceT | None],
     ) -> None:
-        super().__init__("")
+        super().__init__(future)
         self._choices = list(choices)
-        self._active = active
-        self._future = future
-        self._decided = False
-        # `-1` when the conversation is on a model this list does not offer —
-        # ordinary after a config edit.  A cursor defaulting to row 0 would make
-        # a bare `Enter`, documented as a no-op, switch to whichever model
-        # happened to be first, so nothing is under the cursor and the row says
-        # why (`_body`); `action_pick` then chooses nothing.
-        self._cursor = next(
-            (i for i, one in enumerate(self._choices) if one.ref == active), -1
-        )
+        self._cursor = self._opening_cursor()
         self.update(self._body())
 
+    def _opening_cursor(self) -> int:
+        """The row the cursor opens on, or `-1` when no row should have it.
+
+        A question with no answer in force opens on its first row, because a
+        person who pressed the key came to choose one of them.  A subclass
+        whose subject already has an answer overrides this (`ModelPicker`).
+        """
+        return 0 if self._choices else -1
+
     # --- the keys ------------------------------------------------------------
+
+    def on_mount(self) -> None:
+        """Bring the opening cursor into view.
+
+        A long list puts the opening row below the strip's cap; a question that
+        opened scrolled to the top would hide the very row a bare `Enter`
+        takes.  The first call can arrive before the first layout has given the
+        strip a height, and `keep_line_visible` asks again once it has.
+        """
+        self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
+
+    @property
+    def _cursor_line(self) -> int:
+        """The content line the cursor is on, for `keep_cursor_visible`.
+
+        `_body` draws the title first and then one line per row, so row *n* is
+        content line *n + 1*; a cursor under no row sits on the line below the
+        title.
+        """
+        return 1 + max(self._cursor, 0)
 
     def action_cursor_up(self) -> None:
         """Move the cursor up, clamped at the top."""
         if not self._decided and self._cursor > 0:
             self._cursor -= 1
-            self.update(self._body())
+            self._redraw()
 
     def action_cursor_down(self) -> None:
         """Move the cursor down, clamped at the bottom."""
         if not self._decided and self._cursor < len(self._choices) - 1:
             self._cursor += 1
-            self.update(self._body())
+            self._redraw()
 
     def action_pick(self) -> None:
-        """Choose the model under the cursor, or nothing when no row is under it.
-
-        `_cursor` is `-1` for a conversation running a model this list does not
-        offer, and a bare `Enter` there must pick nothing rather than the first
-        row — see `__init__`.
-        """
+        """Choose the row under the cursor, or nothing when no row is under it."""
         if not self._decided and 0 <= self._cursor < len(self._choices):
-            self._decide(self._choices[self._cursor])
+            self._settle(self._choices[self._cursor])
 
     def action_cancel(self) -> None:
         """Choose nothing."""
-        self._decide(None)
+        self._settle(None)
 
     def on_blur(self) -> None:
         """Focus went elsewhere: nothing was chosen.  See the class docstring."""
-        self._decide(None)
+        self._settle(None)
 
-    def _decide(self, choice: ModelChoice | None) -> None:
-        """Resolve the future once, and re-render as the decision.
-
-        Once, because the blur that follows every decided picker would
-        otherwise set the same future a second time, and a resolved future
-        raises rather than shrugs.
-
-        **And a future that is *gone* is not a decision to report.**  Quitting
-        while the picker is open unmounts the widget and cancels the worker
-        parked on this future, which cancels the future itself; the blur that
-        shutdown then delivers arrives with nothing to resolve it into, and
-        `set_result` on a cancelled future raises `InvalidStateError` — out of
-        the message pump, as a traceback at exit instead of a clean quit.
-        `ApprovalPrompt._decide` guards this too; the two are the same widget
-        shape, so they are guarded the same way.
-        """
-        if self._decided:
-            return
-        self._decided = True
-        self._chosen = choice
-        if not self._future.done():
-            self._future.set_result(choice)
+    def _redraw(self) -> None:
+        """Draw a cursor move and bring the row under it into view."""
         self.update(self._body())
+        self.call_after_refresh(keep_cursor_visible, self, self._cursor_line)
+
+
+class ModelPicker(_Picker[ModelChoice]):
+    """The models this config defines, asked in the fixed strip above the prompt.
+
+    **The cursor opens on the model the conversation is already on**, so a bare
+    `Enter` is a no-op rather than a surprise.  **A conversation on a model this
+    list does not offer has no such row**, so the cursor starts under nothing,
+    the row says which model is missing, and `Enter` picks nothing — rather than
+    defaulting to the first model and switching the conversation onto it.
+    """
+
+    def __init__(
+        self,
+        choices: Sequence[ModelChoice],
+        active: str,
+        future: asyncio.Future[ModelChoice | None],
+    ) -> None:
+        # Before the base's `__init__`, which renders: the body marks the model
+        # this conversation is on.
+        self._active = active
+        super().__init__(choices, future)
+
+    def _opening_cursor(self) -> int:
+        """The row of the model in use, or `-1` when this list has no such row.
+
+        `-1` is ordinary after a config edit.  A cursor defaulting to row 0
+        would make a bare `Enter`, documented as a no-op, switch the
+        conversation onto whichever model happened to be first — so nothing is
+        under the cursor, the row says why (`_body`), and `Enter` picks nothing.
+        """
+        return next(
+            (i for i, one in enumerate(self._choices) if one.ref == self._active),
+            -1,
+        )
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        """The row, as it stands: the list, or the line the decision left.
-
-        **Not `_render`**, which is the name this wants and cannot have: Textual
-        has one, it is the hook `get_content_height` calls to measure a widget,
-        and overriding it makes this class return a `Text` where the framework
-        wants a visual — a layout crash at the first resize, nowhere near the
-        line that caused it.
-        """
-        if self._decided:
-            return self._decided_line()
+        """The list, as it stands."""
         line = Text()
         line.append(t("picker_title"), f"bold {PALETTE['text']}")
         if self._cursor < 0:
@@ -1628,112 +1764,51 @@ class ModelPicker(Static):
         line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
         return line
 
-    def _decided_line(self) -> Text:
-        line = Text()
-        if self._chosen is None:
-            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
-            line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
-            return line
-        line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
-        line.append(t("picker_switched"), f"bold {PALETTE['green']}")
-        line.append(self._chosen.ref, f"bold {PALETTE['text']}")
-        return line
 
-    def plain_text(self) -> str:
-        """What this row shows, for the transcript's own `plain_text`."""
-        return content_text(self.content)
+#: The two kinds of thing the conversation picker can watch.  The kind is also
+#: the server the choice belongs to: a subagent is read from the agent server,
+#: a task from the agent-task server.
+WatchKind = Literal["subagent", "task"]
 
 
-class ConversationPicker(Static):
-    """The subagents this agent has made, inline in the transcript.
+@dataclass(frozen=True)
+class WatchChoice:
+    """One row of the conversation picker: a subagent or a running task.
 
-    The model picker's shape, one decision smaller: a cursor, `Enter` picks,
-    `Esc` cancels, a blur cancels (a question abandoned is worse than a wasted
-    keystroke), and the row re-renders as the line the decision left.  The
-    bindings are `priority` for the picker's reason: the focused widget is the
-    prompt, whose `TextArea` would otherwise take `↑`/`↓` for its draft
-    history — the wrong list to move while a conversation is being chosen.
-
-    **No active row and no missing-row case**, unlike the model picker: there is
-    no setting this changes, so there is nothing the list could already be on.
-    The cursor opens on the first name, because a person who pressed the key
-    came to watch one of them.
+    **The pair is the choice, not the name.**  A subagent and a task may share a
+    name, and they are two different readers on two different servers; a picker
+    that carried only the name would have to guess which list it came from.
     """
 
-    can_focus = True
+    kind: WatchKind
+    name: str
 
-    BINDINGS = [
-        Binding("up", "cursor_up", "Up", priority=True, show=False),
-        Binding("down", "cursor_down", "Down", priority=True, show=False),
-        Binding("enter", "pick", "Pick", priority=True, show=False),
-        Binding("escape", "cancel", "Cancel", priority=True, show=False),
-    ]
 
-    def __init__(
-        self, choices: Sequence[str], future: asyncio.Future[str | None]
-    ) -> None:
-        super().__init__("")
-        self._choices = list(choices)
-        self._future = future
-        self._decided = False
-        self._chosen: str | None = None
-        self._cursor = 0 if self._choices else -1
-        self.update(self._body())
+class ConversationPicker(_Picker[WatchChoice]):
+    """The conversations this window can watch, asked in the fixed strip.
 
-    # --- the keys ------------------------------------------------------------
-
-    def action_cursor_up(self) -> None:
-        if not self._decided and self._cursor > 0:
-            self._cursor -= 1
-            self.update(self._body())
-
-    def action_cursor_down(self) -> None:
-        if not self._decided and self._cursor < len(self._choices) - 1:
-            self._cursor += 1
-            self.update(self._body())
-
-    def action_pick(self) -> None:
-        """Choose the name under the cursor, or nothing when none is under it."""
-        if not self._decided and 0 <= self._cursor < len(self._choices):
-            self._decide(self._choices[self._cursor])
-
-    def action_cancel(self) -> None:
-        self._decide(None)
-
-    def on_blur(self) -> None:
-        """Focus went elsewhere: nothing was chosen.  See `ModelPicker`."""
-        self._decide(None)
-
-    def _decide(self, choice: str | None) -> None:
-        """Resolve the future once, and re-render as the decision.
-
-        Once, because the blur that follows every decided picker would otherwise
-        set the same future a second time and raise out of the message pump —
-        the guard `ModelPicker._decide` and `ApprovalPrompt._decide` both carry.
-        """
-        if self._decided:
-            return
-        self._decided = True
-        self._chosen = choice
-        if not self._future.done():
-            self._future.set_result(choice)
-        self.update(self._body())
+    Its rows are the agent's subagents and its running agent tasks — two
+    servers, one question, so one key.  **No active row and no missing-row
+    case**, unlike the model picker: there is no setting this changes, so there
+    is nothing the list could already be on.  The cursor opens on the first
+    name, the base's default, because a person who pressed the key came to
+    watch one of them.
+    """
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        if self._decided:
-            return self._decided_line()
         line = Text()
         line.append(t("conversation_picker_title"), f"bold {PALETTE['text']}")
-        for index, name in enumerate(self._choices):
+        for index, choice in enumerate(self._choices):
             line.append("\n")
             line.append(
                 f"{GLYPHS['cursor']} " if index == self._cursor else "  ",
                 PALETTE["amber"],
             )
             line.append(f"{index + 1}. ", PALETTE["dim"])
-            line.append(name, f"bold {PALETTE['text']}")
+            line.append(t(f"picker_kind_{choice.kind}") + "  ", PALETTE["dim"])
+            line.append(choice.name, f"bold {PALETTE['text']}")
         line.append("\n")
         line.append(f"{GLYPHS['up']}/{GLYPHS['down']} ", PALETTE["dim"])
         line.append(t("picker_select"), f"bold {PALETTE['green']}")
@@ -1743,25 +1818,8 @@ class ConversationPicker(Static):
         line.append(t("picker_cancel"), f"bold {PALETTE['red']}")
         return line
 
-    def _decided_line(self) -> Text:
-        line = Text()
-        if self._chosen is None:
-            line.append(f"{GLYPHS['failed']} ", f"bold {PALETTE['red']}")
-            line.append(t("picker_cancelled"), f"bold {PALETTE['red']}")
-            return line
-        line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
-        line.append(
-            t("conversation_watching", name=self._chosen),
-            f"bold {PALETTE['green']}",
-        )
-        return line
 
-    def plain_text(self) -> str:
-        """What this row shows, for the transcript's own `plain_text`."""
-        return content_text(self.content)
-
-
-class ApprovalPrompt(Static):
+class ApprovalPrompt(_Question[bool]):
     """One tool call, waiting for the person to allow it.
 
     The model asked to be checked before a call ran (`_approve`), the loop is
@@ -1773,7 +1831,10 @@ class ApprovalPrompt(Static):
     picker's reason, one keystroke further: without them `y` and `n` would be
     typed into the prompt and `Esc` would cancel the whole *turn* instead of
     refusing one call, so the key a person presses here would sometimes be the
-    one that throws their turn away.
+    one that throws their turn away.  They are the *app's* too
+    (`slife2.tui.app`), because every printable key moves the focus to the
+    prompt: a row-scoped binding is out of the chain after that, and the answer
+    would be inert exactly when the person had begun to type.
 
     **A decided row stays, as its status line.**  The panel for the tool itself
     is mounted *after* an approval and never for a refusal, so this line is the
@@ -1782,7 +1843,7 @@ class ApprovalPrompt(Static):
 
     **Losing focus does not answer, and that is where this parts from the
     picker.**  A picker that loses focus is a question abandoned and resolves
-    itself (see `ModelPicker`), but this row is blurred by the two things that
+    itself (see `_Picker`), but this row is blurred by the two things that
     take focus on purpose: every printable key, which `redirect_printable` lands
     in the prompt, and `Ctrl+S`, which opens the picker over it.  Reading that
     blur as "no" means a person who merely began their next thought — an `a`,
@@ -1806,11 +1867,12 @@ class ApprovalPrompt(Static):
     def __init__(
         self, name: str, arguments: dict, future: asyncio.Future[bool]
     ) -> None:
-        super().__init__("")
+        super().__init__(future)
         self._name = name
         self._arguments = dict(arguments)
-        self._future = future
-        self._decided: bool | None = None
+        # The answer, for the decided line: a denial's `False` is a real
+        # answer, so "decided" is the base's flag and not this value.
+        self._answer = False
         self.update(self._body())
 
     # --- the keys ------------------------------------------------------------
@@ -1830,26 +1892,18 @@ class ApprovalPrompt(Static):
         A decided row keeps the class, so a caller looking for "the approval
         that is blocking the loop" selects on this rather than on the widget.
         """
-        return self._decided is None
+        return not self._decided
 
     def _decide(self, approved: bool) -> None:
-        """Resolve the future once, and re-render as the decision.
-
-        Once, because the blur that follows every decision would otherwise set
-        the same future a second time — and a resolved future raises rather than
-        shrugs (`ModelPicker._decide`'s reason, verbatim).
-        """
-        if self._decided is not None:
-            return
-        self._decided = approved
-        if not self._future.done():
-            self._future.set_result(approved)
-        self.update(self._body())
+        """Resolve the future once, and re-render as the decision."""
+        if self._settle(approved):
+            self._answer = approved
+            self.update(self._body())
 
     # --- the row -------------------------------------------------------------
 
     def _body(self) -> Text:
-        if self._decided is not None:
+        if self._decided:
             return self._decided_line()
         line = Text()
         line.append(f"{GLYPHS['running']} ", f"bold {PALETTE['amber']}")
@@ -1882,7 +1936,7 @@ class ApprovalPrompt(Static):
 
     def _decided_line(self) -> Text:
         line = Text()
-        if self._decided:
+        if self._answer:
             line.append(f"{GLYPHS['check']} ", f"bold {PALETTE['green']}")
             line.append(t("approval_approved"), f"bold {PALETTE['green']}")
         else:
@@ -1891,10 +1945,6 @@ class ApprovalPrompt(Static):
         line.append("  ", PALETTE["dim"])
         line.append(self._name, f"bold {PALETTE['text']}")
         return line
-
-    def plain_text(self) -> str:
-        """What this row shows, for the transcript's own `plain_text`."""
-        return content_text(self.content)
 
 
 def _model_meta(choice: ModelChoice) -> str:
@@ -1989,9 +2039,12 @@ class StatusBar(Static):
         if vision:
             parts.append(f"[{PALETTE['dim']}]{GLYPHS['vision']} {t('model_vision')}[/]")
 
-        # The *last* turn's tokens, not a running total: what a context
-        # percentage is a percentage of is the conversation as it now stands,
-        # and a sum over every turn is a number that only ever grows.
+        # The *last model call's* tokens, not a running total and not the turn's
+        # bill: what a context percentage is a percentage of is the conversation
+        # as it now stands, and a sum over every call is a number that only ever
+        # grows.  It moves once per call (`UsageReported`), so a turn that calls
+        # tools several times does not hold the previous turn's figure until it
+        # ends.
         #
         # Shown from zero when the model has a window, rather than appearing
         # with the first answer: an indicator that is absent until it has
@@ -2026,3 +2079,165 @@ class StatusBar(Static):
             f"[{PALETTE['dimmest']}]{GLYPHS['separator']} {t('status_keybinds')}[/]"
         )
         self.update("  ".join(parts))
+
+
+#: One mark and colour per plan status.  **The status is the model's claim, not
+#: the harness's measurement**, so `done` is muted rather than the green a tool
+#: panel's verified result wears — a reader must not mistake "the model says
+#: this is finished" for "this call returned".  `blocked` is the one that wants
+#: the eye, and it is the only red.
+PLAN_MARKS: dict[str, tuple[str, str]] = {
+    plan.PENDING: (GLYPHS["todo"], PALETTE["dim"]),
+    plan.ACTIVE: (GLYPHS["cursor"], PALETTE["amber"]),
+    plan.DONE: (GLYPHS["check"], PALETTE["muted"]),
+    plan.BLOCKED: (GLYPHS["failed"], PALETTE["red"]),
+}
+
+
+class PlanView(VerticalScroll):
+    """The model's plan, as the model last wrote it: a strip above the prompt.
+
+    **A claim, not a measurement.**  The four statuses are the model's own
+    words; the harness stores and draws them and never derives one from a tool
+    call — there is no mapping from a call to an item, and a returned call is
+    not a finished step.  That is why `PLAN_MARKS` does not borrow the tool
+    panel's verified `done`.
+
+    **Two readers, one rule.**  `set_plan` is the opening read (a window's
+    transcript, a watcher's snapshot); `observe` is the live turn event.  Both
+    live here so the window and the watch screen cannot render one plan two
+    ways.  A write is committed only when the call that made it succeeded: a
+    refused write is a plan the server never stored, and drawing it would show
+    a list the next turn will not be given.
+
+    The strip is hidden when the plan is empty, and its text is model output —
+    `Text`, never markup.
+
+    **The strip scrolls, because its cap is a window rather than a clip.**  A
+    plan may hold 24 items and the stylesheet shows eight rows; a `Static`
+    capped in height measures only the cap, so the rows below it are outside
+    its virtual size and nothing can bring them into view — the state
+    `QuestionStrip` states for its own container.  The body is therefore a
+    child inside this `VerticalScroll`, the `ToolCallWidget` arrangement, and
+    the model's active step is reachable however far down the list it is.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._items: list[plan.PlanItem] = []
+        #: A plan write's arguments, by call id, until its outcome arrives.  A
+        #: start whose finish never comes leaves the old plan standing, which is
+        #: the same answer a cancelled turn gets.  **Bounded to the turn in
+        #: flight**: :meth:`settle` clears it wherever a turn ends, so a write
+        #: the turn never finished cannot leak into the next one.
+        self._started: dict[str, Any] = {}
+        #: The drawn plan.  A child rather than this widget's own content,
+        #: because a scroll container measures its children and has no content
+        #: of its own (`QuestionStrip` says the same in as many words).
+        self._body = Static(classes="plan-body")
+        self.display = False
+
+    def compose(self):
+        yield self._body
+
+    def set_plan(self, items: Any) -> None:
+        """Draw this plan, or hide the strip when it is empty.
+
+        The validation is `slife2.libs.turn.plan`'s: a list this build would not
+        have written is a `PlanError`, and a caller that cannot place it keeps
+        the plan it has.
+        """
+        self._items = plan.from_wire(items, where="the plan")
+        self._refresh()
+
+    def observe(self, event: object) -> None:
+        """Take one turn event: a successful plan write becomes the strip."""
+        if isinstance(event, ToolCallStarted) and event.name == plan.PLAN_WRITE:
+            self._started[event.call_id] = event.arguments.get("items")
+            return
+        if isinstance(event, ToolCallFinished) and event.name == plan.PLAN_WRITE:
+            raw = self._started.pop(event.call_id, None)
+            if raw is None or not event.ok:
+                return
+            try:
+                self.set_plan(raw)
+            except plan.PlanError:
+                # A display drops a line it cannot read; the opening read is the
+                # recovery, and the last plan stands meanwhile.
+                return
+
+    def settle(self) -> None:
+        """Drop the parked writes of a turn that ended without their outcomes.
+
+        A parked write is a claim that an outcome is still coming, and a
+        cancelled or failed turn stops sending them — the same stale claim a
+        tool panel's "running" is, settled at the same seams
+        (`ChatView.settle_tools`).  Left parked, the entry leaks for the
+        session's life, and a later turn's reused call id pops it and draws a
+        stale plan as a committed one.  The plan on screen is untouched: a
+        write whose outcome never came leaves the old plan standing, which is
+        the rule `observe` already keeps.
+        """
+        self._started.clear()
+
+    def _refresh(self) -> None:
+        if not self._items:
+            self._items = []
+            self._body.update("")
+            self.display = False
+            return
+        self.display = True
+        done = sum(1 for item in self._items if item["status"] == plan.DONE)
+        line = Text()
+        line.append(
+            t("plan_header", done=done, total=len(self._items)),
+            style=f"bold {PALETTE['muted']}",
+        )
+        for item in self._items:
+            glyph, colour = PLAN_MARKS[item["status"]]
+            line.append("\n")
+            line.append(f"{glyph} ", colour)
+            line.append(
+                item["text"],
+                PALETTE["text"]
+                if item["status"] in (plan.ACTIVE, plan.BLOCKED)
+                else PALETTE["muted"],
+            )
+        self._body.update(line)
+
+    def plain_text(self) -> str:
+        """What the strip shows, for a test that reads the screen."""
+        return content_text(self._body.content)
+
+
+class QuestionStrip(VerticalScroll):
+    """The fixed slot an undecided question waits in.
+
+    **A question is current state, not history.**  A picker mounted in the
+    transcript scrolls away under the turn loop that keeps writing — the keys
+    still reach it, but the list stops being readable, which is the one thing a
+    question must not do.  So the picker waits here, out of the transcript's
+    scroll; the loop's output lands above it and moves nothing.
+
+    **Stacked above the plan strip, not in its place.**  The plan is the strip
+    directly above the prompt; a question that pops up later stacks above it,
+    and both stay visible.  The strip is hidden while no question is open, and
+    only one question can be open at a time (the app's latches; a second
+    `Ctrl+S`/`Ctrl+O` is ignored until the first is decided or cancelled).
+
+    **The choice leaves no line of its own.**  `Ctrl+O` opens the watch screen,
+    whose header names what is being watched; `Ctrl+S` ends in the server's
+    own note; `Esc` closes the question silently.  This strip only ever holds
+    the asking.
+
+    **This is the scroller, not the picker.**  A `Static` capped in height
+    cannot scroll its own text: the cap is what Textual measures, so the rows
+    below it are not in its virtual size.  A `VerticalScroll` measures its
+    children — the picker's full body — so the cap is a window and every row is
+    reachable.  The picker keeps the cursor row in view through
+    `keep_cursor_visible`.
+    """
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.display = False

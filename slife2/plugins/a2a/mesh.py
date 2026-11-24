@@ -70,7 +70,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
 import re
 import time
 import uuid
@@ -98,26 +97,28 @@ from a2a_over_mqtt.protocol import (
 from paho.mqtt.subscribeoptions import SubscribeOptions
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness import notes
 from slife2.libs.host.config import A2ASettings
 from slife2.plugins.a2a import groups
-from slife2.plugins.a2a.inbound_store import (
-    INTERRUPTED,
-    TERMINAL_STATUSES,
-    InboundStore,
-    iso_now,
-)
+from slife2.plugins.a2a.inbound_store import InboundStore, iso_now
 from slife2.plugins.a2a.responder import (
     AUTH_REQUIRED,
-    CANCELLED,
-    COMPLETED,
-    FAILED,
     INPUT_REQUIRED,
-    REJECTED,
     Responder,
     RoundOutcome,
 )
-from slife2.plugins.a2a.task_store import PENDING, get_store
-from slife2.tui import notes
+from slife2.plugins.a2a.states import (
+    CANCELLED,
+    COMPLETED,
+    CONTROL_RE,
+    FAILED,
+    INTERRUPTED,
+    PENDING,
+    REJECTED,
+    TERMINAL_STATUSES,
+    user_property,
+)
+from slife2.plugins.a2a.task_store import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -131,23 +132,15 @@ _INSTANCE_EXT = "instance"
 #: before dialling rather than letting the broker answer with a lesser error.
 _IDENTITY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
-# How long `connect()` waits for both connections to be live.  The caller has
-# already decided the machine is on the mesh, so a failure to connect is
-# reported by this deadline.
-
-# How long the pre-join name probe listens for a retained card.  MQTT has no
-# end-of-retained marker, so silence within this budget *is* the answer "no
-# card".
-
 # A2A-over-MQTT requester retry profile (the profile's standard defaults,
 # implemented by the SDK's Requester — mirrored here for the push model):
-# first reply within 15 s, retry with exponential backoff 1000/2000/4000 ms
-# ± 20 % jitter (a list — the SDK's shape, kept verbatim), at most 3 attempts.
-# Retries reuse the same Task.id + context_id (same payload) and generate a
-# fresh Correlation Data.
+# first reply within 15 s, at most 3 attempts, with the pause between them
+# 1000/2000/4000 ms ± 20 % jitter.  The schedule itself is one retry policy in
+# the registry (`timeouts.pacing.requester_retry`); what stays here is the
+# profile's attempt count, a wire shape rather than a cadence.  Retries reuse
+# the same Task.id + context_id (same payload) and generate a fresh
+# Correlation Data.
 _MAX_ATTEMPTS = 3
-_BACKOFF_BASE_S = [1.0, 2.0, 4.0]
-_JITTER_FACTOR = 0.2
 _MAX_TRACKED_SENDS = 500  # delivery-tracking cap (mirrors the task store)
 #: Cap on correlation→task routing entries.  Every correlation a task was
 #: published under stays routed until its TERMINAL reply lands (the peer may
@@ -215,10 +208,6 @@ class FIFOCache(dict):
 AgentName = NewType("AgentName", str)
 """Identifies an agent by its name — the mesh identity, and the MQTT client id."""
 
-# Control characters a remote peer could use to break out of a single display
-# line in a handed-over message, the TUI, or logs (newlines, tabs, ESC, …).
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
-
 
 def safe_name(value: object) -> str:
     """Display-safe form of a remote, untrusted peer value.
@@ -228,7 +217,7 @@ def safe_name(value: object) -> str:
     inject instructions into the message handed to the model — and cap the length
     so a name cannot bloat a context.
     """
-    s = _CONTROL_RE.sub(" ", str(value))
+    s = CONTROL_RE.sub(" ", str(value))
     return " ".join(s.split())[:128]
 
 
@@ -258,7 +247,7 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     a peer *is* on the wire is still in the card and still decides whether this
     is a transition at all (`_handle_discovery`); it is not shown.
 
-    The sentence itself is `slife2.tui.notes`' — the same two functions a
+    The sentence itself is `slife2.libs.harness.notes`' — the same two functions a
     channel's own link line goes through (`slife2.plugins.wechat.server`) — and what this adds
     is the one thing the mesh knows: the peer's name, scrubbed by `safe_name`
     because it came off the wire from somebody else's process.
@@ -275,13 +264,6 @@ def format_presence_line(card: AgentCard, event: str) -> str | None:
     if event == "offline":
         return notes.offline(name)
     return None
-
-
-def _backoff_delay(attempt: int) -> float:
-    """Exponential backoff with ±20 % jitter for retry attempt (0-indexed)."""
-    base = _BACKOFF_BASE_S[min(attempt, len(_BACKOFF_BASE_S) - 1)]
-    jitter = base * _JITTER_FACTOR * (2 * random.random() - 1)
-    return base + jitter
 
 
 def _decode_payload(msg) -> dict | None:
@@ -345,8 +327,8 @@ class _OutboundSend:
         "updated",
         "watchdog",
         "attempts",
-        "unsent",
         "delivered",
+        "cancelled",
         "first_landed",
         "loops",
         "record",
@@ -384,12 +366,12 @@ class _OutboundSend:
         #: One GetTask after a stream stalls past `deliver.stream_idle`.
         self.watchdog: asyncio.Task | None = None
         self.attempts = 1
-        #: How many times in a row the publish has *failed to leave* — the
-        #: attempts the ladder must not count (`_deliver`).  Kept only so the
-        #: retry backs off instead of hammering a dropped link; cleared by the
-        #: first publish that lands.
-        self.unsent = 0
         self.delivered = False
+        #: Set by `cancel_task` when the caller withdraws the task.  The ladder
+        #: stops: a rung waking after the withdrawal would publish the request
+        #: again and start work on a peer this conversation has already told
+        #: the task was cancelled.
+        self.cancelled = False
         #: Set by `send_message` once its first publish has returned; `_deliver`
         #: waits on it before its first rung.  The ladder exists (and is in
         #: ``loops``) while that publish is in flight so a teardown can see the
@@ -409,12 +391,15 @@ class _OutboundSend:
 class _InboundWait:
     """One round's completion bridge: resolved out of band, once."""
 
-    __slots__ = ("outcome", "_event", "peer")
+    __slots__ = ("outcome", "_event", "serial")
 
-    def __init__(self, peer: str = "") -> None:
+    def __init__(self) -> None:
         self.outcome: RoundOutcome | None = None
         self._event = asyncio.Event()
-        self.peer = peer
+        #: Which round of its task this bridge serves.  Assigned by
+        #: `MeshResponder.on_request`; it is what tells this round's answer
+        #: from a retry of the answer to the round before it.
+        self.serial = 0
 
     def resolve(self, outcome: RoundOutcome) -> bool:
         if self.outcome is not None:
@@ -445,6 +430,26 @@ class MeshResponder(Responder):
         super().__init__(*args, inbound=inbound, max_concurrent=_MAX_INFLIGHT, **kwargs)
         self._mesh = mesh
         self._completion: dict[str, _InboundWait] = {}
+        #: The last answer applied to each task, as
+        #: `(round serial, outcome state, text)`.  **A client-level retry of an
+        #: old `task_response` is the same call re-sent** — same task id, same
+        #: outcome, same words — and the bridge it originally settled may have
+        #: been replaced by a continuation's round since.  A second settlement
+        #: that matches this record exactly is that retry, not a new answer:
+        #: settling the live round with it would end a task the peer is still
+        #: working through with the previous round's answer.  A fresh answer of
+        #: the same words for a genuinely new round is indistinguishable from a
+        #: retry, so it is refused as well and the model is told to say what it
+        #: means in words rather than silently lose the round.
+        self._settled: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
+        #: How many rounds this process has served per task id.  The serial is
+        #: what tells an old settlement's bridge from the live one.
+        self._serial: FIFOCache = FIFOCache(maxsize=_MAX_TRACKED_SENDS)
+
+    def _next_serial(self, task_id: str) -> int:
+        serial = int(self._serial.get(task_id, 0)) + 1
+        self._serial[task_id] = serial
+        return serial
 
     async def on_request(
         self,
@@ -455,7 +460,8 @@ class MeshResponder(Responder):
     ) -> RoundOutcome:
         task_id = str(request.task_id)
         peer = request.sender or "unknown"
-        waiter = _InboundWait(peer)
+        waiter = _InboundWait()
+        waiter.serial = self._next_serial(task_id)
         self._completion[task_id] = waiter
 
         # TASK_RESPONSE continuity: keep the standard stream alive while the
@@ -478,9 +484,12 @@ class MeshResponder(Responder):
         try:
             message_type = request.variables.get("message_type", "task_request")
             if message_type == "task_response":
-                # A response-typed frame on the request topic is not a new
-                # task: the responder already answers it with an empty
-                # completed.  Kept as a belt-and-braces branch.
+                # **Unreachable, and kept as a guard rather than a path.**
+                # `Responder._on_send_message` answers a response-typed frame
+                # before a record or a round exists, so nothing here can be
+                # started for one.  If a future caller reaches this, an empty
+                # `completed` would be the terminal that path no longer invents
+                # for a known task — its comment has the whole argument.
                 logger.info(
                     "a2a_inbound_response_ignored task=%s from=%s",
                     task_id,
@@ -506,6 +515,17 @@ class MeshResponder(Responder):
             try:
                 outcome = await waiter.wait()
             except BaseException:
+                if self._rounds.get(task_id) is not asyncio.current_task():
+                    raise
+                # **A cancellation this responder caused is not a withdrawal.**
+                # A retry that replaced this round cancels it (`Responder.
+                # _start_round`), and the new round has already taken the id in
+                # `_rounds` by the time this handler runs.  Reading that as the
+                # peer withdrawing told the agent to abandon work the peer had
+                # actually retried, and `_note_withdrawn` then made a later
+                # `task_response` read as "withdrawn by …".  Only a round that
+                # is still the registered one can have been cancelled by the
+                # peer path; anything else is the machinery's own ending.
                 # The responder cancelled this round.  Surface the peer's
                 # withdrawal to the agent — as an inbound MESSAGE, never a
                 # control signal — only when it can actually have been one:
@@ -539,12 +559,35 @@ class MeshResponder(Responder):
 
         Returns ``"ok"``, or an error string.  Refuses unknown or
         already-settled task ids — each round settles exactly once.
+
+        **An answer that already settled an earlier round is not an answer for
+        this one.**  A client-level retry re-sends the same call; if the peer
+        has continued the task in the meantime, the bridge now waiting is the
+        continuation's, and applying the old words to it ends a task that is
+        still being worked through.  The record is per task id and written on
+        every settlement, so the comparison is exact for a retry — and a new
+        answer that happens to repeat the old words is refused too, which is the
+        safe side: the error says what to do instead of silently losing a round.
         """
         waiter = self._completion.get(task_id)
         if waiter is None:
             return self._mesh._unresolvable(task_id)
+        settled = self._settled.get(task_id)
+        if (
+            settled is not None
+            and settled[0] != waiter.serial
+            and settled[1] == outcome.state
+            and settled[2] == outcome.text
+        ):
+            return (
+                f"Error: task_id {task_id!r} already settled an earlier round "
+                f"of this task with this exact answer — a retried task_response "
+                f"is not an answer to the peer's continuation. If you mean to "
+                f"settle the new round, answer the continuation in its own words."
+            )
         if not waiter.resolve(outcome):
             return f"Error: task_id {task_id!r} already completed."
+        self._settled[task_id] = (waiter.serial, outcome.state, outcome.text)
         return "ok"
 
 
@@ -554,19 +597,6 @@ class _PresencePeer:
     def __init__(self, name: str, status: str) -> None:
         self.name = name
         self.status = status  # "online" | "offline"
-
-
-def _user_property(props, key: str) -> str:
-    """Read an MQTT v5 user property (list of (k, v) tuples)."""
-    if props is None:
-        return ""
-    user_props = getattr(props, "UserProperty", None)
-    if not user_props:
-        return ""
-    for k, v in user_props:
-        if k == key:
-            return str(v)
-    return ""
 
 
 def _presence_status(props) -> str:
@@ -580,7 +610,7 @@ def _presence_status(props) -> str:
     that can be handed one therefore refuses the empty payload *before* asking
     this, and that ordering is load-bearing rather than tidy.
     """
-    status = _user_property(props, "a2a-status")
+    status = user_property(props, "a2a-status")
     if not status:
         return "online"
     return "offline" if status == "offline" else "online"
@@ -794,18 +824,15 @@ class A2AMesh:
         return f"{self._config.broker_host}:{self._config.broker_port}"
 
     @property
-    def namespace(self) -> tuple[str, str]:
-        """The `(org, unit)` this mesh actually publishes and subscribes in.
+    def settings(self) -> A2ASettings:
+        """The address and namespace this mesh was built with.
 
-        **The pair is the mesh** — a caller that reported the *section's* pair
-        would name a namespace nobody is in, and on a subagent network the two
-        are not the section's at all: `Net.namespace` makes the unit the agent's
-        name and the org this network's word, so the answer here is also which
-        network this is and whose mesh it is.  The `default` folds are this
-        object's own too: a section that named neither would otherwise report an
-        empty segment.
+        Kept so a member can tell whether the config it was built from still
+        describes the network it is on: the section is read per call, and an
+        edited broker or namespace is a different mesh rather than a value this
+        one can be pointed at (`slife2.plugins.a2a.server.mesh_for`).
         """
-        return self._topics.org, self._topics.unit
+        return self._config
 
     @property
     def collision(self) -> str:
@@ -973,8 +1000,9 @@ class A2AMesh:
         logger.error("a2a_name_collision %s", claim)
 
     async def disconnect(self, *, reviving: bool = False) -> None:
-        """Stop both connections; inflight inbound tasks get cancelled by the
-        SDK (their cancel noise is suppressed by the ``_closing`` gate).
+        """Stop both connections; the local responder's ``run`` cancels the
+        rounds it holds, and its ``_stopping``/``_closing`` guards keep that
+        teardown from being reported as a peer withdrawal.
 
         Never cancels its own caller: a mesh task tearing the mesh down (the
         outbound loop, on a name collision) must be skipped, or it would
@@ -1123,6 +1151,11 @@ class A2AMesh:
             identifier=(
                 f"{self._topics.org}/{self._topics.unit}/{self.agent_name}-out"
             ),
+            # **The CONNACK wait has a bound, as it does on the probe.**  A
+            # broker that accepts TCP and never answers would otherwise block
+            # this reconnect loop for ever, so the member never resubscribes
+            # its request/reply/event topics and cannot heal on its own.
+            timeout=_T.timeouts.deliver.mqtt_connect,
         )
         while not self._closing:
             try:
@@ -1364,14 +1397,51 @@ class A2AMesh:
         data = _decode_payload(msg)
         if data is None:
             return
+        try:
+            kind, content = classify_reply(data)
+        except (AttributeError, TypeError, ValueError):
+            # **The SDK's classifier reads shapes, not JSON types.**  A
+            # `result` that is a list, a `statusUpdate` that is a number, an
+            # `error` that is a string — each is `.get` on a non-dict, and the
+            # raise would escape to `_run_outbound`, whose loop leaves the
+            # client on any handler exception: one malformed reply would cost
+            # a live connection, the roster and a resubscribe.  A reply this
+            # build cannot read is the unclassified path below — the task's
+            # ending, not the transport's (SDD Appendix C: a value that cannot
+            # be read is not read as success).
+            kind, content = "", ""
         if send is not None:
-            send.delivered = True  # any classified reply confirms delivery
+            # **A reply arrived, but "arrived" is not "classified".**  Setting
+            # `delivered` before `classify_reply` made an unreadable answer
+            # indistinguishable from an acknowledged one: the ladder stopped,
+            # nothing was settled, and `task_list` reported the task `pending`
+            # for ever.  `delivered` still stops the ladder — republishing would
+            # ask again for work that was answered — and the unreadable answer
+            # becomes the task's ending, which is the one fact this process can
+            # state about it (SDD Appendix C: a value that cannot be read is not
+            # read as success).
+            send.delivered = True
             send.updated = time.monotonic()
-        kind, content = classify_reply(data)
+        if not kind:
+            logger.warning(
+                "a2a_reply_unclassified task=%s peer=%s payload=%r",
+                task_id,
+                send.agent if send is not None else "?",
+                data,
+            )
+            self._settle_terminal(
+                send,
+                task_id,
+                FAILED,
+                "the peer answered with a reply this build cannot read",
+                route,
+            )
+            self._forget_send(task_id)
+            return
 
         # A direct Message reply is a valid answer to a SendMessage in core
         # A2A.  `classify_reply` reports it as REPLY_TEXT, the same word a
-        # working status update gets, so the raw shape is the discriminator.
+        # working status update gets, so the raw shape is what tells them apart.
         result_obj = data.get("result") if isinstance(data, dict) else None
         if isinstance(result_obj, dict) and isinstance(result_obj.get("message"), dict):
             self._settle_direct_message(send, task_id, str(content), route)
@@ -1409,6 +1479,29 @@ class A2AMesh:
         # every routing entry for every round of this task.
         self._forget_send(task_id)
 
+    def _answer_target(
+        self,
+        send: _OutboundSend | None,
+        record: Any,
+        route: _Route | None,
+    ) -> tuple[str, str] | None:
+        """Whose answer one reply is, and which kind of line it wears.
+
+        **Three caches, one order.**  The send knows the peer; a pruned send
+        leaves the store's record; both pruned leaves the correlation route,
+        which carries the peer and kind for exactly this case.  The three
+        settle paths each wrote the order out — and `_interrupted` had drifted,
+        hardcoding `"task"` where the route says `"message"`, so a bare message
+        that paused was reported as a task line.
+        """
+        if send is not None:
+            return send.agent, "message" if not send.record else "task"
+        if record is not None:
+            return record.agent_name, "task"
+        if route is not None and route.agent:
+            return route.agent, route.kind
+        return None
+
     def _settle_direct_message(
         self,
         send: _OutboundSend | None,
@@ -1430,15 +1523,16 @@ class A2AMesh:
                 )
                 return
             get_store().record_result(task_id)
-        if send is not None:
-            kind = "message" if not send.record else "task"
-            self.on_task_completion(task_id, text, COMPLETED, send.agent, kind)
-        elif record is not None:
-            self.on_task_completion(task_id, text, COMPLETED, record.agent_name, "task")
-        elif route is not None and route.agent:
-            # Both caches pruned; the route is what still knows whose answer it
-            # is, and a peer's answer is still an answer.
-            self.on_task_completion(task_id, text, COMPLETED, route.agent, route.kind)
+        target = self._answer_target(send, record, route)
+        if target is not None:
+            agent, kind = target
+            if send is None and record is None:
+                logger.warning(
+                    "a2a_message_without_send_or_record task=%s peer=%s",
+                    task_id,
+                    agent,
+                )
+            self.on_task_completion(task_id, text, COMPLETED, agent, kind)
 
     def _settle_terminal(
         self,
@@ -1472,23 +1566,18 @@ class A2AMesh:
                 get_store().record_reject(task_id)
             else:
                 get_store().record_error(task_id)
-        if send is not None:
-            agent = send.agent
-            kind = "message" if not send.record else "task"
-        elif record is not None:
-            agent = record.agent_name
-            kind = "task"
-        elif route is not None and route.agent:
+        target = self._answer_target(send, record, route)
+        if target is None:
+            logger.warning("a2a_reply_without_record task=%s", task_id)
+            return
+        agent, kind = target
+        if send is None and record is None:
             # **Both caches pruned, and the route outlived them.**  The agent and
             # kind ride the correlation for exactly this: the conversation still
             # gets the line, addressed by what the route kept.
-            agent, kind = route.agent, route.kind
             logger.warning(
                 "a2a_reply_without_send_or_record task=%s peer=%s", task_id, agent
             )
-        else:
-            logger.warning("a2a_reply_without_record task=%s", task_id)
-            return
         self.on_task_completion(task_id, result, state, agent, kind)
 
     def _interrupted(
@@ -1521,12 +1610,11 @@ class A2AMesh:
             self._forget_round(task_id, round_no)
         else:
             record = get_store().get(task_id)
-            if record is not None:
-                agent = record.agent_name
-            elif route is not None and route.agent:
-                agent = route.agent
-            else:
-                agent = "the peer"
+            target = self._answer_target(None, record, route)
+            # **A pause is a task state**, whatever the answered message was:
+            # the line says the task was paused, and the route's kind is the
+            # only name left when both caches are gone.
+            agent = target[0] if target is not None else "the peer"
         self.on_task_completion(task_id, question, state, agent, "task")
 
     def _forget_round(self, task_id: str, round_no: int) -> None:
@@ -1699,12 +1787,19 @@ class A2AMesh:
         retry-eligible conditions include "publish not accepted by the client
         or broker path", counted until ``max_attempts``.  ``_publish_props``
         raises exactly that way whenever the outbound client is mid-reconnect
-        (``_run_outbound`` clears ``_connected`` in its ``finally``).
-        ``unsent`` is only the delay's: it makes repeated failures back off
-        instead of spinning, while ``attempts`` still spends the profile's
-        three-try budget.  A mesh that is only being rebuilt is not a new
-        ladder: the teardown `connect` makes is reviving, and the send rides
-        over it.
+        (``_run_outbound`` clears ``_connected`` in its ``finally``).  A
+        publish that landed but brought no first reply is a failed attempt of
+        the same kind: both earn the next step of `pacing.requester_retry`, and
+        neither resets the run — the success the ladder waits for is the reply,
+        which ends it.  A mesh that is only being rebuilt is not a new ladder:
+        the teardown `connect` makes is reviving, and the send rides over it.
+
+        **A cancellation ends the ladder**, and that is the caller's act rather
+        than a reply: `cancel_task` sets `send.cancelled` and stops the loops
+        (see its docstring for why), so a rung already asleep here wakes to a
+        send that is no longer being delivered.  It does not touch `delivered`:
+        "a reply arrived" and "the caller withdrew it" are different facts, and
+        the row says the second one.
 
         **The ladder waits for the first publish.**  ``after_first`` is how
         `send_message` starts it: its task is created before the send's own
@@ -1723,7 +1818,8 @@ class A2AMesh:
                 await asyncio.sleep(_T.timeouts.deliver.reply_first)
             except asyncio.CancelledError:
                 raise
-            while not (self._ladder_over or send.delivered):
+            retry = _T.Backoff(_T.timeouts.pacing.requester_retry)
+            while not (self._ladder_over or send.delivered or send.cancelled):
                 if send.attempts >= _MAX_ATTEMPTS:
                     if send.prev_interrupt[0]:
                         # A continuation that never landed leaves the task
@@ -1751,16 +1847,14 @@ class A2AMesh:
                         "task" if send.record else "message",
                     )
                     return
-                await asyncio.sleep(_backoff_delay(send.attempts - 1 + send.unsent))
-                if self._ladder_over or send.delivered:
+                await asyncio.sleep(retry.failed())
+                if self._ladder_over or send.delivered or send.cancelled:
                     return
                 try:
                     await self._publish_attempt(send, uuid.uuid4().hex)
                 except Exception as e:  # noqa: BLE001 - a failed publish is retried, not raised: every client error means the same thing here, and the attempt is still spent
                     # The profile counts a publish the client or broker did
-                    # not accept as a retry-eligible attempt.  `unsent` only
-                    # paces the delay; the budget moves.
-                    send.unsent += 1
+                    # not accept as a retry-eligible attempt.
                     send.attempts += 1
                     logger.warning(
                         "a2a_delivery_retry_failed task=%s attempt=%d err=%s",
@@ -1770,7 +1864,6 @@ class A2AMesh:
                     )
                     continue  # the link may be back before the next attempt
                 send.attempts += 1
-                send.unsent = 0
                 logger.info(
                     "a2a_delivery_retry task=%s attempt=%d",
                     send.task_id,
@@ -1869,12 +1962,20 @@ class A2AMesh:
             )
         restore = (send.interrupt, send.question)
         self._disarm_watchdog(send)
+        # End the previous round's ladder before resetting the shared send.  A
+        # ladder still asleep in its reply window would wake to the reset
+        # `delivered=False` and retry alongside the new one, spending one shared
+        # attempt budget and reporting exhaustion twice for a single send.
+        prior = [loop for loop in send.loops if not loop.done()]
+        for loop in prior:
+            loop.cancel()
+        if prior:
+            await asyncio.gather(*prior, return_exceptions=True)
         send.round += 1
         send.prev_interrupt = restore
         send.interrupt = ""
         send.question = ""
         send.attempts = 1
-        send.unsent = 0
         send.delivered = False
         send.first_landed = asyncio.Event()
         send.updated = time.monotonic()
@@ -1958,6 +2059,83 @@ class A2AMesh:
             return
         send.first_landed.set()
 
+    async def _stop_ladder(self, send: _OutboundSend) -> None:
+        """End a send's requester ladder, and wait for it to stop publishing.
+
+        **`cancelled` first, then the cancel** — a rung that has already passed
+        its sleep's wake check must find the flag before its publish, and a
+        rung inside a publish is cancelled at the await.  The wait is what makes
+        "no rung publishes after this returns" true for every rung that had not
+        reached the client yet; one already handed to the client is the
+        unavoidable remainder, which the withdrawal published next answers.
+
+        The flag is not `delivered`: that word means a reply confirmed the send,
+        and this one means the caller took it back.  `_deliver` reads both for
+        the same reason — either ends the ladder — and `delivered` is left alone
+        so the arrival bookkeeping still records what actually came back.
+        """
+        send.cancelled = True
+        running = [loop for loop in send.loops if not loop.done()]
+        for loop in running:
+            loop.cancel()
+        if running:
+            await asyncio.gather(*running, return_exceptions=True)
+
+    async def withdraw_sends_to(self, member: str) -> int:
+        """End every send this mesh still has open with `member`.
+
+        **A removed member cannot still be running a task.**  Removal is a
+        forced cleanup (SDD §4.5.4): the work ends with the member, so its row
+        must end too — `task_list` reports `pending` as "still running", and a
+        row naming a member that no longer exists is a fact nobody can act on.
+        A bare message has no row to record, but its ladder stops all the same.
+        Nothing is published: the member's topic has no listener left, and the
+        ledger this writes is this process's own.
+
+        The ladder stops first, for `cancel_task`'s reason — a rung already
+        asleep would otherwise publish the request after the member was gone.
+
+        Returns:
+            How many task rows were recorded as withdrawn.
+        """
+        withdrawn = 0
+        for send in list(self._sends.values()):
+            if send.agent != member:
+                continue
+            record = get_store().get(send.task_id)
+            if record is not None and record.status in TERMINAL_STATUSES:
+                continue
+            await self._stop_ladder(send)
+            if send.record:
+                get_store().record_cancel(send.task_id)
+                withdrawn += 1
+        return withdrawn
+
+    async def withdraw_inbound_from(self, member: str) -> int:
+        """Settle every task this mesh still holds that `member` sent it.
+
+        **The other direction of a removal.**  `withdraw_sends_to` ends the
+        tasks the removed member was *sent* — rows in the senders' sessions.
+        The ones it *sent* are rows here, in a surviving member's inbound
+        table, and dropping the member's own session cannot reach them: its
+        reply topic is gone, so no answer can ever be published, and a live
+        round would hold a responder slot for the rest of the process.
+
+        Each ends as `cancelled`, and its work is told through the responder's
+        `on_cancel` hook — the same withdrawal message a cancel delivers,
+        because from the receiver's side the task's sender no longer exists.
+
+        Returns:
+            How many inbound tasks were settled.
+        """
+        withdrawn = 0
+        for task in list(self._inbound.pending()):
+            if task.peer != member:
+                continue
+            if await self._responder.withdraw_inbound(task.task_id):
+                withdrawn += 1
+        return withdrawn
+
     async def cancel_task(self, agent: str, task_id: str) -> str:
         """Standard ``CancelTask``; returns the resulting status string.
 
@@ -1969,6 +2147,10 @@ class A2AMesh:
         withdrew.  `TaskStore.record_result`/`record_error` are what refuse to
         contradict a withdrawal, and they can only do it if the row says so —
         recording it is what makes that guard reachable from this path at all.
+
+        **And the requester ladder is stopped first** (`_stop_ladder`): a rung
+        already scheduled would otherwise publish the same request after the
+        cancellation and start work on a peer the caller has withdrawn it from.
         """
         record = get_store().get(task_id)
         if record is None:
@@ -1976,12 +2158,27 @@ class A2AMesh:
         if record.status in _ENDED:
             return record.status
         send = self._sends.get(task_id)
-        if send is not None and send.agent != agent:
+        owner = send.agent if send is not None else record.agent_name
+        if owner != agent:
             # **The task belongs to the peer it was sent to.**  Publishing a
             # withdrawal to a caller-supplied name without this check told the
             # wrong peer, recorded the row cancelled, and let the real peer run
             # on — the sibling `continue_task` refuses the same mistake.
-            return f"Error: task_id {task_id!r} is with {send.agent!r}, not {agent!r}."
+            # **The record is the owner when the send is gone.**  The store is
+            # process-wide and its rows outlive `_sends`: a non-reviving
+            # teardown clears the sends, the FIFO cap evicts the oldest, and
+            # another agent's mesh never held this send at all.  The row still
+            # names the peer the task went to, so the guard reads it there.
+            return f"Error: task_id {task_id!r} is with {owner!r}, not {agent!r}."
+        # **The ladder stops before the withdrawal is published.**  A rung is
+        # asleep between attempts; waking after the cancel, it would publish the
+        # request again and start work on a peer that may just have been revived
+        # — while this row says `cancelled`, so the peer's ending is discarded.
+        # Stopping first is also why a failed withdrawal does not resume
+        # retrying: the caller asked the task to stop, and a request this
+        # process has already decided against is not one to repeat.
+        if send is not None:
+            await self._stop_ladder(send)
         session = uuid.uuid4().hex[:12]
         # A fresh correlation per request: the profile requires uniqueness
         # across concurrently in-flight requests on one reply topic, and the
@@ -1990,7 +2187,7 @@ class A2AMesh:
         self._corr_to_task[correlation] = _Route(
             task_id,
             send.round if send is not None else 0,
-            send.agent if send is not None else record.agent_name,
+            owner,
             # `cancel_task` only reaches a recorded task (`record` was read
             # above), and the recorded kind is a task.
             "task",
@@ -2081,9 +2278,7 @@ class A2AMesh:
             if not raw or raw == self.agent_name or raw in seen:
                 continue
             if not groups.valid_member_name(raw):
-                raise groups.GroupError(
-                    f"{raw!r} is not a member name this network can address."
-                )
+                raise groups.unaddressable(raw)
             seen.add(raw)
             targets.append(raw)
         body = json.dumps(
@@ -2171,7 +2366,6 @@ class A2AMesh:
         Pure state read: nothing here dials and nothing is written down.
         """
         rows: list[dict] = []
-        now = time.monotonic()
         for task_id, send in self._sends.items():
             if not send.record:
                 continue
@@ -2179,8 +2373,12 @@ class A2AMesh:
             if record is not None and record.status in TERMINAL_STATUSES:
                 continue  # a cancelled/ended send is no longer open
             if send.interrupt:
-                if now - send.updated > _T.timeouts.pacing.a2a_task_ttl:
-                    continue
+                # **An interrupted task stays open until it is answered.**  It
+                # used to disappear from this listing after
+                # `pacing.a2a_task_ttl`, while `continue_task` still accepted
+                # the id and the peer still held the question — so the one read
+                # a model has for "what is waiting on me" stopped naming a task
+                # that was."
                 rows.append(
                     {
                         "task_id": task_id,
@@ -2235,10 +2433,6 @@ class A2AMesh:
         return self._responder.resolve(task_id, RoundOutcome(outcome, text))
 
     # ── Inbound task bookkeeping ────────────────────────────────────────
-
-    def _note_inbound(self, task_id: str, peer: str) -> None:
-        """An inbound task is now in flight in this process."""
-        self._inbound.add(task_id, peer)
 
     def _note_withdrawn(self, task_id: str, peer: str) -> None:
         """The peer withdrew this task — remember who, for the late attempt.

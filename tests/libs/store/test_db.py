@@ -18,14 +18,14 @@ import pytest
 
 from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
+from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+from slife2.libs.store import index
 from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     _TURN_COLUMNS,
     MAX_AGENT_NAME,
     StaleSchema,
     TurnStore,
-    database_path,
     message_text,
     safe_agent_name,
     store_for,
@@ -34,7 +34,6 @@ from slife2.libs.store.db import (
 from slife2.libs.store.index import _rowid
 from slife2.libs.turn import attachments
 from slife2.libs.turn.messages import Usage
-from slife2.libs.turn.tokens import estimate_turn_tokens
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -44,29 +43,6 @@ pytestmark = pytest.mark.unit
 #: all save through the same stub.  It is deterministic, which is what lets a
 #: semantic assertion mean something; see `tests.fakes.StubEmbedder`.
 EMBEDDER = StubEmbedder()
-
-
-def test_a_fork_has_no_turn_database_of_its_own(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A fork is a copy held in memory; its context is the maker's log.
-
-    A non-fork subagent has its own `turns.db` under its directory. A fork
-    stores nothing, so its path is the maker's database — what `turn_list` and
-    `turn_read` read. A fork never rebuilds.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    agent_dir("jack", "researcher")  # the record's directory; a read does not make it
-    record = subagent_file("jack", "researcher")
-
-    record.write_text("fork: false\n", encoding="utf-8")
-    assert (
-        database_path("jack", "researcher")
-        == agent_dir("jack", "researcher") / "turns.db"
-    )
-
-    record.write_text("fork: true\n", encoding="utf-8")
-    assert database_path("jack", "researcher") == agent_dir("jack") / "turns.db"
 
 
 def test_the_table_is_the_agreed_schema(tmp_path) -> None:
@@ -225,6 +201,13 @@ async def test_turns_are_newest_first(tmp_path) -> None:
         "5",
         "[1, 2]",
         "null",
+        # Parses into a list of mappings, and a mapping's own fields are the
+        # shape too: `Message.from_wire` iterates `tool_calls` and asks each
+        # entry for `function`, so these raised an `AttributeError` out of the
+        # runtime's restore and lost the whole conversation.
+        '[{"role": "assistant", "content": "hi", "tool_calls": "oops"}]',
+        '[{"role": "assistant", "content": "hi", "tool_calls": [1]}]',
+        '[{"role": "assistant", "content": "hi", "tool_calls": [{"function": "x"}]}]',
     ],
 )
 async def test_a_damaged_row_does_not_hide_the_others(tmp_path, caplog, damage) -> None:
@@ -295,6 +278,102 @@ async def test_a_summary_over_a_damaged_row_is_still_written(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_summary_update_takes_the_write_lock_before_it_reads(
+    tmp_path, monkeypatch
+) -> None:
+    """The read and the write are one transaction, not a read then a write.
+
+    `update_summary` writes both columns, so a second caller's tag update that
+    lands between this call's SELECT and its UPDATE is erased when this call
+    writes the summary and tag it read before that commit — the lost update a
+    read-modify-write without a write lock always has.  `BEGIN IMMEDIATE` is
+    what makes the SELECT part of the write; the first statement on the
+    connection is the assertion.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    await store.save_turn(
+        embedder=EMBEDDER, messages=[{"role": "user", "content": "hi"}]
+    )
+
+    statements: list[str] = []
+    original = index.connect_to
+
+    def traced(target):
+        connection = original(target)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(index, "connect_to", traced)
+    assert store.update_summary(1, tags="planning") is True
+
+    assert statements[0].strip().upper() == "BEGIN IMMEDIATE", statements
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "damaged",
+    [
+        # `bool` is an `int`, so this coerces to turn 1.
+        "[true]",
+        # A mapping iterates its keys, so this coerces to turn 5.
+        '{"5": true}',
+        # A float truncates to a plausible id.
+        "[1.5]",
+        # A numeric string is not what this column's writer writes.
+        '["7"]',
+    ],
+)
+async def test_a_damaged_live_context_is_refused_rather_than_coerced(
+    tmp_path, damaged
+) -> None:
+    """A parsed value is not yet a list of turn ids.
+
+    `normalise_ids` coerces whatever it is handed, and the coercions that
+    produce a *plausible* id are the dangerous ones: `[true]` becomes `[1]` and
+    `{"5": true}` becomes `[5]`, so a damaged list silently adds a turn nobody
+    named to the live conversation — and `append_context` writes it back, making
+    the wrong id permanent.  The writer of this column only ever writes a list
+    of ints, so anything else is structural damage and is refused.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
+            " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",
+            (damaged,),
+        )
+
+    with pytest.raises(ValueError, match="context.turn_ids"):
+        store.context_turns()
+
+
+@pytest.mark.asyncio
+async def test_a_live_context_id_no_row_can_have_is_dropped(tmp_path) -> None:
+    """An integer past SQLite's range is not a turn id, and it used to raise.
+
+    The type check accepts any int, so `turns_by_ids` was the first reader to
+    bind it and `OverflowError` came out of restore, a recall's exclusion
+    table, and `turn_search`.  No row can hold the id, so it is the registered
+    drop-and-count case — and dropping it in the one reader keeps
+    `append_context` from writing it back.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    await _turn(store, "the question", "the answer", at=now())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
+            " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",
+            ("[1, 9223372036854775808]",),
+        )
+
+    assert store.context_turns() == [1]
+    assert [record.turn_id for record in store.turns_by_ids([1])] == [1]
+
+
+@pytest.mark.asyncio
 async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
     tmp_path,
 ) -> None:
@@ -302,7 +381,11 @@ async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
 
     A summary and tags come from the same model answer the messages do, so a
     lone surrogate in one must take the same U+FFFD the body does rather than
-    failing the insert and losing the whole turn.
+    failing the insert and losing the whole turn.  The name and stamp columns
+    are no exception: `who_helped` is an agent name, which arrives from a
+    command line with anything in it, and `channel`/`what_model` are text the
+    same way — a surrogate in one used to raise `UnicodeEncodeError` at the
+    INSERT and lose the turn the comment promised it never would.
     """
     store = TurnStore(tmp_path / "jack.turn.db")
 
@@ -311,12 +394,18 @@ async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
         messages=[{"role": "user", "content": "hi"}],
         summary="half a character: \ud83d",
         tags="tag\ud83d",
+        channel="chan\ud83d",
+        who_helped="ja\ud83dck",
+        what_model="local/b\ud83dig",
     )
 
     assert turn_id == 1
     (record,), _ = store.turns()
     assert record.summary == "half a character: �"
     assert record.tags == "tag�"
+    assert record.channel == "chan�"
+    assert record.who_helped == "ja�ck"
+    assert record.what_model == "local/b�ig"
     assert store.update_summary(1, summary="again \ud83d") is True
     (record,), _ = store.turns()
     assert record.summary == "again �"
@@ -606,6 +695,18 @@ def test_a_name_that_cannot_name_a_file_is_refused(name: str) -> None:
         safe_agent_name(name)
 
 
+def test_a_name_with_a_surrogate_is_sanitised_not_a_codec_error() -> None:
+    """**The digest is of text a provider can emit.**  A lone surrogate cannot
+    be UTF-8 encoded, so hashing the raw name raised `UnicodeEncodeError` out of
+    `subagent_create` — the error class every stored string is normalised to
+    prevent (`storable`).  A split emoji pair is the same shape arriving from a
+    token stream."""
+    for raw in ("a\ud800b", "a😀b"):
+        made = safe_agent_name(raw)
+        assert made.startswith("a_b-"), made
+        assert safe_agent_name(made) == made
+
+
 # --- browsing: the window, the page, and the two halves -----------------------
 
 
@@ -719,6 +820,28 @@ async def test_a_bound_in_no_grammar_is_refused_rather_than_matching_nothing(
         store.turns(since="上个月", limit=5)
 
 
+def test_a_bound_the_instant_conversion_cannot_place_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`time_window` promises `InvalidTimeBound` for a bound it cannot place.
+
+    `normalize_bound` guards the calendar, and the *conversion to a `julianday`
+    parameter* ran afterwards without that guard: `instant_bound` can raise
+    `OSError` on a platform whose calendar stops earlier, and the day axis's
+    `+1 day` can overflow.  A query then raised instead of refusing the bound.
+    """
+    from slife2.libs.store import index
+
+    def unrepresentable(_bound: str) -> str:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(index, "instant_bound", unrepresentable)
+    with pytest.raises(InvalidTimeBound):
+        index.time_window("2026-01-01", None)
+    with pytest.raises(InvalidTimeBound):
+        index.time_window(None, "2026-01-01")
+
+
 @pytest.mark.asyncio
 async def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
     """Ten turns, three pages, each turn exactly once.
@@ -739,6 +862,14 @@ async def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
 
     assert seen == [f"turn {number}" for number in reversed(range(10))]
     assert len(set(seen)) == 10
+
+
+def test_an_offset_past_sqlite_is_an_empty_page_not_an_overflow(tmp_path) -> None:
+    """`page_window` is documented as every listing's window, and this store was
+    not using it: an offset past the signed 64-bit range reached the `OFFSET`
+    bind and raised instead of answering the page no row can be on."""
+    store = TurnStore(tmp_path / "jack.turn.db")
+    assert store.turns(limit=5, offset=2**63) == ([], 0)
 
 
 @pytest.mark.asyncio
@@ -768,8 +899,12 @@ async def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
 
     assert listing["user_message"] == "what is 2+2?"
     assert listing["assistant_message"] == "It is 4."
-    # The turn's own size, not what the stored bill happened to be.
-    assert listing["token_count"] == estimate_turn_tokens(record.messages)
+    assert set(listing) == {
+        "turn_id",
+        "created_at",
+        "user_message",
+        "assistant_message",
+    }
     assert listing["created_at"] and listing["turn_id"] == record.turn_id
 
 
@@ -916,6 +1051,24 @@ async def test_a_turn_is_read_back_by_its_id(tmp_path) -> None:
     assert store.turn(999) is None
 
 
+@pytest.mark.asyncio
+async def test_a_turn_id_no_row_can_have_is_absent_rather_than_an_overflow(
+    tmp_path,
+) -> None:
+    """A rowid is a signed 64-bit integer, and a bigger Python int fails the bind.
+
+    The store's contract is `None` for an id that does not resolve.  A model
+    that wrote more digits than SQLite holds named exactly that, so the answer
+    is the same absence — `OverflowError` out of the query is the internal
+    error the tool's `no turn …` sentence exists to replace.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await _turn(store, "first", "a", at=now())
+
+    assert store.turn(2**63) is None
+    assert store.update_summary(2**63, summary="nowhere") is False
+
+
 # --- the catalogue, and the argument it must be given -------------------------
 
 
@@ -1013,7 +1166,7 @@ def test_a_store_closes_its_connection_when_the_call_ends(tmp_path, monkeypatch)
         def close(self):
             closed.append("closed")
 
-    monkeypatch.setattr("slife2.libs.store.db.connect_to", lambda path: Connection())
+    monkeypatch.setattr("slife2.libs.store.index.connect_to", lambda path: Connection())
     TurnStore(tmp_path / "turns.db")
 
     assert closed == ["closed"], "the connection outlived the call"

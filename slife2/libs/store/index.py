@@ -55,11 +55,12 @@ hide the one part the tests pin.
 from __future__ import annotations
 
 import array
+import contextlib
 import math
 import re
 import sqlite3
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -67,7 +68,12 @@ import sqlite_vec
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import at
-from slife2.helpers.timeutil import normalize_bound
+from slife2.helpers.timeutil import (
+    BOUND_GRAMMAR,
+    InvalidTimeBound,
+    normalize_bound,
+)
+from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 
 # --- the page, and how far past it a leg looks --------------------------------
@@ -86,8 +92,11 @@ def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
     caller pages by `offset`, so a response echoing the `limit` *asked* for —
     1000, say, for a 200-row cap — is a response that makes the caller's own
     arithmetic skip the rows in between.
+
+    A non-positive request is one row here rather than a default page: the
+    caller is a SQL `LIMIT`, which has to be at least 1.
     """
-    return max(1, min(int(limit), cap))
+    return page_window(limit, 0, unset=1, cap=cap)[0]
 
 
 #: How many candidates each leg of a search brings to the fusion, as a multiple
@@ -96,8 +105,9 @@ def page_limit(limit: int, cap: int = MAX_PAGE) -> int:
 #: reason: `k` on a vector search counts *chunks*, and several of them can belong
 #: to one row.
 #:
-#: **The turn store's recall is the exception.**  Each of its legs asks for
-#: exactly `limit + len(excluded)` turns, and the union is returned uncut.
+#: **The turn store's recall asks for `limit`, not a multiple.**  Its union is
+#: returned uncut, and the turns the caller already holds are excluded inside
+#: the KNN itself, so no overfetch repays their places.
 _OVERFETCH = 4
 
 
@@ -253,6 +263,31 @@ def connect_to(path: Path) -> sqlite3.Connection:
     return connection
 
 
+@contextlib.contextmanager
+def connection_to(path: Path) -> Iterator[sqlite3.Connection]:
+    """One connection for one call, committed and **closed on the way out**.
+
+    `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
+    and leaves the connection *open*.  On Windows an open handle is a file
+    nobody else can delete — `subagent_remove` met exactly that, with a
+    subagent's own `turns.db` undeletable
+    (`slife2.plugins.agent.membership.subagent_remove`) — and a connection per call
+    with none closed is a descriptor leak on every other platform.  The
+    caller's `with` gets the commit (`with connection:`); the `finally` is the
+    close.
+
+    The lifetime is stated once for the three stores that open a connection
+    per call — the turns', the catalogue's and the cabinet's — so "a
+    connection per call" means the same thing in all three.
+    """
+    connection = connect_to(path)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
+
+
 def begin_rebuild(connection: sqlite3.Connection) -> None:
     """Open the transaction a rebuild's DDL has to be inside.
 
@@ -268,12 +303,19 @@ def begin_rebuild(connection: sqlite3.Connection) -> None:
     it compares is the one that was written.
 
     An explicit `BEGIN` puts the DDL inside the transaction, so the caller's
-    `with` commits or rolls back the whole rebuild as one unit.  Four rebuilds
-    call it — a turn index, a catalogue, a cabinet and the catalogue's
+    `with` commits or rolls back the whole rebuild as one unit.  **`IMMEDIATE`,
+    because the decision the rebuild makes is a read**: `rebuild_vector_index`
+    compares the recorded identity with this build's and rebuilds only when it
+    moved.  A deferred transaction takes the write lock at its first write — the
+    `DROP` — so a save in another process can commit new vectors between the
+    comparison and the drop, and the rebuild then erases them while its caller
+    believes the index was already current.  `BEGIN IMMEDIATE` makes the
+    comparison and the rebuild one serialized write decision (SDD §8.2).  Four
+    rebuilds call it — a turn index, a catalogue, a cabinet and the catalogue's
     stale-file rebuild — and each of them leads with a `DROP`, which is what
     makes one helper worth having rather than a `BEGIN` line at each site.
     """
-    connection.execute("BEGIN")
+    connection.execute("BEGIN IMMEDIATE")
 
 
 def table_exists(connection: sqlite3.Connection, table: str) -> bool:
@@ -296,6 +338,32 @@ def _table_ddl(connection: sqlite3.Connection, table: str) -> str | None:
         "SELECT sql FROM sqlite_master WHERE type='table' AND name = ?", (table,)
     ).fetchone()
     return None if row is None else str(row["sql"] or "")
+
+
+def vector_table_gone(
+    connection: sqlite3.Connection,
+    *,
+    vec_table: str,
+    meta_table: str = "index_meta",
+) -> bool:
+    """Whether a store that *recorded* a vector index no longer has its table.
+
+    **Untouched is not the same as damaged.**  A corpus nobody has embedded
+    under this model has no vector table and no recorded identity, and an empty
+    meaning leg is then the honest answer: there is nothing to search by
+    meaning.  A store whose identity says the index was built, and whose table
+    is nevertheless absent, lost the table outside a rebuild — and answering
+    that search keyword-only is a failure read as a verdict (SDD Appendix C).
+
+    The two callers with this shape are the catalogue and the cabinet.  The turn
+    store asks the same question by querying `turn_vec` directly, so a missing
+    table raises there already.
+    """
+    if table_exists(connection, vec_table):
+        return False
+    if not table_exists(connection, meta_table):
+        return False
+    return bool(index_meta(connection, meta_table).get("vector_identity", ""))
 
 
 # --- small SQL ----------------------------------------------------------------
@@ -389,14 +457,29 @@ def instant_bound(bound: str) -> str:
     return bound
 
 
-def time_window(since: str | None, until: str | None) -> tuple[list[str], list[str]]:
-    """`(clauses, params)` for a `created_at` window.
+def time_window(
+    since: str | None,
+    until: str | None,
+    *,
+    axis: str = "created_at",
+    day: bool = False,
+) -> tuple[list[str], list[Any]]:
+    """`(clauses, params)` for a window on one time axis.
 
     **Clauses and not a `WHERE`**, because there are three readers of this one
-    time axis now and they compose it differently: the browse puts it alone, and
-    both legs of a search put it beside a predicate of their own.  A second
-    spelling of `created_at >= ?` would be a second place for the column name
-    and the grammar to drift apart.
+    rule now and they compose it differently: the browse puts it alone, both
+    legs of a search put it beside a predicate of their own, and the cabinet
+    puts it on one of its kinds' axes.  A second spelling of
+    `julianday(x) >= julianday(?)` would be a second place for the comparison
+    and the grammar to drift apart — the cabinet had one, and the two had
+    already diverged in their comments rather than their code.
+
+    `axis` is the column; `day` says it holds days rather than instants.  **A
+    day axis takes the day part of the bound**, and its `until` is exclusive
+    because that is the only comparison a column of days has: `2026-10-07`
+    becomes `2026-10-08`, so the day named is the last one in.  A bound that
+    carries a time is put past its day here — `normalize_bound` only advances
+    a *date-only* `until` for an instant axis, where `<=` means that instant.
 
     Raises:
         InvalidTimeBound: If either bound is in no grammar `slife2.helpers.timeutil`
@@ -405,26 +488,52 @@ def time_window(since: str | None, until: str | None) -> tuple[list[str], list[s
             only one of them is the truth.
     """
     clauses: list[str] = []
-    params: list[str] = []
+    params: list[Any] = []
+
+    def refused(role: str, value: str, exc: Exception) -> InvalidTimeBound:
+        """The bound could not be turned into a parameter, so it is unplaceable."""
+        return InvalidTimeBound(
+            f"invalid {role} bound {value!r} — expected {BOUND_GRAMMAR}"
+        )
+
     if since:
-        # **By instant, not by string.**  `created_at` carries a local offset,
-        # and two rows written on either side of a DST change do not sort as
-        # strings in the order they happened: `01:15+00:00` is later than
-        # `01:30+01:00`, but it is smaller as text.  `julianday` reads the
-        # offset and compares the moments.
-        clauses.append("julianday(created_at) >= julianday(?)")
-        params.append(instant_bound(normalize_bound(since, role="since")))
+        bound = normalize_bound(since, role="since")
+        try:
+            if day:
+                clauses.append(f"{axis} >= ?")
+                params.append(bound[:10])
+            else:
+                # **By instant, not by string.**  A timestamp carries a local
+                # offset, and two rows written on either side of a DST change
+                # do not sort as strings in the order they happened:
+                # `01:15+00:00` is later than `01:30+01:00`, but it is smaller
+                # as text.  `julianday` reads the offset and compares the
+                # moments.
+                clauses.append(f"julianday({axis}) >= julianday(?)")
+                params.append(instant_bound(bound))
+        except (OverflowError, OSError, ValueError) as exc:
+            raise refused("since", since, exc) from exc
     if until:
         bound = normalize_bound(until, role="until")
-        # **A date-only `until` stops *before* the next midnight.**  It was
-        # advanced by one day to name the end of its day, and comparing `<=`
-        # then included the first instant of the following day — a turn saved at
-        # exactly midnight belonged to a day the caller excluded.  A datetime
-        # names an instant and stays inclusive.
-        clauses.append(
-            f"julianday(created_at) {'<' if len(bound) == 10 else '<='} julianday(?)"
-        )
-        params.append(instant_bound(bound))
+        try:
+            if day:
+                last = date.fromisoformat(bound[:10])
+                bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
+                clauses.append(f"{axis} < ?")
+                params.append(bound)
+            else:
+                # **A date-only `until` stops *before* the next midnight.**  It
+                # was advanced by one day to name the end of its day, and
+                # comparing `<=` then included the first instant of the
+                # following day — a row saved at exactly midnight belonged to a
+                # day the caller excluded.  A datetime names an instant and
+                # stays inclusive.
+                clauses.append(
+                    f"julianday({axis}) {'<' if len(bound) == 10 else '<='} julianday(?)"
+                )
+                params.append(instant_bound(bound))
+        except (OverflowError, OSError, ValueError) as exc:
+            raise refused("until", until, exc) from exc
     return clauses, params
 
 
@@ -441,15 +550,14 @@ def rows_in_order(
 ) -> list[sqlite3.Row]:
     """Those rows, in the order they were ranked, filtered and cut.
 
-    **One function, because three stores ask one question.**  A search's order
+    **One function, because two stores ask one question.**  A search's order
     comes from a fusion in Python and its rows come from a table, so the ids
     travel as an `IN` list and the order is put back here — SQLite would return
-    them in whatever order it liked.  The turn store, the catalogue and the
-    cabinet each had their own copy of that, differing in the table's name, the
-    column the id is called and which store opens the connection; the last of
-    those is why this takes a connection rather than opening one, because the
-    two stores that read on a thread hop and the one that reads inline disagree
-    about where a connection may be opened and nothing else.
+    them in whatever order it liked.  The catalogue and the cabinet each had
+    their own copy of that, differing in the table's name, the column the id is
+    called and which store opens the connection; the last of those is why this
+    takes a connection rather than opening one, because the catalogue reads on a
+    thread hop and the cabinet reads inline.
 
     `select` is the whole `SELECT … FROM …` head (it is the part that differs),
     `column` the id's name *in SQL* — qualified where the query needs it — and
@@ -468,8 +576,8 @@ def rows_in_order(
     The truncation that used to answer that — keep the top of the list — was
     worse than it looked: the ranking was already complete, the caller's list is
     already in its final order, and a page that had quietly lost its tail is the
-    one thing a caller cannot tell from a short page.  `_ids_in_window` binds in
-    the same chunks for the same reason.
+    one thing a caller cannot tell from a short page.  The turn store binds its
+    own page in the same chunks for the same reason.
     """
     wanted = list(ordered)
     if not wanted:
@@ -561,9 +669,21 @@ def rebuild_vector_index(
     an old id would be read as one the vector pass had already finished with.
     `meta_table` is the catalogue's, which renamed the table `meta`.
     """
-    if index_meta(connection, meta_table).get("vector_identity", "") == identity:
-        return False
+    # **The comparison is inside the transaction too.**  It is a read, and what
+    # it decides is whether to delete the vectors a concurrent save may be
+    # committing right now (`begin_rebuild` is `BEGIN IMMEDIATE` for this).
+    #
+    # **A recorded identity whose table is gone is a rebuild, not a no-op.**
+    # The identity is written in the same transaction as the table, so the pair
+    # disagreeing means the table went outside a rebuild.  Returning early on
+    # the matching identity left the table absent, the surviving chunk rows
+    # looking "already placed", and the advice "restart to rebuild" false — a
+    # restart could never repair it.
     begin_rebuild(connection)
+    if index_meta(connection, meta_table).get(
+        "vector_identity", ""
+    ) == identity and table_exists(connection, vec_table):
+        return False
     connection.execute(f"DROP TABLE IF EXISTS {vec_table}")
     connection.execute(f"DELETE FROM {chunk_table}")
     for table in also_delete:
@@ -1002,9 +1122,11 @@ def fuse_shortlist(
     things the caller can read off it — the words first, because a row whose own
     text contains them is certain where a cosine is graded, and then by meaning.
 
-    The union is capped at `MAX_SQL_VARS` because nothing the caller passes
-    bounds it: every sentence brings its own leg, and the final query binds one
-    value per id.  Every row gets its number, the word-matched ones included —
+    **The union is not capped here.**  `MAX_SQL_VARS` bounds how many values one
+    statement may bind, and the final read binds in chunks (`rows_in_order`);
+    truncating the union before the caller's filters run hid matching rows
+    behind a page of rows the filter was about to drop.  Every row gets its
+    number, the word-matched ones included —
     without one they would be the strongest evidence on the page reading as the
     weakest.  A row several sentences found takes the **nearest** of them, and
     `NO_SIMILARITY` rather than `0.0` keeps an unmeasured row below a measured
@@ -1027,7 +1149,6 @@ def fuse_shortlist(
                 shortlist.append(rowid)
         for rowid, measured in hits:
             meaning[rowid] = max(meaning.get(rowid, NO_SIMILARITY), measured)
-    shortlist = shortlist[:MAX_SQL_VARS]
     for rowid, value in meaning_of(
         [rowid for rowid in shortlist if rowid not in meaning], queries
     ).items():

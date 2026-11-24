@@ -112,7 +112,14 @@ def is_valid(expression: str, *, strict: bool = True) -> bool:
     somebody writing a task is actually asking.  `0 9 31 2 *` parses and never
     fires, and a tool that accepted it would have stored a task whose only
     symptom is silence.
+
+    **Five fields, the minute granularity the poll assumes.**  croniter also
+    accepts six- and seven-field (seconds/year) forms, but `latest_fire` nudges
+    its reference by one second — a step a seconds cron can cross into a
+    future-dated fire.  Those forms are refused here rather than mis-fired.
     """
+    if len(expression.split()) != 5:
+        return False
     return croniter.is_valid(expression, strict=strict)
 
 
@@ -134,10 +141,20 @@ def next_run(expression: str, after: datetime, timezone: str = "") -> datetime:
     Strictly, because `after` is the anchor a fire already moved — asking
     "what is next" about a moment that is itself a fire must not answer with that
     same moment, or a poll would fire the same run forever.
+
+    **A fall-back repeat is not the next fire.**  The second occurrence of a
+    wall reading has already fired, at the first (`latest_fire` suppresses it
+    for the poll); `croniter.get_next` knows nothing of that rule and answers
+    `01:00+00:00` after the `01:00+01:00` that has just run.  A candidate in a
+    fold whose *first* occurrence is at or behind the anchor is therefore
+    skipped, and the answer is the next reading that has not fired.
     """
     reference = _reference(after, timezone)
     try:
-        return _croniter(expression, reference).get_next(datetime)
+        found = _croniter(expression, reference).get_next(datetime)
+        while found.fold and found.replace(fold=0) <= reference:
+            found = _croniter(expression, found).get_next(datetime)
+        return found
     except ScheduleError:
         raise
     except Exception as exc:  # noqa: BLE001 - croniter's own error classes

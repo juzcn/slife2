@@ -10,18 +10,21 @@ nothing has started yet and the fix is in the file being named.
 from __future__ import annotations
 
 import json
+import signal
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import slife2
-from slife2 import _parse_args, main, mesh_url, tui_model, tui_url
+from slife2 import _parse_args, main, mesh_url, task_url, tui_model, tui_url
 from slife2.clients.toolclient import ToolCounts
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
     REMOTE,
     A2ASettings,
+    ConfigError,
     default_config,
     load,
 )
@@ -42,7 +45,7 @@ def a_home(path: Path) -> None:
 
 
 def test_version_is_exposed() -> None:
-    assert slife2.__version__ == "0.4.0"
+    assert slife2.__version__ == "0.5.0"
 
 
 def test_package_import_does_not_pull_in_textual() -> None:
@@ -67,6 +70,36 @@ def test_package_import_does_not_pull_in_textual() -> None:
         check=True,
     )
     assert result.stdout.strip() == "False"
+
+
+def test_the_terminal_and_the_agent_loop_do_not_load_plugins() -> None:
+    """The names they share with a server live in `libs/plugin/vocabulary.py`.
+
+    A reader that imports the server for a marker would take the server's whole
+    dependency graph with it — FastMCP's server half, the broker, a tunnel SDK —
+    for a string.  This is the import graph the vocabulary module exists to
+    break, asserted in a fresh interpreter so another import elsewhere cannot
+    hide it.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import slife2.clients.tui, slife2.libs.host.config,"
+            " slife2.libs.harness.handover, slife2.tui.client,"
+            " slife2.tui.widgets, sys;"
+            " print([m for m in sys.modules"
+            " if m == 'slife2.plugins' or m.startswith('slife2.plugins.')])",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "[]"
 
 
 def test_a_malformed_config_is_reported_not_raised(tmp_path) -> None:
@@ -107,17 +140,18 @@ def test_version_prints_the_version(capsys) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["--version"])
     assert exit_info.value.code == 0
-    assert "slife2 0.4.0" in capsys.readouterr().out
+    assert "slife2 0.5.0" in capsys.readouterr().out
 
 
 #: A config the loader accepts whose `default:` names a provider that is not
 #: there — the state a provider rename leaves behind.
 STALE_DEFAULT = """\
 providers:
+  default: nosuch/model
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SMOKE_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         context_window: 100000
@@ -127,7 +161,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: nosuch/model
 """
 
 
@@ -216,6 +249,39 @@ def test_a_flag_for_another_command_is_a_usage_error() -> None:
     assert exit_info.value.code == 2
 
 
+def test_the_run_only_flags_are_refused_on_other_commands() -> None:
+    """`--url`, `--headless` and `--keep-servers` are the window's.
+
+    Carried by another command they would do nothing, and a flag that does
+    nothing reads as an instruction the command carried out — `slife2 probe
+    --url X` silently ignoring X is the case that was live.
+    """
+    for command in ("status", "down", "logs", "probe"):
+        for flag in (
+            ("--url", "http://elsewhere/mcp"),
+            ("--headless",),
+            ("--keep-servers",),
+        ):
+            with pytest.raises(SystemExit) as exit_info:
+                _parse_args([command, *flag])
+            assert exit_info.value.code == 2
+
+
+def test_agent_is_the_runs_and_the_probes() -> None:
+    """`--agent` names the instance a run claims or a probe asks.
+
+    `status`, `down` and `logs` are the machine's and carry no name; the
+    default still resolves for the commands that do.
+    """
+    assert _parse_args(["--agent", "jack"]).agent == "jack"
+    assert _parse_args(["probe", "--prompt", "hi", "--agent", "jack"]).agent == "jack"
+    assert _parse_args(["status"]).agent == "slife2"
+    for command in ("status", "down", "logs"):
+        with pytest.raises(SystemExit) as exit_info:
+            _parse_args([command, "--agent", "jack"])
+        assert exit_info.value.code == 2
+
+
 def test_status_exits_nonzero_when_a_server_is_not_usable(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -226,7 +292,7 @@ def test_status_exits_nonzero_when_a_server_is_not_usable(
     monkeypatch.setattr(
         launcher,
         "statuses",
-        lambda _config: iter(
+        lambda _config, **_kwargs: iter(
             [
                 launcher.Outcome(first, launcher.Status.RUNNING),
                 launcher.Outcome(second, launcher.Status.FAILED),
@@ -257,7 +323,7 @@ def test_status_json_names_each_server_and_its_log(
     assert answer["servers"][0]["name"] == spec.name
     assert answer["servers"][0]["state"] == "not_running"
     assert answer["servers"][0]["log"] == str(runtime.log_path(spec.url))
-    assert answer["broker"] is None
+    assert answer["brokers"] == []
 
 
 def test_down_refuses_while_another_client_is_live(
@@ -273,7 +339,7 @@ def test_down_refuses_while_another_client_is_live(
     )
     called: list[bool] = []
     monkeypatch.setattr(
-        launcher, "stop", lambda _config: called.append(True) or iter(())
+        launcher, "stop", lambda _config, **_kwargs: called.append(True) or iter(())
     )
 
     assert slife2._down(config) == 2
@@ -298,7 +364,9 @@ def test_down_force_stops_while_another_client_is_live(
     monkeypatch.setattr(
         launcher,
         "stop",
-        lambda _config: iter([launcher.Outcome(spec, launcher.Status.STOPPED)]),
+        lambda _config, **_kwargs: iter(
+            [launcher.Outcome(spec, launcher.Status.STOPPED)]
+        ),
     )
 
     assert slife2._down(config, force=True) == 0
@@ -315,7 +383,7 @@ def test_down_exits_nonzero_when_a_server_did_not_stop(
     monkeypatch.setattr(
         launcher,
         "stop",
-        lambda _config: iter(
+        lambda _config, **_kwargs: iter(
             [
                 launcher.Outcome(
                     spec, launcher.Status.FAILED, detail="pid 1 did not exit"
@@ -325,6 +393,39 @@ def test_down_exits_nonzero_when_a_server_did_not_stop(
     )
 
     assert slife2._down(config) == 2
+
+
+def test_a_second_ctrl_c_cannot_abort_the_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The press after a double tap lands during the stop, not in the window.
+
+    A window reads Ctrl+C as a key, so the first press quits it; the terminal
+    belongs to the console again when the second arrives, which makes it a real
+    `SIGINT` — delivered inside the take-down, where the app's
+    `except KeyboardInterrupt` does not reach, and answered with a traceback
+    over an exit already asked for.  The stop must run to its end instead, so
+    what is asserted here is the ignored handler for as long as `stop` runs and
+    the previous one back afterwards — `slife2 down` is a caller that returns
+    and must not leave the process deaf to Ctrl+C.
+    """
+    from slife2.libs.host import launcher
+
+    config = default_config()
+    spec = launcher.specs(config)[0]
+    seen: list[Any] = []
+
+    def stop(_config: Any, **_kwargs: Any) -> Any:
+        seen.append(signal.getsignal(signal.SIGINT))
+        yield launcher.Outcome(spec, launcher.Status.NOT_RUNNING)
+
+    monkeypatch.setattr(launcher, "stop", stop)
+    before = signal.getsignal(signal.SIGINT)
+
+    assert slife2._down(config) == 0
+
+    assert seen == [signal.SIG_IGN]
+    assert signal.getsignal(signal.SIGINT) is before
 
 
 def test_logs_lists_the_configured_logs(capsys) -> None:
@@ -480,9 +581,9 @@ def test_status_json_reports_the_broker(
 
     assert slife2._status(config, as_json=True) == 0
     answer = json.loads(capsys.readouterr().out)
-    assert answer["broker"]["name"] == "a2a-broker"
-    assert answer["broker"]["state"] == "running"
-    assert answer["broker"]["ok"] is True
+    assert answer["brokers"][0]["name"] == "a2a-broker"
+    assert answer["brokers"][0]["state"] == "running"
+    assert answer["brokers"][0]["ok"] is True
 
 
 def test_status_exits_nonzero_when_the_broker_is_down(
@@ -500,6 +601,48 @@ def test_status_exits_nonzero_when_the_broker_is_down(
     out = capsys.readouterr().out
     assert "a2a-broker" in out
     assert "not running" in out
+
+
+def test_status_reports_every_broker_the_config_names(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both networks may name a broker, and a dead second one is a fact.
+
+    `_broker_settings` returns one row per address; the human report, the JSON
+    and the exit code all read that same list, so a dead second broker is
+    visible and fails the command however it is asked.
+    """
+    from slife2.libs.host import launcher, runtime
+    from slife2.libs.host.config import SubagentSettings
+
+    config = default_config()
+    object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
+    object.__setattr__(
+        config,
+        "subagent",
+        SubagentSettings(network=A2ASettings(configured=True, broker_port=2883)),
+    )
+    monkeypatch.setattr(launcher, "statuses", lambda _config: iter(()))
+    monkeypatch.setattr(runtime, "tcp_listening", lambda _host, port: port == 1883)
+    monkeypatch.setattr(runtime, "read_record", lambda _url: None)
+
+    assert slife2._status(config) == 2
+    out, err = capsys.readouterr()
+    assert "mqtt://localhost:1883" in out
+    assert "mqtt://localhost:2883" in out, "the second broker was invisible"
+    assert "not running" in out
+    assert "1 of 2 server(s) are not usable" in err
+
+    assert slife2._status(config, as_json=True) == 2
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] is False, "the exit code's truth is the JSON's too"
+    assert [row["url"] for row in answer["brokers"]] == [
+        "mqtt://localhost:1883",
+        "mqtt://localhost:2883",
+    ]
+    assert [row["ok"] for row in answer["brokers"]] == [True, False], (
+        "the dead second broker is a row, not a silence"
+    )
 
 
 def test_the_tui_connects_to_the_agent_server() -> None:
@@ -543,6 +686,28 @@ def test_a_machine_with_no_mesh_section_has_no_mesh_url() -> None:
     every two seconds that this machine is not on the mesh."""
     assert mesh_url(default_config()) == ""
     assert not default_config().peer_agent.configured
+
+
+def test_the_task_url_is_the_agent_task_servers_row() -> None:
+    """`agent-task` is the `servers:` key; `slife2-agent-task` is the identity.
+
+    Two names a layer apart, the same pair `mesh_url` documents: the first is
+    where the config files the address, the second is what `open_server(name=…)`
+    proves it reached.
+    """
+    config = default_config()
+    assert task_url(config) == config.server("agent-task").url
+    assert task_url(config) != AGENT_TASK_SERVER_NAME
+
+
+def test_a_machine_with_no_agent_task_server_has_no_task_url() -> None:
+    """`""` is "do not ask": the picker then offers only the subagents."""
+    config = default_config()
+    servers = {
+        key: value for key, value in config.servers.items() if key != "agent-task"
+    }
+    object.__setattr__(config, "servers", servers)
+    assert task_url(config) == ""
 
 
 def test_the_broker_flag_is_parsed_and_reaches_the_environment(
@@ -663,7 +828,7 @@ def test_the_take_down_is_what_stops_the_broker(
 
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
-    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(launcher, "stop", lambda _config, **_kwargs: iter(()))
     monkeypatch.setattr(
         broker, "stop", lambda _settings: "stopped mosquitto on localhost:1883"
     )
@@ -684,7 +849,7 @@ def test_a_broker_that_did_not_stop_is_a_failure(
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
     monkeypatch.setattr(launcher, "others_running", lambda: [])
-    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(launcher, "stop", lambda _config, **_kwargs: iter(()))
     monkeypatch.setattr(
         broker,
         "stop",
@@ -708,7 +873,7 @@ def test_a_take_down_says_nothing_about_a_broker_there_is_none_of(
 
     config = default_config()
     object.__setattr__(config, "peer_agent", A2ASettings(configured=True))
-    monkeypatch.setattr(launcher, "stop", lambda _config: iter(()))
+    monkeypatch.setattr(launcher, "stop", lambda _config, **_kwargs: iter(()))
     monkeypatch.setattr(broker, "stop", lambda _settings: "")
 
     assert slife2._down(config) == 0
@@ -990,6 +1155,7 @@ def test_the_flag_picks_that_models_own_window(tmp_path) -> None:
     path.write_text(
         """
 providers:
+  default: p/small
   p:
     api: openai-completions
     base_url: https://example.test/v1
@@ -1003,7 +1169,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: p/small
 """,
         encoding="utf-8",
     )
@@ -1014,14 +1179,19 @@ default: p/small
     assert tui_model(config, "p/big")[0] == "p/big", "the wire form"
 
 
-def test_a_model_with_no_window_reports_none(tmp_path) -> None:
-    """Zero, not a guess — and the status bar reads that as "no percentage",
-    the same way it reads `reasoning: false` as "no thinking badge" rather than
-    inferring a capability from the model's name."""
+def test_a_model_with_no_window_is_refused_before_the_window_opens(tmp_path) -> None:
+    """**The bar's percentage needs a declared window, not a guess.**
+
+    A model that named no window used to answer zero, and the bar rendered its
+    token count without a percentage.  The window is now a required field, so
+    the file is refused at load — before the TUI is built — rather than a bar
+    quietly missing its percentage for good.
+    """
     path = tmp_path / "slife2.yaml"
     path.write_text(
         """
 providers:
+  default: p/m
   p:
     api: openai-completions
     base_url: https://example.test/v1
@@ -1032,11 +1202,8 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: p/m
 """,
         encoding="utf-8",
     )
-    _, model = tui_model(load(path))
-    assert model.context_window == 0
-    assert not model.reasoning
-    assert not model.accepts_images
+    with pytest.raises(ConfigError, match="context_window"):
+        load(path)

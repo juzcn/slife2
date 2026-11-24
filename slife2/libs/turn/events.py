@@ -11,7 +11,7 @@ A method-per-event handler would need eight methods (`on_text_chunk`,
 `on_tool_call`, `on_tool_approval`, ...).  The cost shows up the moment a ninth
 event is added: every observer in the codebase — the TUI, the tests, the
 recorder — has to grow a method, whether or not it cares about the new event.
-Here, adding a variant is one dataclass and one line in `_DECODERS`; observers
+Here, adding a variant is one dataclass and one `case` in `decode`; observers
 that do not match on it keep working untouched.
 
 The price is that observers pattern-match (`case TextDelta():`) rather than
@@ -22,10 +22,13 @@ is the trade, and it is worth it at three observers.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol, assert_never
 
 from slife2.libs.turn.messages import Usage
+
+logger = logging.getLogger(__name__)
 
 #: How much of a tool result travels in a progress notification.  The model
 #: still receives the full result — this caps only what is *displayed*, and the
@@ -49,30 +52,6 @@ def preview(text: str, limit: int = PREVIEW_CHARS) -> str:
 
 
 @dataclass(frozen=True)
-class ContextChosen:
-    """What the turn is about to run on, reported before it runs.
-
-    The discriminator's answer (`slife2.libs.turn.context`).  It arrives **first**, before
-    any text, because it is a fact about what the conversation is about to be
-    and not about how the turn went — a display that only learned it afterwards
-    would be showing one turn's context under another turn's answer.
-
-    Two counts, because the decision has two halves and they are what somebody
-    watching wants to know: `kept` is how much of what was in hand survived it,
-    `recalled` is how much came back from the turn log.  Their sum is how many
-    turns the turn runs on.
-    """
-
-    kept: int
-    recalled: int
-    #: Why the recall could not use its cross-encoder, or `""` when it did (or
-    #: when no recall was asked).  `"unavailable"`, `"failed"` and `"empty"`
-    #: are the context server's words; the display turns them into its own
-    #: sentence and shows one per change, not one per turn.
-    rerank: str = ""
-
-
-@dataclass(frozen=True)
 class ToolsCounted:
     """The model's tool list against the catalogue it was chosen from.
 
@@ -93,6 +72,22 @@ class ToolsCounted:
 
     total: int
     loaded: int
+
+
+@dataclass(frozen=True)
+class UsageReported:
+    """The size one model call left the conversation at, reported as it ends.
+
+    **One per model call, not one per turn.**  A turn that calls a tool makes
+    several model calls and the conversation grows with each; a display that
+    waited for `TurnFinished` held the previous turn's figure for the whole of a
+    long loop.  `last_usage` is the quantity `TurnFinished.last_usage` carries —
+    the call's own usage, which is what a "how full is the context" fraction is
+    a fraction of — and the turn's end reports it once more, so a dropped
+    notification cannot strand the bar on a stale number.
+    """
+
+    last_usage: Usage
 
 
 @dataclass(frozen=True)
@@ -143,7 +138,8 @@ class ToolApprovalRequested:
     """A tool call is waiting for somebody to confirm it.
 
     The model asked to be checked (`_approve`), and this is the request on its
-    way to whoever is watching — the loop emits it and then waits.  **The answer
+    way to whoever is watching — the caller's approval callback emits it and
+    then waits.  **The answer
     does not travel back on this stream**: it arrives as a *call* (`answer_
     approval`) on whatever is watching, because a turn's progress channel runs
     one way and a prompt that could only be answered by a reply to a
@@ -188,10 +184,12 @@ class MessageCutIn:
     person typing in a window, a channel handing one over, a peer.  The loop
     emits it when it writes the `_check_new_input` pair, so the words here are
     the tool's own answer rather than something written beside it: the screen
-    can no more invent what a person said than the model can.
+    can no more invent what the sender said than the model can.
 
     `channel` is where the message came in on, unchanged from the `Pending` it
-    waited in, so the line wears the same bubble a turn of its own would.
+    waited in; the record keeps it, and it is what tells a real delivery from a
+    `_check_new_input` pair that took nothing.  The display draws the words as
+    the harness note every machinery-written pair's answer wears, not a bubble.
 
     `receipt` is the submission's own opaque id, echoed back by the server for
     the one reader that has to match a delivery to the request it answered: the
@@ -228,8 +226,8 @@ class TurnFinished:
 
 
 TurnEvent = (
-    ContextChosen
-    | ToolsCounted
+    ToolsCounted
+    | UsageReported
     | TextDelta
     | ThinkingDelta
     | ToolCallStarted
@@ -266,6 +264,32 @@ class NullObserver:
 NULL_OBSERVER = NullObserver()
 
 
+async def emit(observer: TurnObserver, event: TurnEvent) -> bool:
+    """Hand an event to the observer, swallowing its failures.
+
+    A fact about observers, not about the loop: the loop emits its own events
+    through this, and so do the callers that emit beside it (the agent server's
+    approval request and tools-counted line, the agent task's), which is why it
+    lives here rather than as a private method one of them asks the class for.
+
+    A UI that throws must not end a turn — the answer is still correct and
+    still returned.  `CancelledError` is deliberately not caught: it derives
+    from BaseException precisely so that cancellation cannot be swallowed, and
+    the loop depends on that.
+
+    **`True` means the observer took it**, and the one caller that reads the
+    answer is the approval request: a request nobody could be told about is a
+    turn parked on a future no client saw, so the caller refuses the call
+    instead of waiting (see `slife2.plugins.agent.server`'s `ask`).
+    """
+    try:
+        await observer.on_event(event)
+    except Exception:  # noqa: BLE001
+        logger.warning("observer failed on %s", type(event).__name__, exc_info=True)
+        return False
+    return True
+
+
 def encode(event: TurnEvent) -> str:
     """Encode a turn event for an MCP progress notification's `message` field.
 
@@ -282,15 +306,14 @@ def encode(event: TurnEvent) -> str:
     payload: dict[str, Any] = {}
 
     match event:
-        case ContextChosen(kept=kept, recalled=recalled, rerank=rerank):
-            payload = {"t": "context", "kept": kept, "recalled": recalled}
-            if rerank:
-                payload["r"] = rerank
         case ToolsCounted(total=total, loaded=loaded):
             # Two integers per model call; short keys like every other, because
             # the volume this convention is for is per token and this is not,
             # but a second spelling of either count would be.
             payload = {"t": "tools", "n": total, "l": loaded}
+        case UsageReported(last_usage=last_usage):
+            # One per model call, so the key names can be short like the rest.
+            payload = {"t": "usage", "last": last_usage.to_wire()}
         case TextDelta(text):
             payload = {"t": "text", "d": text}
         case ThinkingDelta(text=text):
@@ -427,20 +450,13 @@ def decode(message: str) -> TurnEvent | None:
 
     # Every key `encode` always writes is required here: a hole is a line this
     # build did not write, not a value it may invent.  The keys `encode` omits
-    # when they are empty (`args`, the iteration pair, a cut-in's receipt, a
-    # context's rerank status) are the only ones absent may stand for.
+    # when they are empty (`args`, the iteration pair, a cut-in's receipt) are
+    # the only ones absent may stand for.
     match payload.get("t"):
-        case "context" if _counts_ok(payload, "kept", "recalled"):
-            rerank = payload.get("r", "")
-            if not isinstance(rerank, str):
-                return None
-            return ContextChosen(
-                kept=payload["kept"],
-                recalled=payload["recalled"],
-                rerank=rerank,
-            )
         case "tools" if _counts_ok(payload, "n", "l"):
             return ToolsCounted(total=payload["n"], loaded=payload["l"])
+        case "usage" if _usage_ok(payload.get("last")):
+            return UsageReported(last_usage=Usage.from_wire(payload["last"]))
         case "text" if isinstance(payload.get("d"), str):
             return TextDelta(text=payload["d"])
         case "thinking" if isinstance(payload.get("d"), str):

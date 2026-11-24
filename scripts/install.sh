@@ -517,13 +517,13 @@ ensure_tool() {  # executable provenance [install-hint]
             fi
             ;;
         npx|node)
+            # **Too old is the same gap as missing.**  The requirement is Node
+            # 24; a copy that cannot answer it is replaced by the user-level
+            # install, which shadows it because ~/.local/bin leads the PATH.
             if command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then
                 major=$(node --version 2>/dev/null | sed 's/^v//; s/\..*//')
-                case "$major" in
-                    ''|*[!0-9]*) fail "could not read the Node version" ;;
-                    *) [ "$major" -ge 24 ] || fail "Node $major is too old; install Node 24 or newer" ;;
-                esac
-                return 0
+                case "$major" in ''|*[!0-9]*) major=0 ;; esac
+                [ "$major" -ge 24 ] && return 0
             fi
             if install_node; then
                 record_owned local "$HOME/.local/lib/nodejs" node
@@ -628,7 +628,7 @@ print_credentials() {
     file=$(mktemp) || return 0
     # `tr` because a Windows Python writes CRLF; the installer itself runs on a
     # POSIX host, but a checkout on a mounted drive may hand it one.
-    "$PY" "$HELPER" secrets --home "$HOME_DIR" 2>/dev/null | tr -d '\r' > "$file"
+    "$PY" "$HELPER" secrets --source "$SOURCE" 2>/dev/null | tr -d '\r' > "$file"
     if [ -s "$file" ]; then
         say ""
         say "  credentials: store the ones you have not set with 'credstore set':"

@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Document** | Software Design Description (SDD) |
-| **Version** | 0.4.0 |
-| **Date** | 2026-10-29 |
+| **Version** | 0.5.0 |
+| **Date** | 2026-11-14 |
 | **Status** | Normative |
 | **Audience** | Developers, operators, and reviewers of slife2 |
 
@@ -43,7 +43,7 @@ order, private helpers, literal values — belong in the code and its comments.
 
 ### 1.1 Purpose
 
-This document defines the software design of slife2 version 0.4.0, for a person
+This document defines the software design of slife2 version 0.5.0, for a person
 who will change the code or operate the system. It states the architecture and
 process model, the contract every plugin implements, the behavior of the turn
 loop, model backends, tool system and memory, the interfaces between the
@@ -99,7 +99,7 @@ providers, and the WeChat bridge.
 | OpenAI Responses API | Model wire protocol. |
 | Anthropic Messages API | Model wire protocol. |
 | `slife2.yaml` | Annotated configuration reference shipped with the project. |
-| `AGENTS.md` | The model's guide to its tools: a home document beside the configuration, shipped with the project and edited by an operator. |
+| `AGENTS.md` | The model's guide to its tools: a home file beside the configuration, shipped with the project and installed into every home; the system's deliverable, not a document to edit. |
 
 ### 1.6 Document conventions
 
@@ -166,6 +166,15 @@ the agent loop is a client of the tool hub and of the model backends.
 5. **Testability without a stack.** The turn loop is a pure function over a
    message list. Servers can be driven over an in-memory MCP transport without
    binding a port.
+6. **Minimum harness; trust the agent.** The model chooses what to call; the
+   harness enforces the invariants that hold for every choice — identity,
+   isolation, budgets, delivery — and never a tool-choice preference.
+7. **Schema over prompt.** A tool's arguments, types and required fields are
+   its JSON schema, sent with the tool and checked on the call. Prose carries
+   intent; a constraint that fits a schema is not a prompt sentence.
+8. **No arbitrary fallback.** A fallback is a designed behaviour, registered in
+   Appendix C with what it does, what it gives up, and what it does not cover.
+   A failure read as a success is a bug.
 
 ### 2.4 Constraints
 
@@ -177,8 +186,9 @@ the agent loop is a client of the tool hub and of the model backends.
   plugin and the file handling is a library or a private module.
 - Internal state is addressed by a conversation key, not by a session. The MCP
   transport must therefore preserve the conversation identity on every call.
-- The model's context window is a hard bound. Every mechanism that adds text to
-  a request must have a corresponding bound or eviction rule.
+- The model's context window is a hard bound, and every model entry declares
+  it. Every mechanism that adds text to a request must have a corresponding
+  bound or eviction rule.
 
 **Why.** The difference is the error boundary: a missing plugin fails the turn
 with a named peer, while a file that will not open raises where it is used. A
@@ -221,7 +231,8 @@ those, and the loop does not know where they come from.
   the same protocol share a model server.
 - **Shared servers.** Every server is machine-wide infrastructure. A second
   slife2 instance attaches to the running servers rather than starting a second
-  set. The last client to exit stops the running servers, unless
+  set. The last client to exit stops every server record on the machine —
+  including a model backend another configuration started — unless
   `--keep-servers` is used.
 - **One mesh per agent.** The peer network and the subagent network are separate
   namespaces, but each agent has one MQTT identity per network.
@@ -233,16 +244,16 @@ Each plugin has one job:
 | Plugin | Job |
 |---|---|
 | `agent` | The conversation loops |
-| `context` | The turn log and the context decision |
+| `context` | The turn log and the context decisions |
 | `toolhub` | The tool set |
 | `slife2-llm-*` | One wire protocol each |
 | `mcp-tools`, `restapi-tools` | Outward connections for `mcp:` and `rest-api:` |
-| `skills`, `cli` | Playbooks and the command registry |
-| `jobs` | The home's Python functions as tools |
+| `skills-server`, `cli-server` | Playbooks and the command registry |
+| `job-server` | The home's Python functions as tools |
 | `cabinet`, `media` | Documents and dumps; images, video, speech, transcription |
 | `file-tunnel`, `wechat` | A public file URL; one WeChat login per agent |
-| `agent-task`, `schedule` | Background loops; timers and the run ledger |
-| `a2a` | The peer and local networks |
+| `agent-task`, `schedule` | Background turns; timers and the run ledger |
+| `peer-agent`, `subagent` | The peer and local networks |
 | `tui` | The terminal inbox |
 
 A provider is a configuration row rather than a process, which is why one
@@ -282,7 +293,7 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 | Decision | Choice | Consequence |
 |---|---|---|
 | Prompt and harness | Trust the model; keep the harness small | The harness adds a marked address and tool pairs, not instructions or hidden policy. |
-| Context | Choose a context before each turn | One model call per turn decides what to keep and what to recall. The log is the permanent record. |
+| Context | Choose the context a turn runs on | One model call per turn decides what to keep and what to recall. The log is the permanent record. |
 | Person work vs machine work | Conversation for model work; code for deterministic work | Scheduling is an expression code reads; delegation is a tool the model calls. |
 | Plugin vs library | A process if it holds a credential, SDK, or connection | The agent loop never holds a provider key; files are opened in-process. |
 | Configuration | One file, read per turn | An edit reaches the next turn rather than the next restart. |
@@ -297,8 +308,9 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 | **Recoverability** | Turns, the live-context list, the cabinet, the schedule ledger, and the loaded tool set are persisted; a restart restores the conversation and the model's list. |
 | **Testability** | The loop is pure; servers run over in-memory transports in tests. |
 | **Extensibility** | A plugin is a module plus one row in `PLUGINS`; an external tool is one configuration entry. |
-| **Observability** | Startup reports each server as it lands; `slife2 status` probes each one; every turn, foreground tool call, and model call leaves one line with its duration, naming the conversation. |
+| **Observability** | Startup reports each server as it lands; `slife2 status` probes each one; every turn, foreground tool call, and model call leaves one line with its duration, naming the conversation and the turn. |
 | **Portability** | Tested on Windows, macOS, and Linux; the runtime has no POSIX-only dependency beyond a documented fallback. |
+
 ## 3. Plugin contract
 
 ### 3.1 Protocol and transport
@@ -310,7 +322,7 @@ A plugin is an MCP server over Streamable HTTP. It MUST:
 - put its MCP name on the wire so a client can identify it;
 - serve a probe tool whose presence identifies the server;
 - start through the shared scaffold `serve_plugin`;
-- accept the common flags (`--data-dir`, `--host`, `--port`);
+- accept the common flags (`--data-dir`, `--host`, `--port`, `--path`);
 - resolve its own address from the configuration or the default.
 
 The scaffold `libs/plugin/protocol.py` owns argument parsing, logging,
@@ -338,7 +350,8 @@ on every request. A server-minted handle was rejected because anything a caller
 must keep can be lost, expired, or wrong after a restart. The conversation id is
 a name the caller already has and cannot go stale. Its price is that a name is
 guessable; here there is no authorization to subvert, because every server
-listens on loopback and the only other party is a process the user started.
+listens on loopback — a host beyond it is refused at load (§11.1) — and the
+only other party is a process the user started.
 
 Consequences:
 
@@ -401,8 +414,11 @@ An entry has one `state` field, read from the file before the link is consulted.
 A switched-off entry is `off`, not the `idle` of a connection nobody started. An
 entry that answered with no tools is `ready` with zero tools; it is not silent.
 The vocabulary matches the hub's `servers()` answer. A credential that did not
-resolve is refused before use; `libs/host/config.py:unresolved_reference` is the
-single reader of "this value is still a reference".
+resolve never travels: a provider or media call refuses before use, while a tool
+server's `env:`/`headers:` entry still holding its reference is **omitted** and
+warned about, so the child's own missing-key policy decides — `tavily-mcp` runs
+keyless, `serper` refuses in its own words. `libs/host/config.py:unresolved_reference`
+is the single reader of "this value is still a reference".
 
 ### 3.5 Plugin registry
 
@@ -427,22 +443,27 @@ it startable by name. The table is data, not imports: every module field is a
 string, because importing a server to read its name would pull provider SDKs
 into the terminal and the agent loop.
 
-Two rows may share a module. `peer_agent` and `subagent` are served by
-`plugins/a2a/server.py`; the second row is a three-line entry point. They are
-separate processes because they are separate networks, and they have different
-MCP names so a probe can tell them apart. Appendix B says where the registry
-lives.
+The two network rows share one implementation but have two entry modules: the
+`peer-agent` row runs `slife2.plugins.a2a.server`, and the `subagent` row runs
+`slife2.plugins.a2a.local_server`, a thin entry point that delegates to it. They
+are separate processes because they are separate networks, and they have
+different MCP names so a probe can tell them apart. Appendix B says where the
+registry lives.
 
 ### 3.6 Identity verification
 
 A client MUST prove which server it reached before believing anything the server
 says. `identifies` compares the connected server's `server_info.name` against
-the name the caller expected; when the server reports no name, it falls back to
-the server's own probe tool. `open_server` is the single place a client connects
-to one of our servers; it raises, naming what could not be reached, rather than
-returning a client that will fail later. The check prevents a server on the
-wrong port or an old build from answering MCP correctly and being mistaken for
-the intended server.
+the name the caller expected, and `server_info.version` against this build's;
+when the server reports no name, it falls back to the server's own probe tool.
+Every server built by `house_server` advertises this package's version, so a
+daemon from a previous build fails the check on its build even though it answers
+to the right name. `open_server` is the single place a client connects to one of
+our servers; it raises, naming what could not be reached — or which build
+answered, and the `slife2 down` that replaces it — rather than returning a
+client that will fail later. The check prevents a server on the wrong port or an
+old build from answering MCP correctly and being mistaken for the intended
+server.
 
 ### 3.7 Refusal vocabulary
 
@@ -514,11 +535,13 @@ least one embedding provider: there is no built-in provider or embedder.
 
 `AGENTS.md` is the second required document. It is the model's guide to its own
 tools, included in the system prompt every conversation opens with, and read
-from the home at that moment, so an edit reaches the next conversation. A home
-without one is refused where the prompt is rendered, naming the file. The
-installer seeds it under the configuration's rule: a live file is never
-overwritten, and a changed shipped copy is written beside it as
-`AGENTS-default.md`. The installer takes its requirements from the shipped
+from the home at that moment, so a replacement reaches the next conversation.
+**It is the system's deliverable, not the operator's document**: a person may
+read it, an edit is not supported, and a reinstall replaces it — as a reinstall
+replaces `skills/` and `jobs/` — with no `AGENTS-default.md` beside it. A home
+without one is refused where the prompt is rendered, naming the file. What a
+person wants to add to the prompt goes in a template of their own, named by
+`agent.system_prompt`. The installer takes its requirements from the shipped
 `slife2.yaml`, never the live one: the live file is the server's, may lag a
 release, and a merge is owed by hand — an upgrade must not wait on it.
 
@@ -536,18 +559,34 @@ is refused at load. The objects are complete — the loader applies the file's
 defaults; `*_set` requires every field, so a partial write is a schema error,
 not a silent reset.
 
+The sections with no canonical object — `agent:`, `context:`, `media:` and the
+rest — are read through one loader (`libs/host/section.py`). Each declares its
+keys as `Field`s carrying the reader, the bound and the sentence a missing
+required key is refused with, and the loader refuses an unknown key from that
+same list: a section cannot take a key it does not read, or read one it does
+not take. Typed coercion and bounds are therefore the same in every section,
+and an absent key takes the default the settings class states.
+
 `--a2a-broker HOST:PORT` overrides `peer_agent.broker` for one run, through the
 environment so a server started by this command reads the same address. It
 overrides the address only; `org`/`unit` remain the file's, and it cannot enable
-a network whose section is absent. If the A2A server is already running, the
-flag is refused rather than silently ignored.
+a network whose section is absent — the command that owns the flag refuses it
+against its own config. The *loader* leaves the override alone for a file with
+no section, because the environment is process-wide and a shared daemon loads
+other homes' configs. If the A2A server is already running, the flag is refused
+rather than silently ignored.
 
 ### 4.2 Shared servers and launcher
 
 `libs/host/launcher.py` starts the servers a configuration needs and attaches to
 those already running. Servers are daemons: a client exiting never stops one,
-but the last client out does. `others_running` counts by process liveness, so a
-killed client cannot keep the stack alive.
+but the last client out does — and it stops the *machine's* records, not only
+the exiting config's endpoints, because a backend another configuration started
+is still a daemon with nobody left to stop it. `others_running` counts by
+process liveness, so a killed client cannot keep the stack alive. A take-down
+that has begun runs to the end: a repeated `Ctrl+C` — the second half of an
+accidental double press — is swallowed rather than aborting it and leaving the
+stack half stopped.
 
 The lifecycle rules are:
 
@@ -557,7 +596,10 @@ The lifecycle rules are:
    detected by reading its state. A state that cannot be read is not treated as
    a zombie.
 3. **Ready means the expected server answers as itself.** A port that accepts a
-   connection is not enough.
+   connection is not enough. The probe's endpoint and the child's bind are one
+   `ServerSpec` — host, port and HTTP path (`--path`) — so an edit during the
+   start-up window cannot leave the probe waiting on an address the child did
+   not take.
 4. **Startup is a wave order.** `NEEDS` states which servers must precede which.
    Everything in a wave with no unmet dependency starts at once. A server whose
    dependency failed is not attempted and is reported with the name of what it
@@ -586,9 +628,10 @@ releases if the holder dies; there is no stale-lock protocol.
 ### 4.4 `status`, `down`, and `logs`
 
 `slife2 status` reports each server as `running` (with its pid and start time),
-`running (external)`, `port held by something else`, or `not running`, and the
-A2A broker when `peer_agent:` is configured. `--json` gives the same rows with
-each server's log path. It exits 0 only when every server and the broker are
+`running (external)`, `port held by something else`, or `not running`, and every
+A2A broker the configuration names — `peer_agent:` and `subagent.network:`, one
+row per address. `--json` gives the same rows as `servers` and `brokers`, with
+each row's log path. It exits 0 only when every server and every broker are
 usable, and 2 otherwise.
 
 `slife2 down` stops the servers this configuration names and that this build can
@@ -607,13 +650,11 @@ attributable rather than interleaved (§11.7).
 
 A subagent is an agent that belongs to another agent. A subagent:
 
-- has the maker's tool set, with one exception: `subagent_set` and
+- has the maker's tool set, with one exception: `subagent_create` and
   `subagent_remove` refuse a subagent caller (§4.5.3);
-- has its own role-specific system prompt (`subagent.j2`) and its own
-  `subagent.yaml`; a non-fork subagent also has its own stored conversation,
-  cabinet, and media directory, while a fork stores no turns, reads the maker's
-  turn log for context without writing it, and shares the maker's cabinet and
-  media;
+- has its own role-specific system prompt (`subagent.j2`), its own
+  `subagent.yaml`, and its own stored conversation, cabinet, and media
+  directory;
 - has no process, no window, and no claim on an agent name; its conversation MAY
   be watched by a terminal (§4.5.6), and watching is a read rather than a
   window;
@@ -629,9 +670,16 @@ table already exists and is keyed by `(home, agent, subagent)`. The cost of a
 subagent plugin would be the transport to it — a new protocol hop for every
 message — while a subagent's identity is already the conversation id.
 
-A subagent is created with `subagent_set` and removed with `subagent_remove`.
+A subagent is created with `subagent_create` and removed with `subagent_remove`.
+**The record is the membership**: a message addressed to a name with no
+`subagent.yaml` — never made, or removed — is refused rather than starting a
+conversation that would recreate the directory with no record and block the name
+against both tools.
 After creation it is reached over the local network under `subagent_*` names:
-the direct five, and the six group tools (`subagent_group_set`,
+the direct seven (`subagent_send_message`, `subagent_task_response`,
+`subagent_continue_task`, `subagent_cancel_task`, `subagent_list`,
+`subagent_task_list`, `subagent_broadcast`), and the six group tools
+(`subagent_group_set`,
 `subagent_group_list`, `subagent_group_member_list`, `subagent_group_remove`,
 `subagent_group_leave`, `subagent_group_send_message`).
 
@@ -642,44 +690,28 @@ delivers; whether a member answers is the model's own `group_send_message` call.
 
 #### 4.5.1 Directory and record
 
-Every subagent of `jack` lives under `agents/jack/subagents/<name>/`. A non-fork
-subagent has its conversation (`turns.db`), its record (`subagent.yaml`), and its
-own `cabinet/` and `media/` there. A fork has only the record: it is a copy of
-its maker's conversation held in memory, so it stores no turns, reads the
-maker's turn log for context without writing it, and shares the maker's cabinet
-and media. It has no restore or rebuild. That record is removed when the agent
-server next starts: a fork is session-lived, and the start of a session ends the
-forks of the last one.
-
-**A fork is never a group member**: it is temporary, so a roster naming one
-would keep addressing a name nobody answers; creation refuses it, placement does
-not wake it, and its group traffic is dropped. A subagent has no external
-identity of its own: WeChat and the peer-agent network belong to the agent, and
-scheduling stays with the agent.
+Every subagent of `jack` lives under `agents/jack/subagents/<name>/`, with its
+conversation (`turns.db`), its record (`subagent.yaml`), and its own `cabinet/`
+and `media/` there. A subagent has no external identity of its own: WeChat and
+the peer-agent network belong to the agent, and scheduling stays with the agent.
 
 The container level is deliberate: `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker, so a subagent named `cabinet`
 would otherwise collide with the maker's own directory. `subagent.yaml` records
-the model the subagent runs on, the role it was made for, whether it was made as
-a fork, and when it was made. The file is deleted with the directory — or, for a
-fork, when the next session starts. The configuration file holds only
+the model the subagent runs on, the role it was made for, and when it was made.
+The file is deleted with the directory. The configuration file holds only
 machine-wide facts: how many subagents a maker may have, and where the local
 network meets.
 
-#### 4.5.2 Role and fork
+#### 4.5.2 Role
 
 - **`role`** is a word included in the subagent's prompt. The prompt is the
   shipped `subagent.j2`, not the operator's `agent.system_prompt`, because a
   subagent must be told what it is, whose it is, and where its work comes from.
-- **`fork: true`** starts the subagent from a copy of its maker's conversation
-  as it stood when the subagent's conversation starts. Nothing about the fork is
-  stored: its turns are not recorded, it has no stored context to restore, and a
-  restart removes it. The copy is cut back to the last completed exchange,
-  because a provider rejects a conversation ending mid-exchange.
 
 #### 4.5.3 One level only
 
-A subagent MUST NOT create or remove a subagent. `subagent_set` and
+A subagent MUST NOT create or remove a subagent. `subagent_create` and
 `subagent_remove` are refused when the caller is itself a subagent: the local
 network holds a place for the maker's own subagents and nothing holds a place
 for a level below them.
@@ -692,10 +724,24 @@ for a level below them.
 2. stop the subagent's loop;
 3. delete its directory.
 
+**The claim is the conversation table's, taken before the first step**: a
+message or a second `subagent_create` that names the subagent while its
+directory is being deleted is refused by the table, never raced against the
+delete.
+
+Releasing the place also withdraws every task around the member, in both
+directions. Each open send *to* it is recorded `cancelled`; each task it *sent*
+lives in the receiver's inbound table rather than the member's, so it is settled
+`cancelled` there and the receiver's model is told. A `pending` row would name
+work whose member no longer exists.
+
 If the network notification cannot be made, the subagent is left unchanged.
 Nothing is asked of the subagent and nothing waits for it; removal is a forced
-cleanup whether it is idle or mid-turn. Removing an agent removes its subagents,
-because they are directories underneath it.
+cleanup whether it is idle or mid-turn. Releasing the place is what **interrupts
+a turn**: a subagent has no window, so its turn is the member call that process
+made, and dropping the session cancels it; a turn that interrupt does not reach
+is interrupted by cancelling its own handler. Removing an agent removes its
+subagents, because they are directories underneath it.
 
 #### 4.5.5 Local network
 
@@ -720,25 +766,55 @@ conversation. A turn that ends in prose is not a reply: the model's own
 roster read after a start connects the caller's place before reporting; a
 refused connection is reported as the tool's `error`, not raised.
 
+**A withdrawal is a message, on both networks.** `subagent_cancel_task`
+settles the task as cancelled where the withdrawal is accepted — the sender is
+told `cancelled`, and a later `task_response` for the id is refused — and hands
+the member's model the same `cancel_task` marker a peer's model gets: the task
+was withdrawn, it may stop working on it, and it owes no response. Nothing
+cancels the member's turn. A turn is not a task: one turn can fold in several
+tasks' messages, a task can outlive the turn that started it, and only the model
+knows which of them it is working on. The local process owns the member's call
+to the agent server, which makes an interrupt look possible; it would still be an
+interrupt of a turn, not a withdrawal of a task, and the two do not line up.
+
 #### 4.5.6 Watching a conversation
 
 A terminal can watch a subagent's conversation without becoming its window. The
 agent server exposes two read-only management tools:
 
-- `subagents(agent)` lists the maker's subagent directories with the model, role,
-  and fork flag read from each `subagent.yaml`; it reads the filesystem, not the
-  roster, because the roster connects the mesh and wakes members.
+- `subagents(agent)` lists the maker's subagent directories with the model and
+  role read from each `subagent.yaml`; it reads the filesystem, not the roster,
+  because the roster connects the mesh and wakes members.
 - `watch(agent, subagent)` is a held-open call. Its first progress frame is a
   snapshot of the stored turns — `transcript`'s own read, so history ends at the
   same place for a watcher and a restarted window. A turn in flight is replayed
   from a `TurnStarted` frame followed by the events already produced; live turn
-  events follow. A cancelled call is the detach. When the subagent is removed,
-  the last frame is `Closed` and the call returns.
+  events follow. A turn whose record is still being written is waited out
+  before that decision: the store can hold the row before the tap knows its id,
+  and replaying in that window would draw the turn twice. A cancelled call is
+  the detach. When the subagent is removed, the last frame is `Closed` and the
+  call returns.
 
 Watching is a read: it starts no turn, chooses no context, spends no model call,
 and never answers an approval request. The watched turn remains unattended
 (`watched=false`), exactly as it is when nobody watches. A display that falls
 behind loses frames; the turn never waits for it.
+
+**An agent task is watched through the same vocabulary** (§9.3), from the task
+server's own held-open `watch(name)` tool. A task stores no turns, so its first
+frame is an empty `Snapshot` carrying the agent's plan; `TaskBrief` follows with
+the description the task was given, then the one turn's events from its start,
+then `Closed` when it stops. A task that has already stopped is answered with
+the brief, its final status and the sentence its ending carried; a name the
+registry no longer holds is a refusal. Both servers keep their taps and
+watchers in `libs/turn/watchhub.py`, so the join-mid-turn race is one
+implementation.
+
+`Ctrl+O` offers the agent's subagents and its **running** agent tasks in one
+picker; a stopped task has no events left to replay. Watching a task starts no
+turn and does not make it `finished` — the answer still reaches the conversation
+by hand-over.
+
 ## 5. Turn execution
 
 ### 5.1 Loop contract
@@ -746,7 +822,9 @@ behind loses frames; the turn never waits for it.
 A turn is: send the conversation to a model; stream the response; run the tools
 it requested; append the results; repeat until the model answers without
 requesting a tool. `libs/turn/loop.py` implements the algorithm;
-`plugins/agent/server.py` owns the conversations it runs in.
+`plugins/agent/` owns the conversations it runs in — `core.py` the loops table
+and the turn, `state.py` the conversation and its turns, `recording.py` the
+write, `model_tools.py` the model config, and `membership.py` the subagents.
 
 `AgentLoop` is built with a **backend** with one streaming method and a
 **registry** of tools, refreshed by a callback before every model call.
@@ -756,16 +834,44 @@ coalesce display events without affecting the conversation, and optionally the
 harness's `auto` callback, which names a tool the harness wants called mid-turn.
 
 The loop is a pure function over a message list. It owns no conversation,
-socket, or clock. The iteration cap is `agent.max_iterations`, read per turn
-from the current configuration. `0` or an absent key means no cap: a number
-nobody wrote is a bound nobody chose. A turn that reaches a stated cap ends
-normally with `stop_reason: "max_iterations"`, not with an exception.
+socket, or clock. The iteration cap is `agent.max_iterations` and the compaction
+threshold `agent.compact_at`, both read when the conversation starts — the same
+moment its model and system prompt are read — so an edit reaches the next
+conversation, not the one already capped by the old value. `max_iterations: 0`
+or an absent key means no cap: a number nobody wrote is a bound nobody chose. A
+turn that reaches a stated cap ends normally with
+`stop_reason: "max_iterations"`, not with an exception.
 
 A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
 `(text, ok)` and never raises: a peer's refusal, a dead transport and a tool that
 threw all come back as `ok=False` with text the model can act on. What ends the
 turn is a failure outside that contract — a tool list that cannot be refreshed
 before a model call, or a model call that failed.
+
+**A turn can compact its own live context, and the compaction is a view.** The
+loop is handed a `present` callback with the list it advances; the model is sent
+`present(messages)` and the record is `messages`. `_turn_compact` (§5.3) is
+called by the harness when the last call's `total_tokens` crosses
+`agent.compact_at` of the conversation's **prompt budget** — the model's window
+minus the completion request it carries (`max_tokens`), because a provider
+counts both against one window — or by the model itself — and
+its selection decision hides the messages the turn no longer needs from the view
+for the rest of the turn. A compaction that dropped something leaves the
+automated pass live: a context that grows back over the fraction is asked about
+again at the next boundary. One that kept everything, or one whose selection
+decision failed, is a decision about the whole context and stops the automated
+pass for that turn
+(`Loop.compact_hold`); the model may still call the tool itself, and a later
+successful call resumes the pass. The turn's row, `covered` and the store never
+see the view, and the next turn starts from the full list.
+
+**A final model call that answers with no text and no tool call is a failed
+turn.** A provider can legitimately stop without saying anything, but that result
+is the same shape as a call that produced nothing, and the turn's product is its
+answer: there is nothing to show, nothing to record, and no word in the
+conversation. An empty answer — whitespace alone is none — is a failure, not a
+verdict (Appendix C). The loop is the one place that decides this, because it is
+the one place that knows the call ended the turn.
 
 ### 5.2 Harness additions
 
@@ -778,8 +884,10 @@ what the harness adds is a marked address, never a claim of its own.
 `markers.py` defines `[Name:{…}]` as a prefix on a delivered message. A marker is
 content: it is stored with the message and travels into the transcript, and it
 is stripped for display by the reader that knows the vocabulary. A producer and
-its reader share one spelling. Capitals mark a harness annotation, never the
-conversation's own words.
+its reader share one spelling, and the names live in
+`libs/plugin/vocabulary.py`: a server imports its channels, markers, tool names
+and states from there, and a reader imports the same constants rather than the
+server. Capitals mark a harness annotation, never the conversation's own words.
 
 #### 5.2.2 Hand-over
 
@@ -801,16 +909,28 @@ call is over when its status is final; delivery is a separate fact
 (`Task.delivered`). A task whose hand-back is still in flight is neither running
 nor a failed delivery.
 
+**A task id is not a capability.** Each task records the conversation it was
+scheduled in, and `check_async`/`cancel_async` answer only inside it: an id from
+another conversation is refused exactly as an unknown one, so the refusal cannot
+confirm that the id exists. A task scheduled outside any conversation — a test,
+a worker — is readable by any caller.
+
 #### 5.2.4 Dumps
 
 A tool result too large for the conversation is stored whole as a `dump` row in
 the cabinet, keyed by the tool call id. The conversation carries a fixed
-**head** of it within `tool_result.tokens`, and the marker in front of the head
+**head** of it within `tool_result.bytes`, and the marker in front of the head
 names the call, the file's byte size and its path relative to the data
 directory — where the agent's own tools run, so moving the home does not
 invalidate a marker already in a turn. The size is one `stat` of the file the
 cabinet wrote; the marker counts no lines and no characters, because a count is
 a scan the marker does not need — the readers answer it when asked.
+
+**The bound is bytes, not tokens.** It is a size cap on one result, not a token
+accounting of the conversation; the recall's `context.ceiling` is the token
+guard. Bytes need no vocabulary and cost one expression to measure, and UTF-8
+bytes track text volume across scripts better than characters do. The readers'
+addresses — `offset`, `limit`, `next` — stay characters.
 
 The head is a truncation by rule, not a selection by model. It is the largest
 prefix of the tool's own text that fits, so nothing is rewritten; the file is
@@ -821,16 +941,17 @@ reader can continue from a match. Character mode exists because some text files
 are not organized in lines: minified JSON, one long record, output whose
 separators are not line breaks.
 
-**Why not a discriminator.** A model asked which lines matter is a second model
+**Why not a model call.** A model asked which lines matter is a second model
 call for every oversized result, carrying the result and the conversation. That
 is expensive, and its input can itself be larger than the context it was meant
 to protect. A fixed head costs one measurement and cannot overflow; the model
 that needs a part the head did not carry reads it from the file.
 
-**Why 8,000 tokens.** The window is meant to fire rarely: on the 2026-10 turn
-log (349 results), the largest result was 5,284 tokens, so an 8,000-token window
-shortened none, while a 4,000-token window would have shortened 2%. The case the
-mechanism exists for is a tool bound to be long, such as a 10,000-word essay.
+**Why 32 KiB.** The window is meant to fire rarely: on the 2026-10 turn log
+(349 results), the largest result was 5,284 tokens — roughly 20 KB — so a 32 KiB
+window shortened none, while a 16 KiB window would have shortened some. The
+case the mechanism exists for is a tool bound to be long, such as a
+10,000-word essay.
 
 A non-text result gets the same treatment: the head is what tells a model what
 it is, and the readers are bounded, so an attempt to read bytes is a bounded
@@ -840,6 +961,13 @@ The harness reaches the cabinet directly for `dump_save`, because that tool
 carries no audience mark; the model's routes back are `dump_read` and
 `dump_grep`.
 
+**An agent task writes no dumps**, and its messages are not recorded. Its loop
+gets a `Compress` that cuts an over-budget result to the same byte bound with a
+marker that promises no file (`dumps.cut`); the bound holds, the tail is gone,
+and the model can call the tool again. The dump is the agent conversation's
+recovery convenience, not the bound itself. A task opens the cabinet for one
+thing only: resolving an `[Image:…]` key its own `attach_image` was handed.
+
 #### 5.2.5 Fallbacks
 
 No step in this path has a fallback registered in Appendix C. Keeping the
@@ -847,12 +975,112 @@ output, writing it, and building the head MUST succeed, and each fails the turn
 loudly if it does not: a conversation carrying a marker whose file is not there
 has given up the bound and broken the address while looking like success.
 
+#### 5.2.6 The plan
+
+A conversation has one plan: a list the model writes whole through
+`plan_write`, each item one line of text and one of `pending`, `active`, `done`
+or `blocked`. The last successful write is the plan; an empty list clears it;
+there are no ids and no transition rules. The file is `plan.yaml` in the
+conversation's own directory, written atomically; an empty write removes it.
+A missing file is no plan; an unreadable one fails the turn and names the path.
+
+The plan is not a turn and is not in the context store. Before every turn the
+agent server reads it and adds it to the `[TURN-PROMPT:{…}]` lead, which is
+removed before the turn is saved and re-derived from the file every turn: a
+rebuild chooses turns and never decides about the plan, and the prompt cache's
+prefix is untouched. A task sees the same plan: it reads the conversation's file,
+though its context is a clone (§9.3).
+
+The harness stores, validates, replays and draws; it never derives a status,
+maps a tool call to an item, or marks one stale. The status is the model's
+claim. The window's strip is §10.2's; a watcher receives the plan in its
+`Snapshot` and from the same turn events.
+
 ### 5.3 Harness tool pairs
 
 Some things the harness must say as the model, because a provider accepts them
-only as tool calls: `_func_tool_unload` after a trim, and `_check_new_input` when
-a message is waiting. Both are ordinary declared tools whose calls the harness
-writes into the conversation.
+only as tool calls: `_func_tool_unload` after a trim, `_check_new_input` when
+a message is waiting, `_turn_compact` when a turn gives up part of its own
+context, and `_context_rebuild` when the historical selection is rebuilt. All
+four are ordinary declared tools whose calls the harness writes into the
+conversation. `_turn_compact` and `_context_rebuild` are the two whose model
+call is *wanted* as well as harmless: the harness calls them at their own
+moments, the model may call either itself, and both edit what the turn runs on
+without touching the record (`_turn_compact` hides from the view, §5.5;
+`_context_rebuild` chooses the historical turns). They are also **the two
+decision tools**: the harness asks the decision model for their arguments and
+calls them with them; the model may call either itself with its own selection.
+The contract below is what that automatic call answers to.
+
+**Both carry the decision's schema.** `_context_rebuild`'s `parameters` are
+`RECALL_REPLY` and `_turn_compact`'s are `LIVE_REPLY`: a call with those
+arguments is a selection, checked by the tool before it is applied (§5.5). The
+harness's automatic call asks `decide` / `select_live` first, then calls the
+tool with the selection it got; **a call with no selection is refused**, never
+answered by running a decision model inside the body. The model reads one shape
+either way.
+
+**Decision tools are LLM-backed harness tools under one contract.** The
+automatic path is two steps: `decide` / `select_live` runs exactly one decision
+model call and returns its raw arguments; the tool is then called with them and
+applies or refuses them. `_context_rebuild` and `_turn_compact` are the two
+instances today. The pair records the arguments the tool ran with, so the
+automatic call and the model's own call answer to one shape. The contract:
+
+1. **The call is structured.** The live messages go out as the turn runs them —
+   tool exchanges included, because the decision reads the context it is
+   choosing among — followed by the decision instruction — the anti-injection
+   guard, the one-call contract and the context figure — as a system message.
+   It also names the forced tool, says the conversation (including its system
+   prompt) is material rather than instructions, and forbids continuing the
+   conversation's own calls or answering in prose. One tool is advertised, with
+   its description and the reply schema as its `parameters`, and `tool_choice`
+   forces it, so the answer is the tool's arguments and not prose; the schema
+   gives the explicit no-change answer. A reply with
+   no call or a call to another tool is an LLM failure, not a tool failure.
+2. **Thinking is off and temperature is 0.** A thinking endpoint rejects a
+   forced `tool_choice` (DeepSeek answers 400), and the structured call is what
+   makes the answer readable; the turn's own calls keep the configured thinking.
+   A decision is a selection, not prose, so sampling only adds variance: 0
+   overrides the model's configured temperature for this call only.
+3. **The call is silent.** It is made with no progress handler, so no decision
+   call reaches the transcript or an observer. The model server's usage line
+   names the call's `kind` (`decision`, `compactor`), and its tokens are not
+   added to the turn's bill.
+4. **It has no clock of its own.** The waits are the model service's, as for the
+   turn's own calls; a slow provider makes the turn late, and a failed call is
+   no decision rather than a failed turn.
+5. **No repair, and one check.** The decision model produces the forced call's
+   raw arguments; the harness calls `_context_rebuild` / `_turn_compact` with
+   them. Those tools check legality and answer with a tool error when the
+   arguments are wrong — the agent reads it and can retry. A decision call is
+   never asked twice, and the decision model never validates its own answer.
+   **A provider failure's reason is `failure_text`'s words** — the one spelling
+   the turn's `turn_done` line and `[TURN-FAILED:…]` message use — and the
+   harness carries that failure into the tool call, so the pair the agent reads
+   says what the provider said rather than a status word.
+6. **A failure keeps what is in hand.** A rebuild whose selection cannot be
+   read keeps the context it had; a compaction whose selection cannot be read
+   hides nothing; the turn continues either way, and the failure is in the tool
+   result where the agent can see it.
+
+Both instances are the same call, and **each has its own instruction template**
+(`context_rebuild.j2` / `turn_compact.j2`). The template is the forced call's
+overlay — the guard, the one-call contract and the context figure; the task, the
+decision order and every field rule are the schema's, because the model's own
+call sees the tool and its parameters but never a template. The guard and the
+one-call rules are repeated per template on purpose, because calibrating one
+decision's wording must not move the other; the tool is the one the model
+already calls (`_context_rebuild` / `_turn_compact`). `_ask_tool`
+builds the forced request, and `_ask_model` and `_ask_selector` keep only their
+tool, schema, instruction and log subject. **The forced call names the real
+tool** — the same name, description and schema the model calls in a turn — and
+its reply is the tool's arguments; the harness calls the tool with them, and the
+tool applies or refuses them. The decision call never runs the tool itself.
+There is no private reply name. The three wire adapters share `forced_tool` — a forced
+choice naming a tool the call does not send is refused, not sent — and
+`call_options`, which forwards the per-call options only when set. The model
+chooses; the harness applies. No other harness tool calls a model.
 
 `_check_new_input` is deliberately not a user message. The loop re-reads the list
 at every iteration, so a user message would be read as the turn's own input; in
@@ -876,6 +1104,18 @@ one. The channel the message arrived on rides its tool message, and the loop
 emits the same `MessageCutIn`, so the window that submitted it does not draw the
 line again.
 
+**Every pair the machinery writes is visible to the person.**  A harness pair's
+answer is a note in the transcript — the compaction's count, the trim's names
+that left, and a cut-in's message, the delivered words from whatever channel —
+drawn live and rebuilt from the same text.  The pair's call id
+(`HARNESS_CALL_PREFIX`) is what tells a machinery-written call from a model's
+own: a model's own call to any harness tool, `_check_new_input` included, is an
+ordinary tool panel, because the call is the model's.  The one finish that adds
+no line is the machinery's own `_check_new_input`: its answer is the delivered
+message, whose line is `MessageCutIn`.  The screen decides by the pair's id
+class, not by a case per tool, so a harness tool added later is visible without
+a drawing change.
+
 ### 5.4 Channels and delivery
 
 A message that arrives from anywhere other than this terminal becomes a turn, and
@@ -888,7 +1128,7 @@ the turn records where it came in.
 | `peer_agent:<peer>` | A peer agent | `PeerAgent(<peer>)>` | `[PeerAgent:{…}]` |
 | `agent:<name>` | The agent, in one of its subagents' conversations | `Agent(<name>)>` | `[Agent:{…}]` |
 | `subagent:<name>` | One of this agent's subagents | `Subagent(<name>)>` | `[Subagent:{…}]` |
-| `agent-task:<name>` | A background loop's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
+| `agent-task:<name>` | A background turn's answer | `AsyncTask(<name>)>` | `[AgentTaskResult:{…}]` |
 | `async-tool:<name>` | A background tool call's result | `AsyncTool(<name>)>` | `[AgentToolResult:{…}]` |
 
 The channel is recorded, so the marker belongs to the channel, the displayed line
@@ -908,52 +1148,127 @@ prompt. A channel that cannot reach a conversation says so and stops; it does no
 try a second route. An injected message can jump the queue: what the person
 types, what another channel hands to that window, and what a headless window's
 input carries are all submitted to the conversation the moment the words arrive.
-The window draws the message inside the running turn, in its own bubble, without
-closing the answer still being streamed. There is one queue: the agent server's
+The window draws the message inside the running turn as the harness note the
+pair's answer is — the unified shape, not a bubble — without closing the turn
+the answer is still being streamed in. There is one queue: the agent server's
 inbox.
+
+**A message folded into a turn is delivered by it once its words are written.**
+If that turn then ends without an answer — cancelled or failed — the cut-in pair
+is still in its record, so its caller is answered as injected with no text.
+Running it again would put the same prompt in the conversation twice and have
+the model answer it twice. A take whose words were never written — the fit
+failed, the interruption landed before the append, or the call was cut before it
+answered so the batch wrote `INTERRUPTED` — is not a delivery: its caller still
+owes itself a turn and runs it. The commit takes a count for exactly that
+reason; it marks only the takes whose words are in the conversation. A refused
+record, whose messages are rolled back, leaves the message owing itself a turn
+the same way.
 
 ### 5.5 Context decision and memory selection
 
-The agent server owns one loop per conversation key, created on first use. It
-reads the configuration per turn for everything a conversation can see: the
-system prompt, the model, and the iteration cap. An edit to `slife2.yaml`
+The agent server owns one loop per conversation key, created on first use. The
+model, the system prompt and the iteration cap are **properties of that loop**,
+read when it is created: an edit reaches the next conversation, and a running
+one moves model only through `model_switch`. **A turn snapshots the model, its
+prompt budget and whether it accepts images when it starts**; `model_switch`
+moves the conversation for its next turn, never the one in flight. What a turn
+re-reads per call is everything else the configuration supplies — the tool
+list, the context decision's parameters, the timeout — so an edit to those
 reaches the next turn, not the next restart.
 
-Before each turn, the context plugin answers one question: what will this turn
-run on?
+Each turn, the context plugin answers one question: what will this turn run on?
 
 1. **`restore`**, when a conversation starts. It replays the stored live-context
    list.
-2. **`rebuild`**, before each subsequent turn. It asks a discriminator model call
-   what to keep of the conversation in hand and what to recall from the turn log.
+2. **`_context_rebuild`**, at the first boundary of each turn — the harness asks
+   `decide` for the selection and calls the tool with it — and whenever the
+   model calls it with `keep`/`recall` of its own. The decision model reads the
+   conversation, the turn's own message already in it, and answers two things
+   for the turn's current work: `keep` — what to do with the turns in hand
+   (`keep`, `clear`, or keep exactly `turn_ids`) — and `recall` — the query
+   condition for the earlier turns the work needs from the turn log. Both are
+   required; their union is the context. The
+   turn running has no id yet and is carried verbatim; the rebuild never touches
+   it. The decision is shown the last completed call's size against the
+   conversation's window — the status bar's figure, through the same
+   `context_usage`.
 
-The discriminator reads the conversation in hand rather than the new message
-alone, because a follow-up usually names its subject through the turns above it.
-Its answer is a selection, never a dump. The common answer is `{}`: a decision
-that asks for exactly what is in hand rebuilds nothing.
+The decision model reads the whole conversation — a follow-up usually names its
+subject through the turns above it; the turn's own message is in the list
+already. There is no separate input argument. Its answer is a selection, never
+a dump. `keep` and `recall` are the
+two halves of one decision: a turn of a
+finished subject is not kept for a new one; a follow-up keeps the turns in
+hand it continues; `recall: {}` says nothing outside the turns in hand is
+needed. The
+no-change answer — `"keep"` keeping every turn in hand and `{}` — rebuilds
+nothing, and is right only when every turn in hand serves the current work. A
+call with `keep`/`recall` is a selection: the same schema, applied as it came,
+with no decision call inside the tool; the pair the automatic call writes
+carries the arguments the decision chose, so the model reads the shape it wrote
+itself.
+
+The automatic path is a forced `_context_rebuild` call under §5.3's contract:
+`decide` asks the model for the raw arguments, and the harness then calls
+`_context_rebuild` with them. The tool is the one check; a refusal is its error
+result, which the agent reads and can correct. The conversation is the input,
+exactly as the turn runs it, and the decision instruction is the system message
+appended to it. A model whose `compat.thinking: omit` says its endpoint refuses
+the thinking field is not overridden; a forced choice the endpoint still refuses
+is an LLM failure, carried into the tool call as a failure selection. A model
+left free in a tool-heavy conversation continues it instead of deciding, and a
+call naming any tool but the forced one is that same continuation: it is not a
+decision, and the instruction forbids it explicitly.
 
 Rules:
 
-- **An unreadable reply is not a decision.** `parse` returns `None`, and the turn
-  runs on the context it already has (Appendix C).
+- **A decision that did not happen is a tool failure, not a hidden one.** The
+  decision model is asked once; a provider failure or a reply that is not the
+  forced call is carried into the tool call as a failure selection, and the
+  tool's error result names it — the agent reads it and can call the tool again
+  with its own selection. The log carries the provider's failure text
+  (`failure_text`). A recall nobody asked for is not a recall that found
+  nothing.
+- **The reports are counts; the ids are the pair's arguments.** The rebuild
+  answers `kept K/M, recalled R/O, token usage ~N (P%)`: kept of the turns in
+  hand, recalled of the log outside it, and the estimate; `fitted` when the
+  prompt budget cut the selection's oldest turns; a selection that cannot be
+  applied is the tool's error, with its reason; the compaction reports how many
+  messages left. A selection's ids are the tool call's arguments, not a list in
+  the answer.
 - **A kept turn and a recalled turn are joined by id, in time order, and never
   reconciled.** `normalise_ids` collapses duplicates to their first position; an
-  overriding selection would discard the context it replaced.
+  overriding selection would discard the context it replaced. **A keep-list
+  that names no turn in hand is not a clear**: the explicit clear is
+  `keep.action: "clear"` (or, for the internal parser, an empty list;
+  `keep.action: "ids"` requires a non-empty `turn_ids`), and a selection with
+  no known turn to keep leaves the context in hand.
 - **A question has two spellings.** `sentences` are read by meaning, one question
   per entry; `query` is the words the keyword leg requires and the meaning
   fallback. The keyword leg is fused into each sentence's list, and a later
   sentence can only add a turn or raise one.
-- **The person's input is a meaning question too**, unless the decision sets
-  `prompt_as_sentence: false` for input that names nothing. A keyword-only recall
-  keeps its query as the one meaning question; a period recall is not narrowed.
-- **A recall is asked for what is missing.** Kept turns are excluded from its
-  candidates, so nothing already in hand spends retrieval depth or budget.
+- **There is no separate input.** The decision's `sentences` are the recall's
+  questions — the decision model read the conversation and wrote what it is
+  asking the log for. A keyword-only recall keeps its query as the one meaning
+  question; a period recall is not narrowed by anything.
+- **A recall is asked for what is missing.** Every turn in hand is excluded from
+  its candidates — the decision model read all of them, so a turn it dropped from
+  the keep-list was dropped deliberately — and nothing already in hand spends
+  retrieval depth or budget. **The exclusion is part of the KNN's own
+  restriction**, through a per-call temp table, so an excluded turn's chunks
+  occupy no place and `k` stays the page size; widening `k` by them instead grew
+  past `sqlite-vec`'s 4096-candidate ceiling on a large live context. A
+  catalogue search's filters are pushed into its KNN the same way.
 - **The recall is hybrid, and the ranker is the last word.** The two legs
   are fused by weighted RRF (k=60, `keyword_weight` on the sparse leg), and
   `min_similarity` drops a measured candidate below the embedding model's
-  noise floor. **No term is cut for being common**: a word that appears in
-  half the log can still be the one exact string a query is about, and the
-  reranker can only judge a candidate it is given.
+  noise floor. **A window is applied inside each leg**, the semantic KNN
+  included, so `since`/`until` choose what the page may contain rather than
+  filtering a page already spent outside it. **No term is cut for being
+  common**: a word that appears in half the log can still be the one exact
+  string a query is about, and the reranker can only judge a candidate it is
+  given.
 - **A cross-encoder reranks the whole fused pool** when the embeddings
   provider names a `rerank_model`: each leg retrieves `recall_page_limit`
   candidates (80 by default), fusion returns their union — twice that for one
@@ -973,14 +1288,91 @@ Rules:
   (`turn_note`). The newest turn is annotated after saving with the same
   timestamps and channel, so the live and rebuilt spelling are byte-identical and
   no prompt-cache miss is paid on rebuild.
+- **Every addressable message carries a live id**, derived like the turn
+  footnote: `{turn_id}.{index}` for a historical turn's message, `cur.{index}`
+  for one of the running turn. The view writes it into the content as
+  `[MESSAGE:{"id": …}]` on the messages the model did not write — the person's
+  and the tool's — and keeps it on the others for the exchange rule; the builder
+  sets the historical one, the view derives the running turn's. It is never
+  stored. A turn's ids are written into the live list when its id arrives
+  (`address_turn`), with the same spelling a rebuild derives from the row, and
+  the rebuild hop carries them plus `channel` so a no-op echo hands the list
+  back addressable. The selector and the model read the same annotation, and a
+  compaction's ids are the ones `_turn_compact` accepts.
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
-  (`turn_prompt_note`) is added after the recall and removed before the turn is
-  saved (`without_lead`), so it never reaches the row, the index or a rebuild. Its
-  payload is a mapping — today `now` and `token-usage` — because a per-turn fact
-  can grow. The agent, its subagents and an agent task all carry it; a fork's
-  turns are never recorded, so its marker lives only in memory.
+  (`turn_prompt_note`) is added before the turn and removed before it is saved
+  (`without_lead`), so it never reaches the row or the index; a list rebuilt
+  from the row does not carry it, and the running turn a rebuild carries
+  verbatim does. Its payload is a mapping — today `now` and `plan` — because a
+  per-turn fact can grow. The agent, its subagents and an agent task all carry
+  it.
+- **The turn prompt carries no context figure.** The last measured call is the
+  previous turn's, and a rebuild can change the list before this turn's first
+  call; a figure drawn there would describe a context the turn does not run on.
+  The turn's own estimate is `_context_rebuild`'s answer, computed after the
+  rebuild from the list it produced.
 - **The turn-to-messages builder is one function** (`messages_from_turns`); two
   builders would drift into two conversations.
+
+**The turn's own compaction is a view, not an edit.** `_turn_compact` takes the
+live ids this turn no longer needs and hides them from the list the rest of the
+turn is sent (`libs/turn/compact.py`). A call with `compact` is a selection,
+read by the same parser as the selector's answer and checked against the view
+before it is applied; a call with no `compact` is refused, and the harness's
+automatic call asks `select_live` for the selection first — a forced
+`_turn_compact` call under §5.3's contract over the same view. **The ids are on
+the messages**: the view annotates each addressable message
+`[MESSAGE:{"id": …}]`, the selector reads the annotation rather than a
+numbered copy, and the pair the harness writes carries the ids it chose. **The
+annotation goes on the messages the model did not write** — the person's and the
+tool's; an assistant message's content is what the model said, and a marker
+written there is a sentence it never wrote that it copies into the next answer
+(a live session showed the `cur.N` chain growing once per call). A
+tool-call-only assistant message has no text and carries no id of its own. The
+selection is shown the last measured call and the conversation's window, through
+the same `context_usage` the status bar uses, so the model and the person read
+one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
+the store's live-context list are the conversation, and the next turn starts
+from the full list. The system message and the turn's opening message are the
+fixed two; the annotated messages, historical or current, are the model's to
+drop. The legality of a tool exchange is the *schema's* rule — a call and its
+results go together — and the harness **keeps a half-named exchange in the
+view and applies the rest of the selection** (`split_exchanges`), so one
+unnamed member does not discard the ids the model did name; the selector's
+view annotates the assistant message too, so the model can name both. **A
+selection naming an id the view does not offer is refused whole** — the fixed
+two, or no id at all — rather than filtered, because applying the part that
+resolves would be a decision the model did not make. An id an earlier
+compaction already hid is not an error: it is already applied, and a model
+repeating a cumulative list is asking for the same view. A
+selection decision that fails or cannot be read
+compacts nothing and the turn continues (Appendix C); a selection decision that
+keeps everything, fails, or is refused, stops the automated pass for the rest of
+the turn, because that is a decision about the whole context rather than
+something the harness should ask again at every boundary. The model can still
+call `_turn_compact` itself, and a later successful call resumes the pass.
+
+**The rebuild is the durable edit; the compaction is the transient view.**
+A `_context_rebuild` call with `keep`/`recall` is a selection,
+applied as it came; the harness's automatic call asks `decide` for the selection
+first, then calls the tool with it, and a call missing either half is refused. The
+turn running has no id
+yet and is carried verbatim, so the selection is the history alone. It is a
+harness tool under §5.3's contract: the harness calls it at the first boundary,
+the model may call it when the work has moved, and its pair is the visibility —
+the automatic pair carries the decision's arguments, and the answer reports
+`kept K/M, recalled R/O, token usage ~N (P%)` — kept of the turns in hand,
+recalled of the log outside it, and an estimate of the context the turn runs on
+from there (`estimate_turn_tokens` plus `context_usage`), never a provider
+measurement. A selection that cannot be applied is the tool's error, with its
+reason; the model's own selection is checked the same way. The turn log keeps
+every turn; a
+dropped one can be recalled by a later rebuild. A rebuild resets the
+compaction's view (`hidden` is cleared), because that view is per-turn and starts
+over. The two tools share the pair and the failure rules: a decision whose answer
+cannot be used — or whose provider failed, with `failure_text`'s words in the
+report — leaves the turn on the context it had; a model's own selection that
+cannot be read is a tool error it corrects.
 
 **Why word-shaped queries.** On the live turn log, a sentence-shaped keyword
 query fired on 0 of 16 queries; a word-shaped query fired on 10 of 15 and found
@@ -992,29 +1384,36 @@ The context parameters are in `context:`:
 
 | Key | Meaning |
 |---|---|
-| `ceiling` | Fraction of the model's window the live context is topped up to; a recall spends what the kept turns leave below it. |
+| `ceiling` | Fraction of the **prompt budget** (`context_window - max_tokens`) the live context is topped up to. It is a hard bound: a kept selection heavier than it is cut from its oldest end, and a recall spends what the rest leaves below it. |
 | `recall_page_limit` | Candidates each leg retrieves; fusion returns their union uncut, and the floors and the token budget decide membership from there. |
 | `min_similarity` | Similarity a measured candidate must reach; keyword hits are exempt. |
 | `keyword_weight` | Weighted RRF's weight on the keyword leg; the meaning leg is 1.0. |
-| `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.1` drops keyword incidentals, `0.0` keeps everything it returned. |
-| `timeout` | Seconds before the discriminator call is abandoned and the turn runs on the current context. |
+| `rerank_min_score` | The cross-encoder score a candidate must reach, 0–1; the shipped `0.3` drops keyword incidentals, `0.0` keeps everything it returned. |
 
 **One budget, and it is the ceiling's.** The kept turns are estimated first;
 a recall may spend what they leave below `ceiling`, so keeping less leaves it
 more and a kept context at the ceiling leaves it nothing. There is no separate
-per-recall fraction. `min_similarity` and `rerank_min_score` are floors whose
+per-recall fraction. **The bound is the prompt's, not the window's**: a provider
+counts the prompt and the requested completion against one window, so a budget
+sized against the full window fills the request past what any call can send —
+on the 2026-11 live log a 772k selection beside a 384k completion request was a
+400 from a 1.05M window. **And it binds the kept turns too**: a selection
+heavier than the ceiling is cut from its oldest end, and the answer's `fitted`
+count says so, because a recall cannot repair a base that is already too large
+and only the window's bound can. `min_similarity` and `rerank_min_score` are
+floors whose
 scale belongs to the model in use (bge-m3 scores unrelated same-domain text
-near 0.5), so both are calibrated per home: the shipped 0.52 and 0.1 are those
+near 0.5), so both are calibrated per home: the shipped 0.52 and 0.3 are those
 calibrations. **Both are filters, not ranking rules**: they decide whether a
 candidate stays, and the reranker's order is used only where the token budget
 cuts. On the live log an unrelated query still passed
 `min_similarity` with three neighbours at 0.52–0.54, and the reranker scored
-them 0.002–0.036 — below the shipped 0.1 — which is the floor doing the work
+them 0.002–0.036 — below the shipped 0.3 — which is the floor doing the work
 the cosine gate could not. A provider with no `rerank_model` simply omits the
 rerank stage.
 
-A missing store fails the turn, like any missing plugin. A discriminator
-timeout, provider error, or unreadable answer does not. There is no switch to
+A missing store fails the turn, like any missing plugin. A decision-model
+provider error or unreadable answer does not. There is no switch to
 turn the decision off: an append-only context is bounded by nothing.
 
 ### 5.6 Cancellation and repair
@@ -1052,11 +1451,10 @@ hub whose tool list is not answering, a store that will not restore, a rebuild
 that fails: the message is put at the end of the live conversation as the turn's
 opening message and recorded, so the failure ends with a row rather than with the
 caller's words gone from both places. A picture the turn died before resolving is
-named in an `image_note`, never kept as a part a provider cannot fetch. A fork
-records nothing but keeps the message the same way — the store is what a fork
-does not have, not the conversation. An agent task records nothing at all and
-answers with its failure instead; its answer is a message like any other, and
-this rule is what keeps that message when the turn it arrives on fails too.
+named in an `image_note`, never kept as a part a provider cannot fetch. An agent
+task records nothing at all and answers with its failure instead; its answer is
+a message like any other, and this rule is what keeps that message when the turn
+it arrives on fails too.
 
 **A turn that cannot go on ends with the harness saying so.** A tool's failure
 is text in the result the model reads and the turn carries on; an exception is
@@ -1139,7 +1537,10 @@ Rules:
   may be dropped, delayed, or coalesced by the transport.
 - **An unreadable result is refused, not read as an empty answer.** A missing
   result read as an empty assistant message is a turn that "succeeds" with
-  nothing in it.
+  nothing in it. A field whose value is `null`, or a tool-call list holding
+  something that is not an object, is unreadable in the same sense: this build
+  writes a value for every key `to_wire` emits, and defaulting one would turn
+  another build's answer into a confident empty one.
 - **A stream that goes quiet is a stall, not a long answer.** The clock is on the
   wait for one chunk, never on the call; a model that streams for an hour is
   fine. The watchdog is armed by iterating chunks, so every caller must read the
@@ -1155,6 +1556,18 @@ configuration, not a branch: `thinking`, `reasoning`, `store`, `temperature`,
 and `context_window`. Each server sends only what its configuration asked for.
 A value the protocol does not know is refused by name where it is read.
 
+**A reasoning block a provider requires back is carried opaquely and replayed
+unmodified.** The readable reasoning is `Message.thinking`; `Message.reasoning`
+holds the adapter's own payload — Anthropic's signed thinking and
+redacted-thinking blocks, the Responses API's reasoning items — stamped with the
+model that produced it. The adapter that wrote it returns it beside the tool
+results, and only to that model: a conversation moved with `model_switch` does
+not replay model A's signed blocks to model B. This is what makes a first-party
+reasoning model's second tool-loop call work; dropping the payload was the
+deliberate behaviour that failed it. A Responses request with `store: false`
+asks for `reasoning.encrypted_content` in the same breath, because a stateless
+server has no other copy to replay.
+
 ### 6.4 Provider capability configuration
 
 A model entry declares its capabilities in its own configuration row:
@@ -1162,12 +1575,13 @@ A model entry declares its capabilities in its own configuration row:
 | Field | Meaning |
 |---|---|
 | `input` | Modalities the model accepts; `text` and `image`. |
-| `context_window` | The model's window, used for context fractions and status display. |
+| `context_window` | The model's window. **Required**: the loader refuses an entry that omits it or states a number that is not positive. A request's prompt and its completion request share it, so the prompt's own space is `context_window - max_tokens` (`ModelSettings.prompt_window`), and every context fraction and status percentage is measured against that. |
 | `reasoning` | Whether the model exposes reasoning. |
 | `compat.thinking` | Provider-specific thinking setting. |
 | `compat.store` | Provider-specific persistence setting. |
 | `compat.cache_control` | Anthropic's top-level automatic prompt cache: `ephemeral`, `5m` or `1h`; absent or `omit` sends nothing. |
-| `max_tokens`, `temperature`, `top_p` | Generation parameters. |
+| `max_tokens` | The completion request, sent as the call's `max_tokens`. A provider counts it against the window with the prompt, so it is reserved from the context budget rather than being a free parameter. |
+| `temperature`, `top_p` | Generation parameters. |
 | `compat.stream_usage` | Whether the provider reports usage in the stream. |
 
 The `compat.*` keys are written under the model's own `compat:` mapping; the
@@ -1187,12 +1601,13 @@ DeepSeek attaches them to the final chunk that still carries a choice. The
 adapters accept either shape; an adapter that handles only the documented OpenAI
 shape reports zero tokens against a real DeepSeek endpoint.
 
-`stream_chat` takes a `kind` word: `turn` for the loop's own calls, and
-`discriminator` for the recall decision, the one call that reaches the model
-server outside the loop's backend. One line is logged per call with the
-breakdown and the call's `elapsed`, because a cache hit rate distinguishes a
-rebuild from an append. A call that raises logs `stream_chat_failed` with the
+`stream_chat` takes a `kind` word: `turn` for the loop's own calls, `decision`
+for the recall decision, and `compactor` for the live-view selector — the two
+calls that reach the model server outside the loop's backend. One line is
+logged per call with the breakdown and the call's `elapsed`, because a cache hit
+rate distinguishes a rebuild from an append. A call that raises logs `stream_chat_failed` with the
 provider, model, conversation and kind before the error propagates.
+
 ## 7. Tool system
 
 ### 7.1 Hub
@@ -1238,7 +1653,11 @@ reached is reported and left out; the model simply has fewer tools.
 A declaration is the whole list, and it is refreshed before every search. The
 whole list is what makes a deleted entry stop being a hit; refreshing is what
 makes dropping a directory into `skills/` or editing the configuration take
-effect at the next search. The hub's own tools are rows too.
+effect at the next search. The hub's own tools are rows too. A plugin that is up
+but cannot answer this round keeps the sources it declared last time — its rows
+stay in the catalogue, and the address book keeps their routes and its place in
+`servers()` — so one late report costs freshness and nothing else. A plugin that
+answers with fewer sources has those sources removed.
 
 A plugin's own tools state the arguments they take; the hub stores the input
 schema in the catalogue's `schema` column, which spells absence as the empty
@@ -1254,8 +1673,10 @@ Names are rewritten once, at the hub.
   name may contain.
 - A plugin's own tool keeps its bare name. Which plugin serves a tool is a fact
   about the system, not something the model needs in order to call it.
-- All of our tools share one namespace. Two plugins cannot offer the same name;
-  the catalogue refuses rather than resolving silently.
+- All tools share one namespace. Any two that would present one name — two
+  plugins, a source colliding with another, or two remote names the provider's
+  alphabet makes alike — are refused by the catalogue rather than resolved
+  silently.
 - A name from an external source is not trusted: `model_name` derives it,
   `sanitise` applies the provider's alphabet, and the separator makes it
   reversible.
@@ -1315,6 +1736,8 @@ Over the limit, the least recently **called** tools are unloaded; the names in
 loaded is ordered by its load time. The trim happens at a turn boundary: the
 harness calls `_func_tool_unload` before saving the turn and writes the pair into
 the conversation, so the model learns that the list shrank from the transcript.
+The pair's answer is the names that left, rendered as a note on the turn's
+stream (§5.3), so the person sees which tools left rather than the object.
 Nothing is written when nothing was removed. The same list bounds the model's own
 unloads: `_func_tool_unload` refuses a name in `tool_load.autoload`, so the tools
 that start loaded, the tools the budget may not evict and the tools the model may
@@ -1347,6 +1770,10 @@ as a capability the machine lacks.
 - **`sentences`**: questions matched by meaning. Each sentence is a separate
   question, and another question is another chance to be found; it cannot cost a
   row an earlier result.
+
+A keyword list with no term in it (`[""]`, blanks) is no keyword leg: beside a
+sentence the meaning leg still runs, and alone there is nothing to search with
+and the call is refused.
 
 The two legs are fused by rank, not by raw score: `bm25` is unbounded and a
 cosine depends on the embedding model, while a rank is comparable by
@@ -1385,7 +1812,9 @@ already holds, and `loaded` on the row says so.
 matches a question; a listing pages what exists, for a caller with no words to
 search with. They are separate tools because one answer cannot be both: a
 listing has no score and no confidence, and its order — category, then source,
-then name — is the only order it has. The name is last because it is the primary
+then name — is the only order it has. For the same reason `tool_search` takes
+no `limit`: a search finds *a* tool, and paging the catalogue is the listing's
+question — the search's answer still says the ten rows it was cut to. The name is last because it is the primary
 key, which is what makes the order total and two pages unable to drop or repeat
 a row between them.
 
@@ -1420,10 +1849,12 @@ schema.
 - **A refusal or a miss raises `ToolError`**, one sentence saying what is wrong
   and what to do instead. The failure is the call's status: the hub answers
   `ok: false`, the loop marks the call failed, and the window draws it as failed.
+  The one batch whose entries stand alone — `file_save` — answers each refusal
+  in its own part instead, and §8.3 says how.
 - **Two tools answer with text rather than JSON, because the text is the
-  thing.** `_check_new_input` hands over a person's message mid-turn; `skill_use`
-  hands over the skill's whole `SKILL.md`.
-- **No answer exceeds `tool_result.tokens`** (default 8,000; minimum 512). A
+  thing.** `_check_new_input` hands over a message from this conversation's
+  queue mid-turn; `skill_use` hands over the skill's whole `SKILL.md`.
+- **No answer exceeds `tool_result.bytes`** (default 32 KiB; minimum 2 KiB). A
   listing pages; an output that cannot be bounded is the harness's dump, and
   `dump_read` and `dump_grep` are bounded readers within the same budget.
 
@@ -1439,7 +1870,7 @@ advertised schema and stripped before dispatch, so no tool server sees them.
 | Parameter | Semantics |
 |---|---|
 | `_timeout` | Seconds for this call: a positive, finite number, overriding the tool's default. Any other value — `0`, negative, text, `inf` — fails the call with an error the model reads; the value is never read as "no limit" or as the default. A tool that declares its own `timeout` argument enforces it itself. With neither, the call runs until it finishes. There is no default budget. |
-| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.tokens`. An agent task's loop has no `_async`. |
+| `_async` | Run the call in the background. The model receives a task id; the result is handed back into the conversation. The result is still bound by `tool_result.bytes`. An agent task is one turn: its prompt tells the model not to use `_async` or start another task. |
 | `_approve` | Ask the user before running. The terminal draws an inline row and answers through `answer_approval`. A channel with no person behind it does not ask; the call runs. A caller that can answer declares `watched=true`. |
 
 The loop reads these parameters off the call and strips them before dispatch.
@@ -1452,10 +1883,9 @@ the original.
 
 `libs/store/db.py` implements one SQLite file per conversation (conversation
 id): `agents/<agent>/turns.db` for the agent's own conversation, and
-`agents/<agent>/subagents/<name>/turns.db` for a non-fork subagent's. A fork has
-no file of its own; it reads the maker's turn log and never writes it, and its
-`subagent.yaml` is removed when the agent server starts. Isolation is by file: no
-query can reach another agent's turns because they are not in the file. The home
+`agents/<agent>/subagents/<name>/turns.db` for a subagent's. Isolation is by
+file: no query can reach another agent's turns because they are not in the file.
+The home
 a call came from selects which of the agent's directories is read or written. The
 store holds the turn log, the live-context list, and the indexes over the turns.
 
@@ -1474,7 +1904,16 @@ The live-context list is a row, not a file. It is written in the same transactio
 as the turn that changed it. A turn can point outside itself: a tool output too
 large for the conversation is stored whole in the cabinet, and the turn keeps a
 marked head of it, so the row still holds exactly what the model saw and the
-whole is reachable by the tool call id.
+whole is reachable by the tool call id. **A stored value that is not a list of
+turn ids is refused rather than coerced**: `true` is an `int` and a mapping
+iterates its keys, so a damaged value would otherwise add a turn nobody named —
+and the append path would write the wrong id back for good.
+
+**A read does not create the file.** A conversation that has never run and a
+removed subagent's stale name are the same absent store, and a read answers its
+empty shape rather than creating a directory with no `subagent.yaml` — which
+would then block the name against `subagent_create` and `subagent_remove`. Only a
+write makes the directory and the file.
 
 ### 8.2 Index machinery
 
@@ -1482,6 +1921,21 @@ whole is reachable by the tool call id.
 turns, the tool catalogue, and the cabinet. Each corpus is searched by two legs —
 **keyword** (FTS5 over a derived, normalized string) and **meaning**
 (`sqlite-vec` over chunks of a different derived string) — fused by rank.
+
+**The three searches answer one envelope.** `tool_search`, `cabinet_search` and
+`turn_search` take the same two inputs — `keywords` for the words leg,
+`sentences` for the meaning leg — and answer the same object: `results` (the
+hits, in the order that search ranks them), `best` (the highest meaning score on
+the page, `null` when nothing was scored by meaning), `confidence` (`sure`,
+`weak` or `none`, or `null` on a browse, which judged nothing), `browsed` (true
+only for the cabinet's both-empty call; the other two refuse it and name their
+listing tool) and `limit` (the page size applied). `libs/store/answer.py` is the
+one home of the envelope and of the floors behind `confidence`; the floors are
+the embedder's, measured on the catalogue (§7.5), the words override them in
+every corpus, and the tier labels a page without cutting it. **`turn_search`
+alone takes `exclude_context`** (default false): the turns a conversation is
+running on are still its history, and leaving them out is the caller's request,
+not the search's rule.
 
 Rules:
 
@@ -1514,11 +1968,16 @@ into the vector identity and `SEARCH_TEXT_VERSION` into the keyword stamp beside
 `RULES_VERSION`; either rebuilds the index at startup rather than mixing rows
 made from two different texts.
 
-The token estimator uses `tiktoken`'s `o200k_base` when the vocabulary can be
-fetched, and a script-aware character measure when it cannot. The character
-measure was measured about 25% high on English and 60% high on Chinese — a bias
-rather than a tolerance. Measured usage is unaffected: the provider's own count
-is what the record keeps.
+The token estimator uses `tiktoken`'s `o200k_base`, **bundled with the package**:
+`libs/turn/tiktoken_cache/` holds the cache file and the resolver points
+`TIKTOKEN_CACHE_DIR` at it, so a resolution is a local read and parse (~186 ms
+once per process) with no network. **It serves the context rebuild's recall
+budget and nothing else**: a tool result is bounded by bytes (§5.2.4), and a
+page or a dump reader fits itself by bytes too. The fallback is a last resort —
+ASCII at four characters per token and every non-ASCII character at one — and
+it errs high on non-ASCII text rather than low, which is the direction a budget
+can afford. Measured usage is unaffected: the provider's own count is what the
+record keeps.
 
 ### 8.3 Cabinet
 
@@ -1558,13 +2017,17 @@ until a pass that chunks and embeds their contents exists (a RAG concern, not a
 cabinet one); until then a file is found by its words.
 
 The cabinet is per conversation: an agent's own conversation has
-`agents/<agent>/cabinet/`; a non-fork subagent has its own under its directory;
-a fork uses the maker's. **The file is the document.** For every mirrored kind —
-note, diary, report, dump — the text is written to its file in the same
-operation as its row, and **there is no body column**: the row is metadata and
-the address, not a second copy. The file holds the text exactly as the caller
-gave it; a note's subject, a day's date and a report's title are the row's and
-are never prepended to it. **Every answer about a document carries `path`** —
+`agents/<agent>/cabinet/`; a subagent has its own under its directory.
+**The file is the document.** For every mirrored kind —
+note, diary, report, dump — the text is written to its file and the file put in
+place before the row's transaction commits, so a filesystem that refuses the
+file takes the row, its keyword text and its vectors back with it, and **there
+is no body column**: the row is metadata and the address, not a second copy.
+The file holds the text exactly as the caller gave it; a note's subject, a day's
+date and a report's title are the row's and are never prepended to it. **A
+mirror file that is gone is refused by name when read, and skipped by the index
+passes** — a document whose text is gone is not one with an empty text, but one
+damaged file must not take the cabinet down with it. **Every answer about a document carries `path`** —
 the file relative to the data directory, where the agent's own tools run — so a
 model can hand the same file to `pandoc`, `rg` or a shell; the internal `mirror`
 and `file_path` stay out of the answer, and the readers carry `path` too. A
@@ -1601,6 +2064,12 @@ public URL cannot hop to a private one. Names are left to the machine's
 resolver; a fake-ip proxy answers an address the proxy owns rather than the
 destination, so resolving one in the guard would test the proxy rather than the
 site.
+
+**One call's sources stand alone.** `file_save` takes several, and each is
+stored or refused on its own: the answer carries `saved` rows and `failed`
+entries — the source as the caller gave it, and the refusal that stopped it —
+so a later URL that cannot be fetched leaves the earlier files stored **and
+named in the answer**, and a retry knows what not to store again.
 
 A dump and an image have no model-facing writer. The harness saves a tool output
 too large for the conversation with `dump_save`, and a picture a turn carried
@@ -1640,7 +2109,7 @@ for the following one. Path resolution and the binary rendering live in one
 function, and the encoding sniff in another, so the two readers cannot disagree
 about what the file's text is.
 
-Every answer stays within `tool_result.tokens`; the bound is enforced where the
+Every answer stays within `tool_result.bytes`; the bound is enforced where the
 answer leaves, or a reader could return more than the shortening removed.
 
 A dump and an image are not in the corpus. Their address is the marker the turn
@@ -1656,8 +2125,15 @@ rank against the same model and agree about what an embedding is.
 
 The server holds the provider key for the same reason the model servers do.
 Embeddings are a hard dependency: a turn is written with its vector in one
-transaction, so a save that cannot embed stores nothing. That is why there is no
-background drainer and no "index not ready" state.
+transaction, so a save that cannot embed stores nothing. There is no background
+drainer and no eventual-consistency mode: the context plugin checks a turn file
+once before serving it, and `index_status` names a partial sync, a missing
+vector, another model's identity, or a recorded vector index whose table is gone.
+The catalogue and the cabinet ask the same question at their searches, which
+raise rather than answering keyword-only (Appendix C). A recorded identity whose
+vector table is gone is rebuilt by the sync (the table is recreated empty and
+the chunk rows are cleared so every row is embedded again); a restart is
+therefore a real repair, not advice.
 
 The SDK's own retries are zero (`timeouts.stream.retries`): a request that
 reached the provider may have been billed, and a 429 is the caller's to pace.
@@ -1665,7 +2141,11 @@ The one repeat the server makes is a connection that never opened — a
 `ConnectError` means nothing was sent and an embedding is idempotent, so the
 retry cannot double-charge or change the answer, and a transient blip in the
 link to a remote provider does not fail a cold catalogue build. A second failure
-is the caller's, and the hard dependency above stands.
+is the caller's, and the hard dependency above stands. **The client's repeat is
+on a reopened connection**: a keep-alive the server closed leaves a dead MCP
+session, not a dead socket a pool can replace, so the retry opens a new one
+first — and a reopen that describes another model is refused rather than ranked
+into an index built for the old one.
 
 The width is measured, and the input limit is asked for: an input limit cannot
 be measured without sending an oversized input, so a model whose endpoint
@@ -1676,6 +2156,7 @@ invalidates the index identity. The vector index is rebuilt whole on the next
 start, because vectors from two models cannot be ranked against each other. The
 turn store's text contract is `EMBED_TEXT_VERSION`, folded into the identity
 beside the model and width.
+
 ## 9. Inbound work
 
 Four kinds of work reach a conversation without a person typing it: WeChat
@@ -1707,7 +2188,10 @@ the window is told, and the model is given the bridge's own words.
 While a login waits, the session holds the code itself: `wechat_check_status`
 hands out the drawn QR and what it encodes. A code that expires is replaced in
 the background and the replacement becomes the session's. A new login clears the
-code it replaces before fetching, and logout clears it with the state.
+code it replaces before fetching, and logout clears it with the state. **A scan
+that lands while a replacement code is being fetched is the login**: the session
+it confirmed is not reset to waiting behind a code nobody has to scan, whether
+the fetch then answered or failed.
 
 The model-facing tools are `wechat_login`, `wechat_check_status`,
 `wechat_send_message`, and `wechat_logout`. A message from WeChat becomes a turn
@@ -1743,7 +2227,10 @@ Rules specific to this system:
 
 1. **Presence follows a window.** A `join` call held open puts an agent on the
    mesh. Online and offline are notes, not messages; no turn runs and the model
-   is not told. The roster is `peer_agent_list`.
+   is not told. The roster is `peer_agent_list`. A call that takes the mesh
+   during the departure wait restarts it rather than being disconnected under:
+   the send was accepted, and its retry ladder gets its own window before the
+   agent leaves.
 2. **A round is settled by the model's own call.** `peer_agent_task_response`
    settles it with `completed`, `failed` or `rejected`; `input_required` and
    `auth_required` pause it instead, and `peer_agent_continue_task` resumes a
@@ -1786,9 +2273,7 @@ Rules specific to this system:
     receiver that already applied it unchanged; the repeat re-sends the notice,
     which is how a member that missed the first one catches up.
 13. **Leaving is autonomous, including for the owner.** An owner's departure
-    transfers the group to the first remaining member, or disbands it. A fork is
-    never a member: a roster naming one would keep addressing a name nobody
-    answers.
+    transfers the group to the first remaining member, or disbands it.
 14. **Group traffic is directed, fire-and-forget, and never returns to its
     sender.** One QoS 0 event per recipient on that recipient's own topic, carrying
     the roster and a generation id, so a member that missed a control learns the
@@ -1831,6 +2316,12 @@ Rules specific to this system:
     settled as `rejected` with the reason, and a bare `message` reports
     `completed` only after the conversation has taken it. The peer reads the
     ending and decides whether to send it again.
+22. **The broker address and namespace are read per call.** An edited
+    `peer_agent:` reaches a member that already exists at its next call: the
+    mesh built for the old address is torn down and a new one is built on the
+    address the config names now. A roster read follows the same rule. The
+    address is not rebound underneath a connected mesh; the old one is
+    abandoned, and its outstanding sends end like any teardown's.
 
 **Why directed topics.** Group traffic uses
 `event/{org}/{unit}/member:<name>`, one topic per recipient, subscribed by that
@@ -1849,13 +2340,17 @@ group tools `peer_agent_group_set`, `peer_agent_group_list`,
 `peer_agent_group_leave`, `peer_agent_group_send_message`.
 `peer_agent_task_list` reports `pending` (still running), `interrupted` (paused;
 its `question` says what it wants) and `unreachable` (the requester's retry
-ladder ran out); an unknown id is reported as withdrawn or never seen.
+ladder ran out); an unknown id is reported as withdrawn or never seen. An
+interrupted task stays listed until it is continued or withdrawn — there is no
+age at which a question somebody has not answered stops being open.
 
 A task id is a canonical `uuid4` string, generated by the requester as the
 profile requires; a continuation reuses it and the original `context_id`, while
 a new task gets fresh ids. The in-memory task store is shared by every mesh in
 the process, a record carries the agent it belongs to, and the store is pruned
-with a soft cap.
+with a soft cap. **The order is one policy for the outbound store and the
+inbound table**: terminal records first, then live work, then a paused task —
+whose peer is waiting on an answer somebody has to give.
 
 **The requester half is also a command.** `slife2 probe` sends one
 `task_request` and prints the terminal artifact; it is a peer, not a channel, and
@@ -1879,44 +2374,97 @@ a profile message.
 
 ### 9.3 Agent tasks
 
-`plugins/agent_task/` runs one loop of the agent's own on a description, and the
-answer comes back as a message. It is a separate mechanism from a subagent: it
-runs on the agent's own context, has no address of its own, records nothing, and
-accepts no second message.
+`plugins/agent_task/` runs one turn of the caller's conversation on a
+description, and the answer comes back as a message. It is a separate mechanism
+from a subagent: it runs on a clone of the maker's context, has no address of its
+own, records nothing, and accepts no second message.
 
 Properties:
 
 1. **A cap and a name.** `agent_task_start` refuses a duplicate name and refuses
-   past `agent-task.max_running`.
-2. **A task's turns are not written to the agent's database.** The task reads the
-   agent's context and adds nothing to it. What the conversation gains is the
-   answer, which the agent server records as a message.
-3. **Every failure is a message.** A loop that raises still has an answer to
+   past `agent-task.max_running`. The name is the agent's handle — its own
+   conversation, its subagents and the window all address a task by it — so one
+   agent has one task namespace.
+2. **A task's turn is not written to the agent's database.** The task reads a
+   clone of the maker's context and adds nothing to it — no turn, and no context
+   decision written back. What the conversation gains is the answer, which the
+   agent server records as a message.
+3. **Every failure is a message.** A turn that raises still has an answer to
    deliver.
-4. **Background work inside a task is refused.** The task loop runs one turn and
-   has no second turn for a background result to arrive in.
+4. **Background work and a nested task are the prompt's rule.** A task runs one
+   turn and has no second turn to receive a result from `_async` or from another
+   task; the opening template tells the model not to use either, and the tool
+   list is not filtered.
 5. **`finished` means delivered.** A task's answer is its product and no copy is
    kept (§9.3), so a task whose answer reached no window is `failed`; the status
    can be trusted to mean what it says.
 
-A task runs one turn, so it makes one rebuild; zero would make it the one turn in
-the system whose context nobody decided. It runs with the agent's system prompt,
-model, tools, and context decision. Its opening message is the shipped
-`agent_task.j2`: it says nobody is waiting, nobody can answer a question, the
-message sent when the task stops is the whole of what comes back, and background
-work or a nested task is refused. It does not have the turn that started it,
-because `restore` reads the stored turn list and a turn is written only when it
-ends; the description must restate the last exchange.
+**The maker is a conversation, not an agent name.** `agent_task_start` reads the
+caller's whole `(agent, subagent)`, and that pair is the identity every hop the
+task makes carries: the prompt (`system.j2` for an agent, `subagent.j2` with the
+role for a subagent), the model (the agent default or the subagent's record), the
+context restored and rebuilt, the plan, and the tools' binding. A subagent that
+starts a task is asking for a turn of *its* conversation; one that ran on
+`(agent, "")` would be standing in for somebody else. A subagent's task whose
+record is gone fails instead of running: a directory without `subagent.yaml` is
+not a conversation, and restoring it would recreate the record-less directory
+that blocks the name for both subagent tools.
 
-A task may start another task, because the tool set is one catalogue and nothing
-filters it. `agent-task.max_running` bounds concurrency, not total work over
-time.
+A task runs one turn, so it makes one rebuild; zero would make it the one turn in
+the system whose context nobody decided. That rebuild is **private**: the task's
+`_context_rebuild` runs at its first boundary on the clone `restore` read and
+publishes nothing, so a task cannot move the conversation's live-context list;
+the list a restart replays is the principal's. It runs with the maker's system
+prompt, model, tools, and its own context decision. Its opening message is the
+shipped
+`agent_task.j2`: it says nobody is waiting, nobody can answer a question, the
+message sent when the task stops is the whole of what comes back, and it tells
+the model not to use `_async` or start another task because there is no later
+turn to receive the result. It does not have the turn that started it, because
+`restore` reads the stored turn list and a turn is written only when it ends;
+the description must restate the last exchange.
+
+**The four live-conversation tools are the task's own.** `_check_new_input`,
+`attach_image`, `_turn_compact` and `_context_rebuild` act on a live turn's
+message list — and a task is a live turn, but not the one in the agent server:
+the same conversation id, a different list, in a different process. So their
+declarations stay the hub's and their bodies are the task's: `_check_new_input`
+answers "nothing waiting" (a task has no inbox and no harness cut-in),
+`attach_image` injects into the task's own single user message, the rendered
+description, so the picture is on the task's next model call, `_turn_compact`
+compacts the task's own view (its `turn.hidden`) and never the agent server's
+loop, and `_context_rebuild` edits the task's clone with `publish=False`. The
+task also runs the same automatic passes as an agent server turn — the rebuild
+at its first boundary, and its own `compact.due` against
+`turn.live.last_usage` and the task's window — because a task is one turn and
+records nothing: a turn that overflows has no next turn to recover on. Both
+servers reach the same rule and the same failure sentences through
+`TurnRuntime.rebuild_arguments` / `compact_arguments`; only the state they adopt
+the answer into is theirs. The agent
+server refuses a call that names a turn other than the loop's running one, and
+the hub forwards the caller's turn token so that is decidable.
+
+A task's prompt tells it not to start another task — the same one-turn rule
+that makes `_async` pointless. `agent-task.max_running` bounds concurrency, not
+total work over time.
 
 The answer is delivered as a message on the `agent-task:<name>` channel, with an
 `[AgentTaskResult:{…}]` marker. **A task is `finished` only when its answer
 reached a window**: if no window is showing the conversation, it ends `failed`
 and the log records why — the answer is the product, and an answer nobody
-received is not a finished task.
+received is not a finished task. A subagent has no window of its own (§4.5), so
+a subagent's task answer is delivered to its agent's window; the channel and the
+marker name the task it came from.
+
+**A task can be watched while it runs.** The task server's management tool
+`watch(name)` is the same read a subagent's conversation has (§4.5.6): an empty
+`Snapshot` with the agent's plan (a task stores no turns), a `TaskBrief` with
+the description it was given, the one turn's events from its start, and
+`Closed` with its ending. A stopped task is answered with the brief and the
+sentence its ending carried; a name the registry no longer holds is a refusal.
+The turn publishes through the shared watch hub, so a watcher that joins
+mid-turn is handed the events already produced. Watching starts no turn, spends
+no model call, and never changes the `finished` rule.
 
 **The acknowledgement is the write, not the record.**  `finished` means the
 window took the answer: `hand_over` returns when the words are on their way down
@@ -1939,7 +2487,11 @@ one-shot. The schedule's definition and ledger are the feature.
 `schedule/expressions.py` is the only module that knows cron. It owns the
 timezone policy and the error contract: `day_or` makes restricted day-of-month
 and day-of-week a union, and `strict` cross-field validation rejects `0 9 31 2 *`
-before it is stored as an enabled task that can never fire.
+before it is stored as an enabled task that can never fire. The expression is
+five fields — minute granularity — because the poll's fire window nudges its
+reference by one second, a step a six-field (seconds) cron would cross into a
+future-dated fire; croniter accepts those forms, so the field count is checked
+here rather than left to it.
 
 The data model is three SQL tables — `meta`, `scheduled_tasks`, and
 `scheduled_runs` — holding a task (name, description, cron expression), a run
@@ -1963,7 +2515,15 @@ back remains `pending`, and the next start's sweep closes it — `missed` if it
 never started, `failed` if it had. A fire follows the wall clock of its task's
 timezone; a repeated local hour is the same fire only if its wall-clock reading
 equals the anchor's, because comparing instants alone would fire twice in a
-fall-back hour.
+fall-back hour. The `next_run` a listing prints applies the same rule: a
+fall-back repeat whose first occurrence is at or behind the anchor is skipped,
+so the row never promises a fire the poll will not run.
+
+The anchor is a compare-and-set in the ledger's own update: a fire whose instant
+is not later than the stored `last_due` leaves it alone, so two concurrent fires
+cannot move it backwards. A stored anchor that is not a time
+(`julianday(last_due)` is NULL, from a hand-edited ledger) is replaced by the
+next fire rather than raising, because nothing else could ever move it again.
 
 The ledger is one file per agent. The shared process finds agents by walking
 `agents/*/schedule.db` across every known home; a ledger carries the home it came
@@ -1975,11 +2535,15 @@ nowhere to go, and the instance that comes up later decides whether to backfill
 the run with `schedule_run_now(name, due_at)` or close it with
 `schedule_run_skip`. One that is there is started directly as an ordinary agent
 task (`agent_task_start`); the schedule plugin is the caller, so it receives the
-task id and its poll can close the run when the task ends. No turn is opened and
-no model call is spent — a trigger turn would ask a model to press a button the
-plugin can press itself, and a model that did not press it would leave the run
-`pending`. An agent-task plugin that cannot come up is a scheduler that cannot
-run, and the launch order reflects that dependency.
+task id and its poll can close the run when the task ends. The task is named for
+the run — `<schedule task>@<due time>` — because the agent-task plugin files a
+task by its name: the due time is the ledger's own identity for the run, so two
+overlapping runs of one task are two tasks rather than one name answering for
+both endings. No turn is opened and no model call is spent — a trigger turn
+would ask a model to press a button the plugin can press itself, and a model
+that did not press it would leave the run `pending`. An agent-task plugin that
+cannot come up is a scheduler that cannot run, and the launch order reflects
+that dependency.
 
 The clock is a poll, not a timer: a fire is noticed on the next pass — up to
 `pacing.schedule_poll` (30 s) after its due moment — and a finished run is closed
@@ -1989,7 +2553,12 @@ on the next pass after its task ends.  `ran_at` is still the task's own
 Tasks fire only while slife2 is running. On startup, the sweep closes runs left
 open by a stopped process — a run with no task was never started and is
 `missed`; one that names a task is `failed` — and the poll records the newest
-missed fire for each task. A missed or failed run can be re-run with
+missed fire for each task. A run caught inside the dispatch round trip carries a
+dispatching marker written before the peer call; the sweep resolves it against
+the agent-task plugin by the run's name (`<schedule task>@<due time>`): a
+running task is adopted, an ended one supplies the ending, and one the plugin
+does not hold is `failed`, because the call was reached and the ledger cannot
+say what came of it. A missed or failed run can be re-run with
 `schedule_run_now(name, due_at)` or closed with `schedule_run_skip`. Nothing
 announces it; the ledger holds the answer.
 
@@ -2021,16 +2590,43 @@ to an agent with no window is refused by name (`NO_WINDOW`).
 - **Markers are stripped for display** by the reader that knows the vocabulary.
 - **The channel prefix is decided in one function.**
 - **A tool call is drawn as a line with its argument.**
-- **Harness lines come from one place** (`tui/notes.py`).
+- **Harness lines come from one place** (`libs/harness/notes.py`), a library's
+  rather than the terminal's: a daemon that composes a presence line must not
+  import the window's package, and the window imports the library like any other
+  reader.
+- **Widgets are mutated only in Textual's message pump.** A callback from a
+  transport — the inbox's push, the progress stream — posts a `Message` and never
+  draws: a widget written from the transport's task can jump ahead of deltas
+  already queued, so a harness line lands above text streamed before it.
 - **A tool panel has four states**: `running`, `done`, `error`, and
   `interrupted`. `interrupted` is about the turn rather than the call: the turn
   ended, was cancelled, or failed while the window was waiting, so no result
   exists and none is coming.
+- **The plan is a strip above the prompt**, hidden when empty. It is read once
+  with the opening history — a watcher reads it from its `Snapshot` — and
+  updated by a `plan_write` call that succeeded. Its four statuses are the
+  model's claims, not the harness's measurements, so `done` is not drawn in the
+  colour a tool panel's verified result wears. A plan longer than the strip's
+  cap scrolls inside it.
+- **A question is a strip above the plan**, not a row in the transcript: an
+  undecided picker (`Ctrl+S`, `Ctrl+O`) is current state, so it stays fixed
+  while the loop keeps writing, and both strips stay visible. The choice writes
+  no line of its own: `Ctrl+O` opens the watch screen, whose header names it,
+  and `Ctrl+S` ends in the server's note; `Esc` is silent. A list longer than
+  the strip's cap scrolls inside it, with the cursor row kept in view. Only one
+  question is open at a time; the other key is ignored until it is picked or
+  `Esc`ed.
 - **A connection has two states on screen**: online and offline. The reasons
-  live in the status tool.
+  live in the status tool. A turn that dies at the transport puts the bar
+  offline — the client's link is what it reports, not the exception — while a
+  refusal that left the link up is the transcript's error alone.
 - **The status bar's `tools` count is loaded/total**, both from the hub's answer
   to one ask. A tool nobody has loaded is still a tool that exists. The window
   replaces both with the pair the last model call was built from.
+- **The status bar's context figure is the last model call's**, reported by
+  `UsageReported` as each call ends and settled by `TurnFinished`. It follows a
+  turn's calls rather than waiting for the turn to end, and it is never the
+  turn's bill.
 - **Model output is plain text.** Nothing a model produces is parsed as markup.
 - **A restored conversation is the server's.** `transcript` is read once when the
   window opens; the window keeps no copy. A failed read is not an empty
@@ -2048,6 +2644,14 @@ error: the turn may have ended a moment earlier. A refusal mounts no tool panel,
 because a panel that appeared and then said "denied" would tell a reader the tool
 ran.
 
+**A request nobody was told about is a refusal, not a wait.** A progress event
+that cannot be written means no client saw the question, and a client that hears
+it and never answers is bounded by the approval deadline; both refuse the call
+and leave the turn running. The row is mounted on the screen in front, so a
+watch screen does not hide the question it covers. **A turn's end settles the
+row it left pending** — a finish, a cancellation and a failure alike — because
+no turn is left to answer it.
+
 ### 10.4 Interface language
 
 The terminal is bilingual: English and Chinese. It is the only bilingual part of
@@ -2060,7 +2664,8 @@ the system. Detection is the operating system's answer, read once at import:
 4. Any detection failure degrades to English.
 
 `--lang` overrides detection and is applied before anything is built. The
-translation layer is one accessor over a two-language table (`tui/i18n.py`);
+translation layer is one accessor over a two-language table
+(`libs/harness/i18n.py`), shared with the harness lines a daemon composes;
 there are no catalog files and no dependency. A missing key or placeholder raises
 at the call site rather than rendering a blank slot.
 
@@ -2107,6 +2712,7 @@ answer to everything folded into that turn, so no assistant text can be
 attributed to one injected prompt. The TUI road therefore asks through a task's
 named delivered message, and the A2A road's `task_response` is the per-request
 completion.
+
 ## 11. Configuration and environment
 
 ### 11.1 Configuration file
@@ -2116,22 +2722,26 @@ One `slife2.yaml` inside a home. Its sections are the system's vocabulary:
 | Section | Reader |
 |---|---|
 | `servers:` | The launcher, every plugin, the terminal, and the CLI |
-| `providers:` | The agent server (reference resolution, and the list `Ctrl+S` reads at the key), model backends, and the terminal (the status bar's model facts) |
-| `default:` | The agent server |
+| `providers:` | The agent server (reference resolution, including `providers.default:`, and the list `Ctrl+S` reads at the key), model backends, and the terminal (the status bar's model facts) |
 | `agent:` | The agent server and agent-task server |
 | `agent-task:` | The agent-task server |
 | `subagent:` | The agent server and the local network plugin |
-| `embeddings:` | The context store, the cabinet, and the tool hub |
+| `embeddings:` | The context store, the cabinet, and the tool hub; `embeddings.default:` selects the provider |
 | `context:` | The context plugin |
 | `tool_load:` | The tool hub |
-| `tool_result:` | The harness, the cabinet's `dump_read` and `dump_grep`, and the media server |
+| `tool_result:` | The harness, the cabinet's readers and `dump_read`/`dump_grep`, and the agent-task turn's cut |
 | `mcp:` | `slife2-mcp-tools`, and the tool hub for its source names |
 | `rest-api:` | `slife2-restapi-tools`, and the tool hub for its source names |
 | `cli:` | `slife2-cli` |
 | `skills:` | `slife2-skills` |
 | `media:` | `slife2-media` |
-| `file-tunnel:` | `slife2-file-tunnel` |
+| `file-tunnel:` | `slife2-file-tunnel`; `file-tunnel.default:` selects the provider |
 | `peer_agent:` | `slife2-a2a`, the terminal, and the CLI |
+
+`default:` is a key of the section it chooses from — `providers.default`,
+`embeddings.default`, `file-tunnel.default` — and never a section of its own.
+It names the one entry a feature runs on: a model reference, an embedding
+provider, a tunnel provider.
 
 Every section has one owner, and that owner reads the section in full. A value
 another process also reads is a shared fact, stated rather than accidental: the
@@ -2160,9 +2770,27 @@ file mentioned, and the built-in local embedder was an endpoint the file never
 named; both are gone.
 
 A present but invalid section is refused by name at load: an unknown provider, an
-unknown `api`, a port that is not a port, a `servers:` host that is not a host,
-or a switch written as anything other than `true` or `false` (YAML 1.2 made `no`
-and `off` plain strings).
+unknown `api`, a port that is not a port, a `servers:` host that is not a host or
+not loopback, or a switch written as anything other than `true` or `false`
+(YAML 1.2 made `no` and `off` plain strings). **A key no reader takes is refused
+too**, including in the hand-written sections: a misspelt `max_iterations`
+loaded as "no cap", and a silent ignore is the one behaviour the loader's own
+error class says it must not have. An `mcp:` entry may name only the fields of
+its own transport (`command`/`args`/`env`/`cwd` for stdio; `url`/`headers` for
+http), and an `mcp:` or `rest-api:` name may not be `skills`, `cli` or `job`:
+those are the document sources' names, and an entry under one would shadow the
+source in the hub. An empty value of a required entry key is the same absence
+as leaving it out.
+
+**Loopback is the security boundary, and it is a check.** Every plugin is
+unauthenticated Streamable HTTP, so `servers.<name>.host` takes `localhost`, a
+`127.0.0.0/8` address, or the loopback IPv6 address `::1` only, and a
+hand-started server's `--host` is refused the same way before it binds: a bind
+beyond this machine would let the network call `job_set`, `mcp_set` and
+`model_set` — arbitrary code and configuration edits — with no credential. A
+non-loopback IPv6 address is refused like any other host beyond the machine; an
+IPv6 host in a URL is bracketed (`http://[::1]:24000/mcp`), because a bare
+literal beside a port is not addressable.
 
 The file is read per turn for everything a conversation can see, and cached by
 identity: a reader asks whether an edit happened with one comparison rather than
@@ -2170,20 +2798,8 @@ a watcher or a lock.
 
 ### 11.2 Secrets
 
-A value may be a literal; `${VAR}`, resolved through the shell environment, then
-the OS keyring, then credstore's encrypted backup; `${VAR:-default}`, with a
-literal default; or `keyring:<service>/<key>`, resolved against the OS keyring
-and then the encrypted backup.
-
-**The encrypted backup is the keyring-less half of the store.** credstore's
-Python API reads the OS keyring only and answers `None` in cryptfile-only mode,
-which is what a container is: Docker blocks `keyctl`. When
-`CREDSTORE_MASTER_PASSWORD` supplies the password, slife2 reads the backup
-directly (`CREDSTORE_FILE`, else `~/.credstore/credentials.crypt`). No password
-is no fallback: the backup stays locked and the chain steps past it. A password
-that does not decrypt the file is a refusal that raises where the secret is
-resolved, not an absent credential. The password is registered for output
-masking.
+A value may be a literal, used as written; or `${VAR}`, resolved through the
+shell environment, then credstore's OS keyring.
 
 **Output protection covers credstore's values, and only those.** A credential
 resolved from credstore is registered in the resolving process and masked in
@@ -2195,12 +2811,18 @@ not registered. An environment variable or a literal in the config is the
 operator's; protecting every secret was attempted, and the variety of shapes made
 it a maintenance burden.
 
-Resolution is lazy: a process nobody calls never touches the keyring. An
-unresolved reference is left verbatim, so the failure lands where the name can be
-stated. `config.unresolved_reference` is the single reader of "this is still a
-reference"; a reference MUST NOT travel as the secret. A keyring that is
-installed and refuses is an error, not "not found". A credential the store does
-not hold is a `ConfigError` naming the reference and the command that stores it.
+Resolution is lazy: a process nobody calls never touches the keyring, and the
+loader defers every `${VAR}` in a tool server's `env:`/`headers:`, a `rest-api:`
+entry, a tunnel's options and a `skills:` entry. The process that consumes the
+value resolves it — the gateway when it dials, the skills plugin when it hands a
+playbook over — so a locked keyring fails the one call that needed the value
+rather than every config load on the machine, `slife2 down` included. An
+unresolved reference is left verbatim, and the consumer decides: a provider or
+media call refuses before use; a tool server's entry is left out of the
+connection with a warning, so an absent variable reaches a child that knows how
+to handle one; a skill reports it missing. `config.unresolved_reference` is the
+single reader of "this is still a reference"; a reference MUST NOT travel as the
+secret. A keyring that is installed and refuses is an error, not "not found".
 
 ### 11.3 Data directory
 
@@ -2232,7 +2854,7 @@ It contains:
                 external stdio entry (plus a rotated <log>.1)
   locks/        per-endpoint start locks
   agents/       agent-name claims
-  clients/      which clients use the shared servers, and their home
+  clients/      which clients use the shared servers (pid, agent, start token)
   homes/        data directories this machine has used
 ```
 
@@ -2288,16 +2910,18 @@ its log. The server's own first line names its address, pid, data directory and
 config, and a line at shutdown closes the run.
 
 **Logs are for tracing, so every line is placed.** The format is
-`time level logger: [agent/subagent] message`. The conversation is established by
-`TraceMiddleware` from the call's `agent`/`subagent` arguments, carried in a
-`contextvar`, and put on every record by `TraceFilter`. A line outside a call has
-no prefix. The prefix names the conversation the call is *about*; for the a2a
-send tools that is the recipient, not the caller.
+`time level logger: [agent/subagent turn=<token>] message`. The conversation is
+established by `TraceMiddleware` from the call's `agent`/`subagent` arguments and
+the turn from the call's `_meta` (`audience.TURN`); both are carried in
+`contextvar`s and put on every record by `TraceFilter`. A line outside a turn has
+no token, and a line outside a call has no prefix. The prefix names the
+conversation the call is *about*; for the a2a send tools that is the recipient,
+not the caller.
 
 One line is written per turn on every ending — success, failure or cancellation:
 
 ```text
-turn_done agent=… subagent=… turn=… model=… stop=… iterations=… \
+turn_done agent=… subagent=… turn=… token=… model=… stop=… iterations=… \
 prompt_tokens=… completion_tokens=… cache_read=… cache_creation=… \
 messages=… elapsed=…
 ```
@@ -2305,6 +2929,13 @@ messages=… elapsed=…
 `prompt_tokens` and `completion_tokens` are the bill's two halves; `cache_read`
 and `cache_creation` are its breakdown, so a cache-hit ratio is read from this
 one line. A cancelled turn reports the model calls that completed before the cut.
+
+`token` is minted when the turn starts, before the turn writes anything, and
+travels on every hop's `_meta`; every process's lines for that turn carry it in
+their prefix. `turn` is the stored row's rowid, which exists only once the row
+lands — a cancelled turn can have `turn=-` and still have a token. Reading one
+turn across the agent, context and model logs is therefore a grep for its token;
+`turn_done` is where the token and the rowid are joined.
 
 One line is written per **foreground** tool call:
 `tool_call name=… ok=… elapsed_ms=… result_chars=…`. Arguments and result text
@@ -2327,14 +2958,22 @@ its entry.
 ### 11.8 Configuration edits
 
 A model may edit the sections it can read. Every management tool writes through
-`libs/host/configfile.py`, the single writer described in §4.1; the result is
-validated by the same loader a start uses, and a refused entry is restored.
+`libs/host/configfile.py`, the single writer described in §4.1; the rendered
+document is staged beside the file and validated by the same loader a start
+uses before it is published, so a refused entry is never written. An atomic
+swap waits briefly for a Windows reader that holds the destination open rather
+than failing the edit; a destination that stays locked still raises.
 
 A `set` writes the whole entry, not a patch. A field left out is a field the
 entry does not have, which is what makes switching an entry from `url` to
 `command` possible. `set_enabled` changes one field and reads the entry first. A
 write preserves an existing file's mode; a mode that cannot be preserved is
 logged rather than silently tightened.
+
+**A section's explanation is written above the section key.** A comment above the
+section's first entry belongs to that entry, and goes with it when the entry is
+removed. ruamel keeps both in one slot, so the file follows this convention and
+the writer reads the two positions as the two things.
 
 The model configuration is live: the agent server resolves a reference per turn.
 `model_switch` is the one edit that moves the current conversation; a turn in
@@ -2352,7 +2991,14 @@ program slife2 will start; the write is legible but not gated. The model's
 a chat API that cannot read the machine's disk. The plugin holds a registry of
 token to file, pinned to the file's device, inode, size, and modification time. A
 link stops working when the file changes, when `unexpose_local_image` is called,
-or when the process exits. A share outlives the turn that made it.
+or when the process exits. A share outlives the turn that made it. A link belongs
+to the conversation that exposed it: two conversations exposing one file hold two
+tokens, each revocable only by the one that made it. A relative `path` is
+resolved against the caller's data directory — where the agent's own tools run —
+not against the daemon's working directory, which is the reconstructible runtime
+directory. The response is built from an open handle: the pin, the length and
+the bytes served are one observation of the file, so a file replaced while a
+request is in flight is never served under the old token.
 
 Three providers are supported:
 
@@ -2374,10 +3020,20 @@ a heal window before being respawned. A stop that lands while a start is
 establishing the transport invalidates that attempt: the worker releases whatever
 it established instead of publishing after `stop` returned.
 
-The tunnel publishes the MCP endpoint as well as `/share/{token}`. Any caller who
-knows the hostname can call `expose_local_image` and read any file the process
-can read. What stands between that and a stranger is the hostname's entropy;
-closing it properly requires an authorization story MCP does not carry here.
+**An inherited URL is another process's tunnel.** `SLIFE2_FILE_TUNNEL_URL` makes
+the URL active and leaves it alone (Appendix C), but its share listener is the
+other process's, and this process's tokens are not in that listener's map —
+`expose_local_image` refuses rather than handing out a link that answers 403.
+The process that owns the tunnel is the one that can expose a file. Load and the
+health monitor therefore start nothing for an inherited URL and never write the
+variable the parent passed down.
+
+The tunnel is pointed at a loopback listener that serves `GET /share/{token}`
+and nothing else, on a port of its own; the MCP endpoint keeps
+`servers.file-tunnel.port` and is not on the public hostname. A tunnel forwards
+a port, not a path, so this is what makes the published surface the one route:
+`/mcp` on the tunnel's URL is a 404. The 30-hex-character token is the whole
+capability.
 
 ### 12.2 Media
 
@@ -2391,11 +3047,18 @@ load, naming the `media.defaults.<kind>` line. It is not replaced by the first
 model of the kind: a default is the operator's statement, and a typo must not
 spend a paid call on a model nobody named.
 
-Artifacts are written under the conversation's work directory: the agent's
-`media/`, or a non-fork subagent's `subagents/<name>/media/`. A fork writes to
-its maker's. They never go to the process's working directory, which is the
-runtime directory and reconstructible. `folder=` is contained inside that root;
-it is a model-written string.
+Artifacts are written under the conversation's work directory by default: the
+agent's `media/`, or a subagent's `subagents/<name>/media/`. A caller that names
+an `output` path writes there instead
+— a relative path is relative to that directory, an absolute one is used as
+written. They never go to the process's working directory, which is the runtime
+directory and reconstructible. **An `output` file is replaced only by a complete
+artifact**: a generated artifact is renamed onto it from the same directory, and
+a transcript is written beside it and renamed over it, so a failed write leaves
+the file that was there whole. The file-to-file pair is `transcribe_audio`
+(audio `input` → transcript `output`, or the text when omitted) and
+`text_to_speech` (a text file in `input` when `text` is empty → the audio
+`output`). Every media tool answers with the path as text.
 
 Two adapters are supported: `dashscope-aigc` (images, video, speech,
 transcription) and `openai-images` (image generation only; it refuses the other
@@ -2434,6 +3097,10 @@ Consumers read values at call time, never into a module constant or a def-time
 default, so a test can patch one. `validate()` asserts the relations that fail
 silently, such as an outer bound shorter than an inner one, and fails at import.
 
+A retry policy is one `Retry` in `pacing`, driven by one `Backoff`: the pause
+grows from `base` to `cap`, and a run of failures is cleared by exactly one
+event — an attempt that did not fail. Nothing else resets a run.
+
 A gate (`tests/test_no_magic_timeouts.py`) rejects a time-style literal anywhere
 in `slife2/` unless it is in the registry or carries a `# timeouts:` note. In
 `tests/` only two rules apply: a module-level constant with a time-style name,
@@ -2442,9 +3109,10 @@ and a registry lookup used as a function-argument default.
 ### 12.5 Daemons outlive builds
 
 Reuse is by identity: the launcher attaches to whatever answers to the expected
-name. A daemon from a previous build can answer the name check and still have the
-old tool signatures, so every turn fails until the stack is restarted. `slife2
-down` is the remedy. A rename of a server or a tool must be accompanied by a
+name and this build's version. A daemon from a previous build answers the name
+and still has the old tool signatures, so the handshake's version is what says
+it is not this build; `ensure` then refuses the port and names `slife2 down`,
+which is the remedy. A rename of a server or a tool must be accompanied by a
 stop.
 
 An internal wire carries no compatibility path for a previous build. A progress
@@ -2459,7 +3127,8 @@ logic that hides the version mismatch instead of reporting it.
 The layering rule is stated in §2.5. Its purpose is that a module's kind is
 visible from its path: a reader who wants the loop opens `libs/turn/loop.py`; a
 reader who wants the process that runs conversations opens
-`plugins/agent/server.py`. The cost is one more directory level.
+`plugins/agent/server.py`, and the conversations it runs are `core.py` beside
+it. The cost is one more directory level.
 
 Every process in the tree is described outside it by one row of `PLUGINS`, which
 holds its name, probe, and port. `pyproject.toml`'s console scripts are the third
@@ -2479,6 +3148,13 @@ window and mesh clients, and factories (`upstream_server`, `plugin_transports`,
 `config_file`). A test module MUST NOT import another test module for a fixture;
 that is how two lanes end up disagreeing about the shape of a double.
 
+The e2e lane's own edges live in `tests/e2e/edges.py` — the stub provider, the
+iLink bridge, the MQTT broker, and the terminal the stack hands messages to —
+and `tests/e2e/conftest.py` holds the fixture that starts the stack every
+scenario is handed. They are apart from `tests/fakes.py` because they bind
+ports and start threads: a fast-lane test that reached for one would have left
+its lane.
+
 ### 13.3 Test lanes
 
 | Lane | Command | Contents |
@@ -2486,7 +3162,7 @@ that is how two lanes end up disagreeing about the shape of a double.
 | Fast | `uv run pytest` | Unit and integration tests, every module, across cores. Excludes `e2e`. No API key, no running server, no fixed port. |
 | Unit | `uv run pytest -m unit` | Fast, isolated unit tests. |
 | Integration | `uv run pytest -m integration` | Tests that bind a socket or spawn a process. Each binds an ephemeral port. |
-| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: the daemons, a real launcher, a configuration on disk, and a stub OpenAI-compatible provider. |
+| End-to-end | `uv run pytest -m e2e` | The whole stack as processes: the daemons, a real launcher, a configuration on disk, and the three external edges — the model provider, WeChat's iLink bridge and the MQTT broker — stubbed at their own protocols. |
 
 The fast lane drives servers over FastMCP's in-memory transport: real MCP
 messages and real progress notifications, with no port bound.
@@ -2497,10 +3173,19 @@ model's tool call is routed by the hub to the plugin process that owns it, the
 answer arrives both as a result and over the progress channel, and the
 conversation is still there for the next turn.
 
-The model is the only thing faked in either lane, and it is faked at its own
-protocol boundary: a stub backend in the fast lane, a stub HTTP endpoint in the
-e2e lane. A change to what the system does with a model cannot pass unseen by
-changing only the fake.
+**Every way work arrives without a person typing has a scenario there**: a
+WeChat message the bridge serves, a task a peer publishes to the mesh, a
+scheduled fire the clock starts, and a subagent's turn a watch reads while it
+runs. Each starts from the same fixture, the same config and the same data
+directory shape, so the channels are proven against one stack rather than four
+arrangements of it.
+
+The model is faked at its own protocol boundary in both lanes: a stub backend
+in the fast lane, a stub HTTP endpoint in the e2e lane. The e2e lane stubs the
+other two external edges the same way — the iLink bridge at HTTP and the broker
+at MQTT — and nothing in between is faked at all. A change to what the system
+does with a model, a bridge or a broker cannot pass unseen by changing only the
+fake.
 
 ### 13.4 Static checks and CI
 
@@ -2512,27 +3197,18 @@ CI runs on Ubuntu, macOS, and Windows with Python 3.13: a wheel build, an
 assertion that the interpreter can load SQLite extensions, lint and format
 checks, type checking, the fast lane, and the e2e lane.
 
-The suite is the gate. Both lanes pass before a change is done. A bug found in
-the field arrives as a test that fails without the fix.
+The suite is the gate; both lanes pass before a change is done (Appendix A,
+invariant 13).
 
 ## 14. Open issues and deferred capabilities
 
 ### 14.1 Open issues
 
-1. **A scheduled run and the task that runs it.** A run is tied to its task by a
-   name-derived id, which is not unique across two overlapping runs of one task.
-   The poll and `schedule_run_now` settle a finished run before starting another;
-   *an id minted per run* is still the deeper fix.
-2. **Where a retry policy lives.** Two channels keep their own backoff and reset
-   it on different events. *Resolution would require:* one policy in
-   `helpers/timeouts.py` and one reason to reset.
-3. **A model call that ends the turn with an empty answer.** The wire is checked
-   at the hop, but a provider that legitimately answers with nothing has the same
-   shape. *Resolution would require:* deciding whether an empty answer is a
-   verdict or a failure, and stating it once.
-4. **Correlation across processes.** A log line carries `agent/subagent`, and a
-   turn line carries the turn id, but the id is not sent on the model or context
-   hops. *Resolution would require:* the turn id in every hop's `_meta`.
+None. The whole-codebase audit (2026-11-17) is closed: its design changes were
+made on 2026-11-18, and each resulting rule now lives where its subject does. A
+new issue whose fix is a design change is recorded here with what it costs and
+how the current code behaves, rather than carried as silent debt. The order is
+roughly by severity.
 
 ### 14.2 Deferred capabilities
 
@@ -2540,25 +3216,41 @@ The following are not implemented in this version:
 
 | Capability | Why deferred | Current behavior |
 |---|---|---|
+| Durable inbound WeChat messages | The bridge re-serves a batch only until its ack cursor advances; holding one without a durable queue would re-run every already-delivered message on reconnect, and that queue is a capability of its own. | The cursor advances before the hand-over, and a message past `MAX_INFLIGHT` is dropped for good; a redelivery is deduplicated only for `pacing.wechat_dedup` (30 s). |
 | Durable interrupted tasks | The continuation state is process-local, like the bridge and reply topic; the profile does not require persistence. | A restart loses a paused task; the peer can cancel or re-send. |
 | Markdown rendering | A taste decision about the transcript, not a system gap. | Model output is plain text. |
 | Delta coalescing | One progress notification per token is acceptable on loopback. | One progress notification per token is sent. |
-| The pass behind the context ceiling | The selection is bounded by construction. | A very large turn can exceed the ceiling until the next selection. |
-| A cap on total agent-task work | `max_running` bounds concurrency; a rate or depth is the missing number. | Total work over time is unbounded. |
+| A cap on total agent-task work | `max_running` bounds concurrency; a rate is the missing number. | Total work over time is unbounded. |
 | A cap on the number of conversations | The inbox is capped; the number of loops is not. | A client can create conversations without a machine-wide limit. |
-| A visible agent-task progress line | The four tools are the model's; the window has no line for a running task. | A person's only lever is to ask the model. |
-| A word to the model about the loaded set | The tool descriptions explain themselves. | A model may not use loading unless it reads them. |
 | A cap on scheduled tasks | A cron is bounded by time; a runaway is many rarely firing tasks. | `schedule_list`/`schedule_remove` make it visible and stoppable. |
-| A word to the agent about unclosed runs | The ledger holds the answer; nothing has watched one go unnoticed. | The agent must think to call `schedule_runs`. |
-| Background work inside an agent task | A task runs one turn and has no second turn for a result. | `_async` is refused with an explanation. |
 | A conversation id on the turn record | Adding a column means deleting every existing `turns.db`. | No per-turn conversation id is stored; the file name is the id. |
-| The window wire in a library | The vocabulary lives in the terminal plugin; moving it is a layering repair. | `libs/harness/handover.py` imports a server module. |
 | One config reader | Three readers differ in wording for real reasons. | A reader may not recognize the same problem twice. |
 | Selective re-embedding | Per-row content hashing would keep unchanged vectors across a rules change. | A model change re-embeds every row. |
 | A cross-encoder rerank for the catalogue and cabinet searches | The context recall is the one whose bad candidate persists into every later turn; both searches are one-shot reads the model can repeat, and their pages order words-first on purpose. | Both use RRF and keep that page order; the cross-encoder (`rerank_model`) is wired to the context recall only. |
 | A policy that forces approval | The model-driven `_approve` exists; a named list does not. | `skill_set` and `mcp_set` rely on model judgment. |
 | Device-code OAuth for tool servers | `${VAR}` headers cover a token somebody already has. | A server that needs a browser login cannot be configured. |
 | A bound on tool-call arguments | Arguments are the model's own words; shortening them is a different problem. | A model can write an unbounded argument into the conversation. |
+| Stopping a server started elevated | `taskkill /F /T` opens the target with `PROCESS_QUERY_INFORMATION`, which UAC refuses across integrity levels; the alternative — a Toolhelp walk with `TerminateProcess`, which needs only `PROCESS_TERMINATE` — is a second kill path rather than a flag. | Each such server reports `pid N did not exit; the record is kept`, and a `down` run at the server's integrity is what can still find and stop it. |
+| Reaping a tool server's spawned processes | A process started through a tool server's own session (`desktop-commander__start_process`) is that server's: slife2 makes one MCP call and the call is over before the process ends, so nothing here holds a handle to it. A generic reaper would have to know which tool names spawn processes — one server's vocabulary inside the agent. | The process outlives the turn, the conversation and a subagent's removal; it ends with the stack, which stops the server's tree, or when the model kills it with the server's own tool. |
+
+### 14.3 Candidate capabilities
+
+The following are not scheduled. Each is a capability a mature agent harness
+carries, and the row says what it would add and what the system does without it.
+The order is a suggested priority.
+
+| Candidate | What it would add | Why it is worth doing |
+|---|---|---|
+| A question the person answers | An `ask_user` tool, and `_approve` routed to every channel that has a person: the window, WeChat, a peer. | Only the TUI can answer today; a WeChat or peer turn that asks is granted silently. Human-in-the-loop is the difference between an agent that checks a destructive step and one that performs it. |
+| WeChat media | Inbound image, voice note and file become an attachment, a transcription or a cabinet document; an outbound reply can carry an image or a file. | The bridge is text-only in both directions. The media server already transcribes and the cabinet already stores images, so the missing half is the bridge, not the capability. |
+| A spend budget | A `budget:` section (per turn, day or conversation), a usage ledger, and a hard stop. | Usage is measured per turn and logged, but nothing bounds it. On a paid model an unbounded loop is a bill. |
+| Scheduled catch-up | A per-task policy for fires missed while no instance ran, instead of a manual `schedule_run_now`. | Cron users expect anacron-like backfill; a laptop asleep at the due moment currently loses the run. |
+| Store-and-forward on the mesh | A durable per-member inbox and read cursor — MQTT persistent sessions with QoS-1 events, or an application-level store under the member's directory — so direct messages and group fan-out are held while a member is away, replayed when it returns, and acked so a replay is not answered twice. | An agent is absent whenever no window is showing it, which is ordinary rather than exceptional. Today a group message to an absent member is lost with no trace, and a `peer_agent_send_message` call ends as `unreachable` after the retry ladder, so the sender cannot tell "not heard" from "heard and not answered". WeChat holds messages for an absent recipient; the group's casual contract is the design question this raises, because a backlog needs a rule for what a returning member answers. |
+| Retrieval over files and dumps | Chunk and embed saved files and dumps so a search reaches their contents. | §8.3 leaves this out on purpose; documents are the largest corpus an agent saves and the one it cannot search by meaning. |
+| Sandboxed jobs | Run `jobs/` code in a child process with declared filesystem and network limits. | Jobs are arbitrary code with the caller's identity. Least privilege is the standard answer, and the plugin boundary already exists to carry it. |
+| Tool progress and cancellation | A long tool reports progress down its call; the window draws it and can cancel that call without ending the turn. | A long media or shell call is a spinner today, and the only lever is `Esc`, which ends the whole turn. |
+| Branch from a turn | Start a new conversation from any stored turn id, leaving the original intact. | Checkpoints are the standard undo an agent user expects; exploration and retry become possible without resetting the conversation. |
+| An eval lane | Recorded conversations, a provider fixture, and metrics for tool choice, recall and cost, run when a prompt, a tool schema or a model changes. | A stub model cannot catch a regression in what a real model chooses; eval-driven development is how the prompt and tool surfaces are changed safely. |
 
 ## Appendix A. Invariants
 
@@ -2634,24 +3326,27 @@ The four shapes an undeclared fallback takes:
 |---|---|---|---|---|
 | A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
 | A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
-| The context discriminator fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked (fails the turn) | The turn runs on its current list |
-| The conversation moved while a rebuild decided | Adopt the stored list; the decision is abandoned | The rebuild for that turn | A store that cannot take the write (fails the turn) | A warning naming the abandoned rebuild |
-| Tokenizer vocabulary cannot be fetched | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
+| The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked at restore (fails the turn) | The `_context_rebuild` pair, carrying the failure and the tool's error |
+| A selection is heavier than the prompt budget (`ceiling × (window - max_tokens)`) | Cut the oldest turns until it fits; a keep-all decision is not a no-op then | The turns the window cut | A single newest turn larger than the whole budget, which is also cut — the turn runs on its opening alone | The `_context_rebuild` pair's `fitted` count and `kept N of M` |
+| The selection decision fails, answers unreadably, or names an id the view does not offer | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, carrying the failure and the tool's error |
+| Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
 | A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
+| A catalogue hint cannot be asked (the hub's answer is unreadable) | The call keeps its generic "unknown tool" sentence | The catalogue's explanation and next step | A readable answer | An INFO line naming the name |
 | A turn fails with an image attached | Drop every image from the live list, keeping the note | The bytes in the live conversation | An image attached after the repair; the record, which never had the pixels | The note, the dropped-image sentence, and the original error |
 | Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
 | A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
-| A stored turn body will not parse | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
+| A stored turn body will not parse, or a message's shape is not one the reader can take | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
 | A stored `usage` breakdown will not parse, or is not the four-key shape | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
 | A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
-| A tool answer cannot be read | Return `{}` | The distinction at the shared hop | A payload that parses | The caller must check the keys |
+| A job's direct `call` answer is not a mapping (prose, a scalar, a malformed payload) | Read the content text; `data` is empty | The mapping distinction for a job call | A payload that parses as a mapping | The job's `text`, which the job author reads; `call_tool` still refuses a hub answer without `ok`/`text` |
 | A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
 | An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | A programming error, which propagates; bad rows, handled per pass | The error naming the path |
+| A stored anchor is not a time | Replace it with the next fire's instant | The damage itself — the old value is gone, and the fires between it and now are not replayed | A ledger that cannot be opened, which is skipped and logged | A warning naming the task and the old value; the new anchor; no row is invented for the gap |
 | A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
 | A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
 | A server-record or claim write fails | Log and continue | The record | A client record, which refuses the start | A warning naming the path |
-| A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | The writer's warning is the trace |
-| A subagent record cannot be read | Treat it as not a fork | The shared work directory a fork uses | A record that parses | A warning naming the record |
+| A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | A missing file is silent; a file that exists and cannot be read warns, naming the path |
+| A subagent record cannot be read | A list or a transcript reads it as absent and uses the defaults; a conversation that would run on it is refused | The model and role the record held, on the read paths; the turn, on the run path | A record that parses | A warning naming the record; the run's failure names the record and the reason |
 | A message has no readable role | Infer it from its shape: a tool result, an assistant tool call, else the user's | The role the sender wrote | A role this build knows | A warning naming the inferred role |
 | A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
 | No ancestor names this checkout | Use `~/.slife2` | The checkout's data directory | An override, which wins; a marker that cannot be read, which raises | A missing database or config |
@@ -2666,12 +3361,20 @@ The four shapes an undeclared fallback takes:
 | The post-turn trim cannot reach the hub | Skip the trim | The trim for that turn; the set stays over budget | The next turn, which fails loudly on a dead hub | A warning; an error for a task |
 | A bookkeeping file is already gone | Delete with `missing_ok` | The distinction between present and absent | An unlink that fails for another reason | A warning naming the path |
 | A log cannot be rotated | Leave it in place and warn | The ceiling | A log that is already gone | A warning naming the path |
+| A plugin's declaration refresh fails | Keep the sources it declared last time in the address book | Freshness of that plugin's sources | A plugin that answers with a changed list, which replaces them | A warning naming the plugin |
+| A mirrored document's file is gone | Index its row without a body; the readers refuse the file by name | The document's text in search and its read | A row that exists and a file that reads | A warning naming the row |
+| An inherited file-tunnel URL is present | Treat it as active and leave it alone | A liveness probe for a URL this process did not start | A URL this process started, which it probes and heals | `tunnel_status` |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
-| A trim answer cannot be read | Return `{}`; `trim_answer` refuses it | The trim and the names the model would have seen | A call that could not be made, which raises | A refusal in the server log |
+| A subagent turn's answer cannot be read | Log it and answer the caller with no text; the turn is not retried | The turn's text | A readable answer | A warning naming the member |
+| The window's `attached` answer cannot be read | Answer "the window could not be asked" (`None`), not "no window" | The true/false answer | A parsed `attached` value | A warning naming the agent |
 | Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | A debug line naming the link |
 | The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
 | An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
 | A continuation has no `messageId` | Compare the request text with the task's last text | Telling a re-minted retry from a continuation that repeats the text | A peer that sends neither an id nor text, which is indistinguishable from a retry | A debug line naming the peer and the task |
+| A catalogue's or cabinet's vector table is absent and **no index was ever recorded** (a corpus nobody has embedded under this model) | The meaning leg answers empty; the keyword leg still answers | The semantic half of that search until the index is built | A recorded identity whose table is gone, which raises or is reported (the turn store's `index_status`); a malformed, wrong-width or corrupt table, which raises | `sync`/`index_status` reports the incomplete index |
+| The async registry is over `MAX_ASYNC_TASKS` with only finished undelivered tasks left | Drop the oldest finished tasks, their unread results with them | The one copy of a background result nobody read | Running tasks (never dropped); delivered results (text already cleared) | `check_async`/`cancel_async` refuse the id, naming the drop as a cause |
+| `wslinfo --networking-mode` cannot run | Mirrored mode is guessed from `/sys/class/net/loopback0` | Certainty about WSL networking without `wslinfo` | A platform that answers (its answer is used) | The offset decision the guess feeds |
+| A WeChat login save fails at scan confirmation | Keep the in-memory login and start the poll loop; the next cursor write saves it again | The login's on-disk record until that write (a restart before then needs a new scan) | A save that lands (the normal path) | A warning naming the session file |
 
 Everything not in this register is a defect. A path that substitutes a weaker
 behaviour and is not here is an undeclared fallback. A fallback that stops being

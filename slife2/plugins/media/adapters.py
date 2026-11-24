@@ -54,30 +54,26 @@ logger = logging.getLogger(__name__)
 #: The artifacts' directory inside one agent's own.
 MEDIA_DIR = "media"
 
+#: How much of an error body a refusal quotes.  **A bound, not a guess**: a
+#: vendor's HTML error page is kilobytes of markup whose first line is the whole
+#: fact, and the rest is a context nobody should pay for.
+ERROR_CHARS = 500
 
-def media_dir(agent: str, subagent: str = "", folder: str = "") -> Path:
-    """Where an artifact goes: `work_dir(agent, subagent)/media[/folder]/`.
 
-    **Per conversation, with forks sharing their maker's.**  A non-fork subagent
-    owns its media; a fork is a temporary copy of its maker's conversation and
-    writes to the maker's directory.  **Contained**, which is not decoration:
-    `folder` is a model-written string, and `folder="../../.."` would be a model
-    choosing where on this machine to write a file.  Resolved before it is
-    compared, refused rather than rewritten — a silently corrected path is a
-    file somewhere other than where the model said
-    (`slife2.plugins.cabinet.store.resolve` draws the same line).
+def media_dir(agent: str, subagent: str = "") -> Path:
+    """Where an artifact goes by default: `work_dir(agent, subagent)/media/`.
+
+    **Per conversation.**  A subagent owns its media; the agent's own
+    conversation writes to the agent's directory.
+
+    **The default, not a boundary.**  A caller that names a file does so with a
+    tool's `output` path; this directory is where an artifact lands when it
+    names none.  The process's own working directory is never used — it is the
+    runtime directory, shared by every agent and reconstructible.
     """
     root = work_dir(agent, subagent) / MEDIA_DIR
-    if not folder.strip():
-        root.mkdir(parents=True, exist_ok=True)
-        return root
-    candidate = (root / folder).resolve()
-    if candidate != root.resolve() and root.resolve() not in candidate.parents:
-        raise MediaAdapterError(
-            f"{folder!r} is not a folder inside the media directory"
-        )
-    candidate.mkdir(parents=True, exist_ok=True)
-    return candidate
+    root.mkdir(parents=True, exist_ok=True)
+    return root
 
 
 def stamp(moment: datetime | None = None) -> str:
@@ -255,6 +251,44 @@ class _HttpClientMixin:
                     )
         return self._client
 
+    async def _answered(
+        self,
+        method: str,
+        url: str,
+        *,
+        what: str,
+        extra_headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One call, with every way it can fail turned into one exception.
+
+        **Three failures, and they read differently on purpose**: a transport
+        error, an HTTP status, and a body that is not a JSON object.  The
+        vendor's own error envelope — a `200` carrying `code`/`message` — is the
+        one a client that only checks the status gets wrong, and only DashScope
+        answers that shape, so `_request` adds that check rather than this.
+
+        `what` names the API in the sentence, because the same mixin serves an
+        image endpoint and a four-capability one and "the media request failed"
+        is the wrong half of that for a caller reading an image failure.
+        """
+        client = await self._ensure_client()
+        try:
+            response = await client.request(
+                method, url, headers=extra_headers, json=json_body
+            )
+        except httpx2.HTTPError as exc:
+            raise MediaAdapterError(
+                f"the {what} request failed ({method} {url}): {exc}"
+            ) from exc
+        if response.status_code >= 400:
+            raise MediaAdapterError(
+                f"the {what} API answered {response.status_code}: "
+                f"{response.text[:ERROR_CHARS]}",
+                status_code=response.status_code,
+            )
+        return _json_object(response, what)
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
@@ -399,6 +433,36 @@ TTS_PATH = "/services/audio/tts/SpeechSynthesizer"
 IMAGE_FIELD_KEY = "image_field"
 DEFAULT_IMAGE_FIELD = "image_url"
 
+#: Smallest and largest total pixels DashScope's image models accept (about
+#: 768²..4096²).  **The vendor's numbers, beside the adapter that speaks to it**:
+#: another provider's models have bounds of their own, so a refusal must name
+#: the bounds of the provider actually called — which only this adapter knows.
+MIN_PIXELS = 589_824
+MAX_PIXELS = 16_777_216
+
+
+def _check_pixels(size: str) -> None:
+    """Refuse a size outside DashScope's range, before the call is paid for.
+
+    The size is the effective one — the call's argument or the config's
+    `params.size`, whichever is being sent — so a configured size gets the same
+    answer as a written one.  A spelling this does not recognise is left alone:
+    the grammar is `check_size`'s question at the tool, and the vendor is the
+    last word on anything that passes it.
+    """
+    found = _SIZE_PARTS.match(size)
+    if found is None:
+        return
+    pixels = int(found.group(1)) * int(found.group(2))
+    if not MIN_PIXELS <= pixels <= MAX_PIXELS:
+        direction = "small" if pixels < MIN_PIXELS else "large"
+        raise MediaAdapterError(
+            f"{size!r} is too {direction}: {pixels} pixels, and DashScope's "
+            f"image models take {MIN_PIXELS}..{MAX_PIXELS} (about 768x768 to "
+            f"4096x4096)."
+        )
+
+
 #: Audio suffixes as media types, pinned here rather than asked of `mimetypes`:
 #: the data URI's header decides how the far end decodes the bytes, and a
 #: platform that does not know `.m4a` would send `application/octet-stream` and
@@ -422,10 +486,6 @@ AUDIO_MIME: dict[str, str] = {
 #: may not disagree about what a suffix means.
 IMAGE_MIME: dict[str, str] = MEDIA_TYPES
 
-#: How much of a provider's error text is passed on.  Long enough to carry the
-#: vendor's own words, short enough not to spend a context window doing it.
-ERROR_CHARS = 500
-
 
 class DashScopeAIGCAdapter(_HttpClientMixin):
     """Bailian's AIGC endpoints: image, video, TTS and ASR.
@@ -445,29 +505,20 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         extra_headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """One call, with every way it can fail turned into one exception.
+        """One call, and the vendor's `200` with an error envelope as a failure.
 
-        Four failures and they read differently on purpose: a transport error,
-        an HTTP status, a body that is not JSON, and a `200` carrying the
-        vendor's own error envelope (`code`/`message`) instead of a result —
-        the last being the one a client that only checks the status gets wrong.
+        The transport, the status and the body are `_answered`'s — one copy of
+        them for both adapters.  What is DashScope's own is the fourth failure:
+        a `200` carrying `code`/`message` instead of a result, the one a client
+        that only checks the status gets wrong.
         """
-        client = await self._ensure_client()
-        try:
-            response = await client.request(
-                method, url, headers=extra_headers, json=json_body
-            )
-        except httpx2.HTTPError as exc:
-            raise MediaAdapterError(
-                f"the media request failed ({method} {url}): {exc}"
-            ) from exc
-        if response.status_code >= 400:
-            raise MediaAdapterError(
-                f"the media API answered {response.status_code}: "
-                f"{response.text[:ERROR_CHARS]}",
-                status_code=response.status_code,
-            )
-        data = _json_object(response, "media")
+        data = await self._answered(
+            method,
+            url,
+            what="media",
+            extra_headers=extra_headers,
+            json_body=json_body,
+        )
         if data.get("code"):
             raise MediaAdapterError(
                 f"the media API returned an error: {data.get('code')} — "
@@ -526,7 +577,8 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             extra_headers={"X-DashScope-Async": "enable"},
             json_body={"model": model, "input": data, "parameters": params},
         )
-        task_id = (answer.get("output") or {}).get("task_id")
+        output = answer.get("output")
+        task_id = output.get("task_id") if isinstance(output, dict) else None
         if not task_id:
             raise MediaAdapterError(
                 f"the job was accepted without an id: {str(answer)[:300]}"
@@ -544,14 +596,31 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         loop = asyncio.get_running_loop()
         started = loop.time()
         url = f"{self._config.base_url}/tasks/{task_id}"
+
+        def out_of_time() -> MediaAdapterError:
+            return MediaAdapterError(
+                f"the job did not finish within {int(deadline_s)}s "
+                f"(provider task {task_id}); it may still be running there"
+            )
+
         while True:
-            if loop.time() - started > deadline_s:
+            remaining = deadline_s - (loop.time() - started)
+            if remaining <= 0:
+                raise out_of_time()
+            # **The caller's deadline bounds the request too.**  A GET carries
+            # its own 180 s transport timeout, so checking the clock only
+            # between requests let a `timeout: 5` call take minutes when one
+            # request hung near the boundary.
+            try:
+                async with asyncio.timeout(remaining):
+                    answer = await self._request("GET", url)
+            except TimeoutError:
+                raise out_of_time() from None
+            output = answer.get("output")
+            if not isinstance(output, dict):
                 raise MediaAdapterError(
-                    f"the job did not finish within {int(deadline_s)}s "
-                    f"(provider task {task_id}); it may still be running there"
+                    f"the job answered no output object: {str(answer)[:300]}"
                 )
-            answer = await self._request("GET", url)
-            output = answer.get("output") or {}
             status = str(output.get("task_status") or "")
             if status == "SUCCEEDED":
                 return output
@@ -560,7 +629,12 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                     f"the job {status.lower()}: "
                     f"{output.get('message') or output.get('code') or 'no detail'}"
                 )
-            await asyncio.sleep(_T.timeouts.pacing.media_poll)
+            remaining = deadline_s - (loop.time() - started)
+            if remaining <= 0:
+                raise out_of_time()
+            # **The pause is clipped to what is left**, so the wait cannot
+            # overshoot the deadline by a whole poll period.
+            await asyncio.sleep(min(_T.timeouts.pacing.media_poll, remaining))
 
     async def _data_uri(self, path: Path, types: dict[str, str], what: str) -> str:
         """A local file as a `data:` URI, with its media type.
@@ -634,6 +708,17 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         params = dict(extra_params or {})
         if size:
             params["size"] = _size_for(size, "*")
+        elif isinstance(params.get("size"), str):
+            # **The vendor's separator is the last word either way.**  A
+            # `params.size` from the model's config went out verbatim while the
+            # call's own argument was normalised — the same field, two
+            # spellings, and the vendor 400 that `_size_for` exists to prevent.
+            params["size"] = _size_for(params["size"], "*")
+        # The range is this vendor's fact, checked here rather than at the tool:
+        # the tool serves every adapter, and DashScope's floor is not another
+        # provider's (`_check_pixels`).
+        if isinstance(params.get("size"), str):
+            _check_pixels(params["size"])
         output = await self._generate(model, content, params)
         for item in self._content(output):
             if url := item.get("image"):
@@ -701,8 +786,12 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             f"{self._config.base_url}{TTS_PATH}",
             json_body={"model": model, "input": data},
         )
-        output = answer.get("output") or {}
-        audio = output.get("audio") or {}
+        output = answer.get("output")
+        if not isinstance(output, dict):
+            raise MediaAdapterError(f"no audio in the answer: {str(answer)[:300]}")
+        audio = output.get("audio")
+        if not isinstance(audio, dict):
+            raise MediaAdapterError(f"no audio in the answer: {str(output)[:300]}")
         if url := audio.get("url"):
             path = await self._saver.save_url(
                 str(url), "audio", outputs_dir=outputs_dir
@@ -730,22 +819,29 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         first, which is what this vendor's endpoint takes.  Three answer shapes
         are read because the endpoint has three: `output.text`, a segmented
         `output.sentence.text`, and a `choices` list like a chat answer.
+
+        **`format` is the file's own suffix.**  The vendor marks it required and
+        says to set it to match the actual audio; the data URI's MIME describes
+        the same bytes, but the docs give no rule that the two agree.  A fixed
+        `wav` therefore mislabelled every mp3 and m4a.  `sample_rate` is
+        optional and not guessed here: this adapter reads a file, not a header.
         """
         # `~` and the disk read in one hop, the same way `_reference` does it:
         # a path a model wrote is a path a person would write, and `~/voice.mp3`
         # is one this process's own cwd would otherwise make a lie of.
-        if not await asyncio.to_thread(lambda: audio_path.expanduser().is_file()):
+        audio = audio_path.expanduser()
+        if not await asyncio.to_thread(audio.is_file):
             raise MediaAdapterError(f"no such audio file: {audio_path}")
         params = dict(extra_params or {})
-        params.setdefault("format", "wav")
-        params.setdefault("sample_rate", "16000")
+        # The suffix outranks a configured `format`: the file of *this* call is
+        # the only thing that knows what its bytes are, and one model entry
+        # serves every suffix.  A configured `sample_rate` passes through.
+        params["format"] = audio.suffix.lower().lstrip(".")
         content: list[dict[str, Any]] = [
             {
                 "type": "input_audio",
                 "input_audio": {
-                    "data": await self._data_uri(
-                        audio_path.expanduser(), AUDIO_MIME, "an audio format"
-                    )
+                    "data": await self._data_uri(audio, AUDIO_MIME, "an audio format")
                 },
             }
         ]
@@ -786,24 +882,26 @@ class OpenAICompatAdapter(_HttpClientMixin):
             raise NotImplementedError(
                 "an image to work from (this adapter draws from text alone)"
             )
-        body: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
+        # **The call outranks the config**, the rule `merge_params` keeps for
+        # every adapter.  `body.update(extra_params)` put the configured
+        # `params:` last: a config saying `n: 4` billed four images while only
+        # the first was saved, and a configured `model` or `prompt` replaced
+        # the caller's own.
+        given: dict[str, Any] = {"model": model, "prompt": prompt, "n": 1}
         if size:
-            body["size"] = _size_for(size, "x")
-        body.update(extra_params or {})
-        client = await self._ensure_client()
-        try:
-            response = await client.post(
-                f"{self._config.base_url}/images/generations", json=body
-            )
-        except httpx2.HTTPError as exc:
-            raise MediaAdapterError(f"the image request failed: {exc}") from exc
-        if response.status_code >= 400:
-            raise MediaAdapterError(
-                f"the image API answered {response.status_code}: "
-                f"{response.text[:ERROR_CHARS]}",
-                status_code=response.status_code,
-            )
-        data = _json_object(response, "image")
+            given["size"] = size
+        body = merge_params(extra_params, given)
+        # The vendor's spelling is the last word on size, whichever side
+        # supplied it: extra_params carries the caller's raw WIDTH*HEIGHT
+        # (the server merges it in) and a config params.size may use it too.
+        if isinstance(body.get("size"), str):
+            body["size"] = _size_for(body["size"], "x")
+        data = await self._answered(
+            "POST",
+            f"{self._config.base_url}/images/generations",
+            what="image",
+            json_body=body,
+        )
         items = data.get("data")
         if not isinstance(items, list) or not items:
             raise MediaAdapterError(f"no image in the answer: {str(data)[:300]}")

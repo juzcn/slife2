@@ -89,9 +89,11 @@ import sqlite_vec
 
 from slife2.helpers.clock import now
 from slife2.helpers.threads import off_loop
-from slife2.libs.host.paths import TURNS_DB, work_dir
+from slife2.libs.host.paths import TURNS_DB, work_path
+from slife2.libs.paging import MAX_SQLITE_INT, page_window
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
+    MAX_PAGE,
     MAX_SQL_VARS,
     SYNC_BATCH,
     Embedder,
@@ -99,7 +101,7 @@ from slife2.libs.store.index import (
     _rowid,
     as_similarity,
     checked_vectors,
-    connect_to,
+    connection_to,
     embed_chunks,
     embed_rows,
     filter_clause,
@@ -112,12 +114,12 @@ from slife2.libs.store.index import (
     storable,
     time_window,
     vector_identity,
+    vector_table_gone,
     where_clause,
 )
 from slife2.libs.turn import attachments
 from slife2.libs.turn.context import normalise_ids
 from slife2.libs.turn.messages import Usage
-from slife2.libs.turn.tokens import estimate_turn_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +191,13 @@ def safe_agent_name(name: str) -> str:
     if not cleaned:
         raise ValueError(f"agent name {name!r} cannot name a database file")
     if cleaned != name:
-        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
+        # **`storable` first, because the digest is of text a provider can
+        # emit.**  A lone surrogate cannot be UTF-8 encoded, and a name reaches
+        # here from a model (`subagent_create`); the same normalisation every
+        # other stored string gets is what makes the hash of it possible.
+        digest = hashlib.sha256(storable(name).encode("utf-8")).hexdigest()[
+            :_DIGEST_CHARS
+        ]
         keep = MAX_AGENT_NAME - _DIGEST_CHARS - 1
         return f"{cleaned[:keep]}-{digest}"
     if len(cleaned) <= MAX_AGENT_NAME:
@@ -206,21 +214,20 @@ def database_path(agent: str, subagent: str = "") -> Path:
     beats isolation as a `WHERE` clause somebody can forget to write — the same
     argument SDD §8.1 makes for agents, applied one level down.
 
-    **A non-fork subagent's store is its own directory**,
+    **A subagent's store is its own directory**,
     `agents/<agent>/subagents/<subagent>/`, because a subagent is an agent that
     belongs to whoever made it rather than a means to an end inside one of that
     agent's turns. Its conversation, its `subagent.yaml` record, its cabinet and
-    its media are its own.
-
-    **A fork has no store of its own.** It is a temporary copy of its maker's
-    conversation, held in memory and never written down, so its context reads
-    the maker's turn log and its cabinet and media are the maker's. Reads go
-    there; writes never do. `work_dir` is what resolves the two cases; who lays
+    its media are its own. `work_path` is what resolves the two cases; who lays
     the directory out is
     `slife2.libs.host.paths.agent_dir`, and this function is one line because of
     it: the layout belongs in one place, and the file name in another.
+
+    **A path and not a directory**: this asks where the file *would* be, and a
+    caller that wants one that exists opens it through `store_for` or
+    `read_store_for`.
     """
-    return work_dir(agent, subagent) / TURNS_DB
+    return work_path(agent, subagent) / TURNS_DB
 
 
 @dataclass(frozen=True)
@@ -274,20 +281,12 @@ class TurnRecord:
         The cut is **announced** (`…`): a message that reads as short is a
         message the caller has no reason to `turn_read`, so a silent cut turns
         one wrong answer into a wrong answer nobody looks up.
-
-        **`token_count` is the turn's own size, not the bill `self.token_count`
-        records.**  The stored count sums every model call the turn made, and
-        each call carried the whole context of its moment; it answers "what did
-        this turn cost", not "how much room does this turn take".  The estimate
-        from its messages is the second question — the one a caller choosing a
-        turn can act on.
         """
         return {
             "turn_id": self.turn_id,
             "created_at": self.created_at,
             "user_message": _cut(user_message(self.messages), chars),
             "assistant_message": _cut(assistant_message(self.messages), chars),
-            "token_count": estimate_turn_tokens(self.messages),
         }
 
     def to_wire(self) -> dict[str, Any]:
@@ -460,14 +459,14 @@ _TURN_COLUMNS = frozenset(
 
 
 class StaleSchema(RuntimeError):
-    """A file whose `turn` table is missing a column this build declares.
+    """A store file whose table is missing a column this build declares.
 
     **A refusal, not a report.**  There is no migration layer (SDD §8.1), so a
     file this build cannot write is a file it must not serve.  Served anyway, it
     fails per row at the first lookup of the absent column, as SQLite's `No item
     with that key` — an `IndexError` from a row, naming neither the file nor the
     remedy.  The caller gets the sentence instead, and the operator deletes the
-    file, whose turns are then recorded afresh.
+    file, whose rows are then recorded afresh.
     """
 
 
@@ -727,7 +726,7 @@ def embed_text(messages: list[dict[str, Any]]) -> str:
     the whole turn in view.
 
     **Tool results and tool-call arguments are out, and that is measured.**  With
-    30 discriminator-style subject queries over the same log, dropping the
+    30 decision-style subject queries over the same log, dropping the
     per-call argument head raised MRR from 0.83 to 0.88, and adding the reasoning
     raised it to 0.92 (hit@1 0.77 to 0.90); keeping the full arguments as well
     cost 2.7x the chunks and recovered one query.  Results are 56–99% of a
@@ -824,11 +823,29 @@ def _fuse_questions(
     ]
 
 
+def _row_id(turn_id: Any) -> int | None:
+    """One rowid a caller named, or None for one no row in SQLite can have.
+
+    **SQLite binds a signed 64-bit integer, and a larger Python int raises
+    `OverflowError` at the bind** — an internal error where the store's contract
+    is `None` for an id that does not resolve.  A turn id is a model-supplied
+    number, so a larger one is simply an id that is not there; a `bool` is
+    excluded because `True == 1` would name turn 1, and text is not a rowid at
+    all (the tools' schema says integer).  The upper bound is `MAX_SQLITE_INT`,
+    the same one `page_window` clamps an offset to.
+    """
+    if isinstance(turn_id, bool) or not isinstance(turn_id, int):
+        return None
+    if not 0 <= turn_id <= MAX_SQLITE_INT:
+        return None
+    return turn_id
+
+
 class TurnStore:
     """Reads and writes one agent's turns, and the two indexes over them.
 
     A connection per call rather than one held open, **and closed when the call
-    ends** — see `_connect`, which is the one place that is decided.
+    ends** — `connection_to` is the one place that is decided.
     """
 
     def __init__(self, path: Path) -> None:
@@ -837,21 +854,9 @@ class TurnStore:
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        """One connection for this call, and **it is closed on the way out**.
-
-        `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
-        and leaves the connection *open*.  On Windows an open handle is a file
-        nobody else can delete — `subagent_remove` met exactly that, with a
-        non-fork subagent's own `turns.db` undeletable
-        (`slife2.plugins.agent.server.subagent_remove`).  `with connection:`
-        here is the commit; the `finally` is the close.
-        """
-        connection = connect_to(self.path)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        """One connection for this call — `connection_to`'s lifetime."""
+        with connection_to(self.path) as connection:
+            yield connection
 
     def _ensure_schema(self) -> None:
         with self._connect() as connection:
@@ -986,7 +991,9 @@ class TurnStore:
         # **Every text column goes through `storable`, not only the document.**
         # A summary or a tag arrives from a model answer as readily as the
         # messages do, and a lone surrogate in one must not lose the turn the
-        # way `storable` exists to prevent.
+        # way `storable` exists to prevent.  The name and stamp columns are no
+        # exception: `who_helped` is an agent name, which arrives from a command
+        # line with anything in it, and a caller-supplied stamp is text too.
         summary = storable(summary)
         tags = storable(tags)
         record = _Stored(
@@ -994,11 +1001,11 @@ class TurnStore:
             search=searchable_text(stored, summary, tags),
             summary=summary,
             tags=tags,
-            created_at=created_at or now(),
-            completed_at=completed_at or now(),
-            channel=channel,
-            who_helped=who_helped,
-            what_model=what_model,
+            created_at=storable(created_at or now()),
+            completed_at=storable(completed_at or now()),
+            channel=storable(channel),
+            who_helped=storable(who_helped),
+            what_model=storable(what_model),
             token_count=int(token_count),
             context_tokens=int(context_tokens),
             usage=json.dumps(usage.to_wire()) if usage is not None else None,
@@ -1089,14 +1096,25 @@ class TurnStore:
         """
         if summary is None and tags is None:
             return False
+        rowid = _row_id(turn_id)
+        if rowid is None:
+            # An id no row can have is the same answer as one no row does.
+            return False
         with self._connect() as connection:
+            # **The read is inside the write lock.**  The two columns are read
+            # and written back as a pair, so a second writer's call landing
+            # between the SELECT and the UPDATE would be erased by this one
+            # writing the values it read before that commit.  The implicit
+            # transaction starts at the first UPDATE, which is too late, so the
+            # write lock is taken up front.
+            connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT messages, summary, tags FROM turn WHERE rowid = ?",
-                (turn_id,),
+                (rowid,),
             ).fetchone()
             if row is None:
                 return False
-            messages = _messages(row["messages"], what=f"turn {turn_id}'s messages")
+            messages = _messages(row["messages"], what=f"turn {rowid}'s messages")
             # **The two columns go through `storable` like every other text.**
             # A lone surrogate in a summary is reachable from the same model
             # answer the messages are, and the insert is the thing that must not
@@ -1107,11 +1125,11 @@ class TurnStore:
             new_tags = storable(str(row["tags"] or "") if tags is None else tags)
             connection.execute(
                 "UPDATE turn SET summary = ?, tags = ? WHERE rowid = ?",
-                (new_summary, new_tags, turn_id),
+                (new_summary, new_tags, rowid),
             )
             connection.execute(
                 "UPDATE turn_fts SET search = ? WHERE rowid = ?",
-                (searchable_text(messages, new_summary, new_tags), turn_id),
+                (searchable_text(messages, new_summary, new_tags), rowid),
             )
         return True
 
@@ -1139,8 +1157,11 @@ class TurnStore:
         Raises:
             InvalidTimeBound: If a bound is in no known grammar.
         """
-        limit = page_limit(limit)
-        offset = max(0, int(offset))
+        # **The same window every listing uses.**  The offset was floored but
+        # not capped, so an offset past SQLite's signed 64-bit range raised
+        # `OverflowError` at the bind instead of answering the empty page the
+        # number means (`page_window`).
+        limit, offset = page_window(limit, offset, unset=1, cap=MAX_PAGE)
         clauses, params = time_window(since, until)
         where = filter_clause(clauses)
         with self._connect() as connection:
@@ -1169,10 +1190,13 @@ class TurnStore:
         the caller has something useful to say about — `turn_read` names the id
         it could not find, which is what a model that miscopied one needs.
         """
+        rowid = _row_id(turn_id)
+        if rowid is None:
+            return None
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT rowid AS turn_id, * FROM turn WHERE rowid = ?",
-                (int(turn_id),),
+                (rowid,),
             ).fetchone()
         return _row_to_record(row) if row else None
 
@@ -1189,44 +1213,15 @@ class TurnStore:
         with self._connect() as connection:
             return read_context(connection)
 
-    def set_context_turns(
-        self, turn_ids: Sequence[int], *, expected: Sequence[int] | None = None
-    ) -> list[int] | None:
+    def set_context_turns(self, turn_ids: Sequence[int]) -> list[int]:
         """Replace the live-context list; answers with what was written.
 
         The caller is the party that decided, and `[]` is one of the things it
         may decide — see `write_context` for why this store does not refuse an
         empty list.
-
-        **`expected` is the list the caller read, and it makes the write safe
-        against a conversation that moved while it decided.**  A rebuild is a
-        model call between the `restore` that answered with a list and this
-        write, and the callers are separate processes — the agent server's turn
-        and an agent task of the same agent both rebuild one conversation, and
-        either may save a turn while the other is deciding.  Without the guard
-        the write composed from the older snapshot erased the newer turn: the
-        row stayed in the log and left the context, silently, which is the one
-        failure `append_context` exists to prevent on the save path.
-
-        The write is one `BEGIN IMMEDIATE` transaction, so the read of the
-        current list and the write cannot have a writer between them.  When the
-        list moved at all — a turn saved, a reset, another rebuild — the write
-        is refused and `None` is the answer: a decision taken against an older
-        snapshot may not overwrite a newer conversation, and the caller keeps
-        what it holds.  `None` is the refusal; the store is untouched.
-
-        With no `expected` the write is unconditional, which is `forget`'s
-        shape: a reset is an answer about the conversation and not about a
-        snapshot of it.
         """
         with self._connect() as connection:
-            if expected is None:
-                return write_context(connection, turn_ids)
-            # The read has to be inside the write lock: a deferred transaction
-            # opens at the `INSERT`, so the compare would run outside it and a
-            # save landing in between would be invisible to the guard.
-            connection.execute("BEGIN IMMEDIATE")
-            return write_context(connection, turn_ids, expected=expected)
+            return write_context(connection, turn_ids)
 
     def turns_by_ids(self, turn_ids: Sequence[int]) -> list[TurnRecord]:
         """Those turns, **in the order asked for**, and never re-sliced.
@@ -1270,32 +1265,6 @@ class TurnStore:
             )
         return [found[turn_id] for turn_id in wanted if turn_id in found]
 
-    def _ids_in_window(
-        self, turn_ids: Sequence[int], clauses: list[str], params: list[str]
-    ) -> set[int]:
-        """Which of those ids fall inside a `created_at` window.
-
-        The semantic leg cannot be windowed in SQL — a KNN has no column to
-        filter on — so the window is applied to the fused answer instead, which
-        is the one place the two legs can be held to one rule.
-        """
-        if not turn_ids:
-            return set()
-        if not clauses:
-            return set(turn_ids)
-        allowed: set[int] = set()
-        with self._connect() as connection:
-            for start in range(0, len(turn_ids), MAX_SQL_VARS):
-                chunk = turn_ids[start : start + MAX_SQL_VARS]
-                marks = _marks(chunk)
-                rows = connection.execute(
-                    f"SELECT rowid AS turn_id FROM turn WHERE rowid IN ({marks})"
-                    f" {where_clause(clauses)}",
-                    (*chunk, *params),
-                ).fetchall()
-                allowed |= {int(row["turn_id"]) for row in rows}
-        return allowed
-
     def _time_ranked(
         self,
         since: str | None,
@@ -1312,11 +1281,11 @@ class TurnStore:
         them all (see `recall`).
 
         **The scan is widened by the excluded ids, not the answer.**  A period
-        recall asks for the newest (or oldest) turns; a kept turn in that list
-        is one the caller already holds, so the window is read past it and the
-        filter below is the guarantee that `limit` *new* turns come back.  The
-        SQL clause is skipped when the kept list is too large to bind, and the
-        filter is exact either way.
+        recall asks for the newest (or oldest) turns; an excluded turn in that
+        list is one the caller already holds, so the window is read past it and
+        the filter below is the guarantee that `limit` *new* turns come back.
+        The SQL clause is skipped when the excluded list is too large to bind,
+        and the filter is exact either way.
         """
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(set(excluded))
@@ -1379,9 +1348,9 @@ class TurnStore:
         the sparse leg (`_fuse_questions`).
 
         **`limit` is each leg's page, and the answer is their fusion.**  Each
-        meaning question's leg brings up to `limit + len(excluded)` candidates,
-        the keyword leg as many, and what is returned is their fused union —
-        twice `limit` for one question, more for several — never cut here.
+        meaning question's leg brings up to `limit` candidates, the keyword leg
+        as many, and what is returned is their fused union, never cut by this
+        store.
         The similarity floor, the rerank floor and the token budget are the
         *caller's* — they depend on a model's window and on what the decision
         kept, neither of which this store knows — and the split is deliberate:
@@ -1395,15 +1364,25 @@ class TurnStore:
         signal than a cosine neighbourhood, and "no number" is not evidence
         against it.
 
-        **`exclude` is the caller's keep-list.**  A rebuild decides both halves
-        in one call — what stays in hand and what is missing — and a turn in
-        both is a turn the union collapses: recalling it spends a candidate
-        slot, a place in the `k` and a share of the token budget on something
-        already there.  The keyword leg and the time-ranked branch filter them
-        in SQL; the semantic leg cannot (a `vec0` KNN has no turn id to filter
-        on), so its answer is filtered after fusion — where the time window is
-        filtered too — and `over` is widened by the number excluded so the
-        places they took can be refilled.
+        **`exclude` is what the caller already holds.**  A rebuild passes the
+        live list: the decision model read every turn in it, so a recall is asked
+        for what is missing rather than for what is in hand, and a turn in it
+        would spend a candidate slot, a place in the `k` and a share of the
+        token budget on something already there.  All three branches filter
+        them in SQL.  The semantic leg's exclusion rides in the KNN's rowid
+        restriction — a temp table, because the live list can name more turns
+        than one statement may bind — so the `k` stays `limit`: widening it by
+        the excluded turns and their chunks instead made a large live context
+        ask for more candidates than `sqlite-vec` allows (4096) and every
+        recall fail, and a bare clamp would have starved the page it widened
+        for.  The Python filter after fusion stays as the backstop.
+
+        **The time window is inside every leg**, including the semantic one:
+        `since`/`until` restrict the KNN's rowids before it ranks, so a narrow
+        window gets the nearest turns inside it rather than a page spent outside
+        it and then filtered.  Filtering the fused answer instead was the
+        starvation bug — a one-day window over a large log answered with one
+        turn.
 
         Raises:
             EmptyQuery: If no sentence is given and the query holds no term.
@@ -1433,7 +1412,13 @@ class TurnStore:
             )
         clauses, params = time_window(since, until)
         exclude_clauses, exclude_params = _exclusion_clause(excluded)
-        over = min(limit + len(excluded), MAX_SQL_VARS)
+        # **`k` stays `limit`.**  The excluded turns occupy no KNN place: the
+        # semantic leg excludes them inside its rowid restriction
+        # (`_nearest_turns`), so the page is all candidates the caller asked
+        # for.  Widening `k` by every excluded turn and chunk instead grew past
+        # `sqlite-vec`'s 4096-candidate ceiling on a large live context, and
+        # every recall raised rather than answered.
+        over = limit
         keyword: list[int] = []
         if words:
             try:
@@ -1457,12 +1442,17 @@ class TurnStore:
                     [*clauses, *exclude_clauses],
                     [*params, *exclude_params],
                 )
-        lists = await self._semantic_lists(meaning or [words], embedder, over)
+        lists = await self._semantic_lists(
+            meaning or [words], embedder, over, clauses, params, excluded
+        )
         nearest: dict[int, float] = {}
         for found in lists:
             for turn_id, similarity in found:
                 if similarity > nearest.get(turn_id, float("-inf")):
                     nearest[turn_id] = similarity
+        # The fused list is not truncated here: a cut before the filter would
+        # decide membership by rank, and a cut after it would hide candidates
+        # the caller's own floors and budget are meant to choose between.
         fused = [
             turn_id
             for turn_id in _fuse_questions(
@@ -1471,15 +1461,39 @@ class TurnStore:
                 keyword_weight=keyword_weight,
             )
             if turn_id not in excluded
-        ][:MAX_SQL_VARS]
-        allowed = await off_loop(self._ids_in_window, fused, clauses, params)
+        ]
         # **Not cut to `limit`.**  The legs' pages fuse to a union that is not
         # this store's to cut, and the caller's floors and budget decide what
         # survives; a count here would make the cheap RRF order decide
         # membership again.
-        return [
-            (turn_id, nearest.get(turn_id)) for turn_id in fused if turn_id in allowed
-        ]
+        return [(turn_id, nearest.get(turn_id)) for turn_id in fused]
+
+    def matched_words(self, query: str, turn_ids: Sequence[int]) -> set[int]:
+        """Which of *turn_ids* the keyword leg finds for *query*.
+
+        **Word evidence is not the absence of a similarity.**  A turn found by
+        both legs keeps the meaning score, so a page whose every hit was found
+        by words *and* meaning has no `None` similarity — and a caller that read
+        only that reported `confidence: none` for an exact match.  This asks the
+        leg itself, over the page it returned: which is the only answer that is
+        about the words rather than about which list a hit survived.
+
+        Raises `textindex.EmptyQuery` when the query has no term; the caller
+        has already dropped words that carry none (`turn_search`).
+        """
+        expression = textindex.match_expression(query)
+        wanted = normalise_ids(turn_ids)
+        found: set[int] = set()
+        with self._connect() as connection:
+            for start in range(0, len(wanted), MAX_SQL_VARS):
+                chunk = wanted[start : start + MAX_SQL_VARS]
+                rows = connection.execute(
+                    "SELECT f.rowid AS turn_id FROM turn_fts f"
+                    f" WHERE turn_fts MATCH ? AND f.rowid IN ({_marks(chunk)})",
+                    (expression, *chunk),
+                ).fetchall()
+                found |= {int(row["turn_id"]) for row in rows}
+        return found
 
     def count(self) -> int:
         with self._connect() as connection:
@@ -1669,6 +1683,14 @@ class TurnStore:
                 connection.execute("SELECT COUNT(*) FROM turn_fts").fetchone()[0]
             )
             meta = self.index_meta(connection)
+            # **A recorded index whose table is gone is a broken file, not an
+            # embedder that has not run.**  The catalogue and the cabinet ask
+            # this question through `vector_table_gone`; this store is the one
+            # the context plugin gates readiness on, and it used to answer
+            # `ready` over the damage — the plugin served, and the first
+            # semantic search raised `no such table: turn_vec` instead of the
+            # gate saying what was wrong (SDD Appendix C).
+            vector_gone = vector_table_gone(connection, vec_table="turn_vec")
         # **Asked of the same helper `sync_indexes` uses, not of a second copy
         # of the query.**  "Pending" has to mean what the sync can fix: a turn
         # with nothing to embed is not one of these (see
@@ -1682,6 +1704,11 @@ class TurnStore:
             problems.append(
                 "the vector index was built by a different model or a different "
                 "text contract than the configured one"
+            )
+        if vector_gone:
+            problems.append(
+                "the vector index is recorded in this file but its table "
+                "`turn_vec` is gone — restart to rebuild the derived index"
             )
         if pending:
             problems.append(f"{pending} of {turns} turns have no vector")
@@ -1740,7 +1767,13 @@ class TurnStore:
         return [int(row["turn_id"]) for row in rows]
 
     async def _semantic_lists(
-        self, queries: Sequence[str], embedder: Embedder, k: int
+        self,
+        queries: Sequence[str],
+        embedder: Embedder,
+        k: int,
+        clauses: list[str],
+        params: Sequence[Any],
+        excluded: set[int],
     ) -> list[list[tuple[int, float]]]:
         """One ranked list per question, out of **one** `embed`, nearest first.
 
@@ -1753,10 +1786,14 @@ class TurnStore:
         `k` counts **chunks**, not turns, so a turn with four chunks can occupy
         four of the k places and the answer holds fewer turns than the caller
         asked for.  Deduplicated in `_nearest_turns` rather than in SQL
-        because a vec0 KNN refuses `GROUP BY`.  The window is *not* applied — a
-        KNN cannot be constrained by a column it does not have — so `recall`
-        filters the fused answer instead, and a window narrow enough to exclude
-        the k nearest chunks can return fewer turns than it asked for.
+        because a vec0 KNN refuses `GROUP BY`.
+
+        **The window is applied inside the KNN**, not to the fused answer: the
+        `rowid IN (…)` subquery restricts what the vector leg may rank, so a
+        narrow window gets the nearest turns *inside it* rather than whatever
+        the global page happened to leave after a filter.  Filtering after the
+        page was the starvation bug: `since` narrowed the answer only by
+        removing candidates the page had already spent on turns outside it.
 
         Each list is sorted by similarity, ties to the older turn, so the rank a
         fusion reads is stable whatever order `vec0` returned equal distances
@@ -1778,12 +1815,24 @@ class TurnStore:
         lists: list[list[tuple[int, float]]] = []
         for vector in vectors:
             found = await off_loop(
-                self._nearest_turns, sqlite_vec.serialize_float32(vector), k
+                self._nearest_turns,
+                sqlite_vec.serialize_float32(vector),
+                k,
+                clauses,
+                params,
+                excluded,
             )
             lists.append(sorted(found, key=lambda pair: (-pair[1], pair[0])))
         return lists
 
-    def _nearest_turns(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
+    def _nearest_turns(
+        self,
+        query_vector: bytes,
+        k: int,
+        clauses: list[str],
+        params: Sequence[Any],
+        excluded: set[int],
+    ) -> list[tuple[int, float]]:
         """The KNN, the dedup it cannot do itself, and the similarity.
 
         **The *best* chunk of a turn stands for the turn**, which is what the
@@ -1791,17 +1840,52 @@ class TurnStore:
         seen for a turn is its nearest, and a later, worse chunk must not
         overwrite it.
 
+        **A window is a `rowid IN (…)` subquery, and the KNN honours it.**
+        `sqlite-vec` 0.1.9 refuses a plain `WHERE` on the virtual table but
+        applies a `rowid IN (SELECT …)` restriction before it ranks, which is
+        what lets `since`/`until` bound what this leg may retrieve instead of
+        filtering its page afterwards.  The comparison operators are the trap:
+        `rowid = ?` and `rowid >= ?` are accepted and answer *nothing* rather
+        than raising, so the subquery is the only form used here.
+
+        **The excluded turns ride in that same restriction**, through a temp
+        table filled on this call's connection: the live context can hold more
+        turns than one statement may bind, and excluding them here is what lets
+        `k` stay `limit` instead of widening it past `sqlite-vec`'s 4096-
+        candidate ceiling.  A temp table rather than a bound `NOT IN`: the ids
+        are not values this query's caller wrote; they are a set this call
+        materialises on its connection.
+
         `1 - distance` is a similarity only because the DDL says `cosine` — on an
         L2 table that arithmetic yields numbers that are plausible and wrong
         rather than visibly broken, which is what `vector_ddl` exists to
         prevent.
         """
+        conditions = list(clauses)
+        if excluded:
+            conditions.append("c2.turn_id NOT IN (SELECT id FROM excluded_turn)")
+        window = (
+            " AND v.rowid IN ("
+            "SELECT c2.id FROM turn_chunk c2"
+            " JOIN turn t ON t.rowid = c2.turn_id"
+            f" {filter_clause(conditions)})"
+            if conditions
+            else ""
+        )
         with self._connect() as connection:
+            if excluded:
+                connection.execute(
+                    "CREATE TEMP TABLE excluded_turn (id INTEGER PRIMARY KEY)"
+                )
+                connection.executemany(
+                    "INSERT INTO excluded_turn (id) VALUES (?)",
+                    [(turn_id,) for turn_id in excluded],
+                )
             rows = connection.execute(
                 "SELECT c.turn_id AS turn_id, v.distance AS distance"
                 " FROM turn_vec v JOIN turn_chunk c ON c.id = v.rowid"
-                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
-                (query_vector, k),
+                f" WHERE v.embedding MATCH ? AND k = ?{window} ORDER BY v.distance",
+                (query_vector, k, *params),
             ).fetchall()
         nearest: dict[int, float] = {}
         for row in rows:
@@ -1845,52 +1929,65 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     reads this list and appends to it, so a damaged list read as `[]` becomes a
     **one-turn context** on the next save, permanently and without a word.
     `_structural` is the refusal, and SDD Appendix C is the rule it follows.
+
+    An integer past SQLite's signed 64-bit range is not that kind of damage: no
+    row can have it, the list still says what it says, and the registered answer
+    is to drop the unaddressable id and count it.  It is dropped here so every
+    reader of the list — the restore, a recall's exclusion table — gets ids it
+    can bind.
     """
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
         return []
-    return normalise_ids(_structural(row["turn_ids"], what="context.turn_ids"))
+    parsed = _structural(row["turn_ids"], what="context.turn_ids")
+    # **A parsed value is not yet a list of turn ids.**  `normalise_ids` coerces
+    # whatever it is handed, and two shapes coerce *silently* into plausible
+    # ids: `[true]` becomes `[1]` because `bool` is an `int`, and `{"5": true}`
+    # becomes `[5]` because a mapping iterates its keys.  Both would add a turn
+    # the damage did not name to the live conversation — and `append_context`
+    # writes that list back, making the wrong id permanent.  The writer of this
+    # column produces a list of ints and nothing else, so anything else is
+    # damage for the same reason an unparseable string is.
+    if not isinstance(parsed, list) or any(
+        isinstance(value, bool) or not isinstance(value, int) for value in parsed
+    ):
+        raise ValueError(
+            f"a stored value did not read as turn ids: context.turn_ids ({parsed!r})"
+        )
+    # **An id SQLite cannot bind is an id no row has.**  The type check above
+    # accepts any integer, and a value past the signed 64-bit range raises out
+    # of the first query that binds it (`turns_by_ids`, a recall's exclusion
+    # table).  It is dropped and counted here, where the list is read, rather
+    # than left to break every reader — and dropping it also keeps
+    # `append_context` from writing it back.
+    bindable = [value for value in parsed if _row_id(value) is not None]
+    if len(bindable) != len(parsed):
+        logger.warning(
+            "%d of %d live-context id(s) are outside SQLite's integer range and "
+            "were dropped: %s",
+            len(parsed) - len(bindable),
+            len(parsed),
+            [value for value in parsed if _row_id(value) is None],
+        )
+    return normalise_ids(bindable)
 
 
-def write_context(
-    connection: sqlite3.Connection,
-    turn_ids: Sequence[int],
-    *,
-    expected: Sequence[int] | None = None,
-) -> list[int] | None:
+def write_context(connection: sqlite3.Connection, turn_ids: Sequence[int]) -> list[int]:
     """Replace the live-context list, and answer with what was written.
 
-    **One operation, not four.**  Every editor already holds the whole list it
-    wants next (a rebuild has the selection, a trim has the survivors, a reset
-    has nothing), so the operation they all want is "this is the list now";
-    `set`, `drop`, `clear` and a read-modify-write on the save path would be four
-    spellings of it.  The save's *append* is the one exception, and it lives in
-    `append_context` where the transaction is.
+    **One operation, not four.**  The caller already holds the whole list it
+    wants next (a rebuild has the selection), so the operation is "this is the
+    list now"; `set`, `drop`, `clear` and a read-modify-write on the save path
+    would be four spellings of it.  The save's *append* is the one exception,
+    and it lives in `append_context` where the transaction is.
 
     **An empty list is a legitimate list.**  A guard protecting a *partial*
     selection from being mistaken for a deliberate one has nothing to protect
     against here: the caller has already made the decision — "none of them" is
     one of the three things `context` can say — and a store that second-guessed
     it would turn the one explicit clear into an error.
-
-    **`expected` makes it a compare-and-set**, for the reason
-    `TurnStore.set_context_turns` states: a decision is composed against a
-    snapshot and written later, and a save landing in between must not be
-    erased.  The comparison and the write are the caller's one transaction —
-    this function is called with the write lock already held when `expected` is
-    given.
-
-    `None` means the snapshot no longer describes the conversation: a turn
-    arrived, one left, or another decision was written since the caller read it.
-    The newer list is the one that stands — `rebuild` adopts it for the turn it
-    is about to run — and this store is untouched.  A merge was considered and
-    refused: the choice of list is the caller's to make, and a store that
-    invented one from two decisions would be answering a question it was not
-    asked.
     """
     written = normalise_ids(turn_ids)
-    if expected is not None and read_context(connection) != normalise_ids(expected):
-        return None
     connection.execute(
         "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
         " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",
@@ -1984,6 +2081,36 @@ def _usage(raw: Any, *, what: str) -> Usage | None:
         return None
 
 
+def _readable_message(message: Mapping[str, Any]) -> bool:
+    """Whether `Message.from_wire` can read this message without raising.
+
+    **The body's outer shape is not the whole shape.**  `_messages` refuses a
+    value that is not a list of mappings, but a mapping inside it can still hold
+    a `tool_calls` no reader survives: `Message.from_wire` iterates the field and
+    asks each entry for its `function`, so a string iterates into characters and
+    an entry that is a number is not a mapping — an `AttributeError` raised out
+    of the runtime's `restore`, which loses the *whole conversation* rather than
+    the one damaged turn `_messages` exists to contain.
+
+    The fields checked are exactly the ones that reader assumes: `tool_calls`
+    absent or a list, each entry a mapping, and its `function` absent or a
+    mapping (a mapping with no `function` is read as an empty one, which is what
+    an id-less or name-less call already means).
+    """
+    calls = message.get("tool_calls")
+    if calls is None:
+        return True
+    if not isinstance(calls, list):
+        return False
+    for call in calls:
+        if not isinstance(call, Mapping):
+            return False
+        function = call.get("function")
+        if function is not None and not isinstance(function, Mapping):
+            return False
+    return True
+
+
 def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     """A stored turn's `messages`, tolerating one that will not read as them.
 
@@ -2008,6 +2135,10 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
     refused exactly as one that will not parse is: they are the same fact about
     the row, and the same answer is honest for both.
 
+    **And a mapping's fields are part of that shape** (`_readable_message`): a
+    message whose `tool_calls` is a string is a body `Message.from_wire` raises
+    out of, which is the total loss again one level in.
+
     `what` is not decoration: a damaged row that is read as empty leaves a log
     line as the only trace of it, so the line has to say *which* row — the
     alternative is an operator counting rows by hand.
@@ -2016,7 +2147,11 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
         parsed = None
-    if isinstance(parsed, list) and all(isinstance(one, dict) for one in parsed):
+    if (
+        isinstance(parsed, list)
+        and all(isinstance(one, dict) for one in parsed)
+        and all(_readable_message(one) for one in parsed)
+    ):
         return parsed
     logger.warning("%s did not read as a list of messages; reading it as empty", what)
     return []
@@ -2038,4 +2173,24 @@ def _structural(raw: Any, *, what: str) -> Any:
 
 def store_for(agent: str, subagent: str = "") -> TurnStore:
     """The store for one conversation id, creating its file if needed."""
-    return TurnStore(database_path(agent, subagent))
+    path = database_path(agent, subagent)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return TurnStore(path)
+
+
+def read_store_for(agent: str, subagent: str = "") -> TurnStore | None:
+    """The store for one conversation id, or `None` when it was never written.
+
+    **A read does not create a conversation.**  `store_for` makes the directory
+    and the file, which is right for a write and wrong for a read: a subagent
+    that has been removed is a name with no record, and a `transcript` or a
+    search against that stale name recreated its directory — leaving one with no
+    `subagent.yaml` that `subagent_create` and `subagent_remove` then refuse until
+    the filesystem is cleaned by hand.  A conversation that has genuinely never
+    run is the same absent file, and the honest answer for both is the empty
+    one its reader already gives.
+    """
+    path = database_path(agent, subagent)
+    if not path.exists():
+        return None
+    return TurnStore(path)

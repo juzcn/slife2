@@ -8,11 +8,12 @@ reached at `{base_url}/embeddings`, speaks no chat protocol, and is configured
 under its own `embeddings:` section rather than under `providers:`.  A chat
 server built from the chat providers has no chat provider to attach it to.
 
-**Two tools, neither of them the model's.**  `embed` and `describe` carry no
-`meta=FOR_THE_MODEL`, so the toolhub never offers them to a model — the same
-standing as the context plugin's `remember`.  They are the stores' plumbing:
-every index needs vectors and needs to know how wide they are, and this is where
-both questions are answered.
+**Three tools, none of them the model's.**  `embed`, `describe` and `rerank`
+carry no `meta=FOR_THE_MODEL`, so the toolhub never offers them to a model — the
+same standing as the context plugin's `remember`.  They are the stores'
+plumbing: every index needs vectors and needs to know how wide they are, and the
+recall's cross-encoder needs scores; this is where all three questions are
+answered.
 
 **The width is discovered and never configured.**  `vec0` fixes a table's width
 in its DDL and cannot be altered afterwards, so the number has to be right
@@ -32,7 +33,9 @@ is refused rather than handed a default (SDD Appendix C).
 
 from __future__ import annotations
 
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx2
@@ -44,9 +47,10 @@ from slife2.libs.host.config import (
     EMBEDDINGS_SERVER_NAME,
     Config,
     EmbeddingProviderSettings,
+    load_cached,
 )
 from slife2.libs.plugin.protocol import house_server, serve_plugin
-from slife2.plugins.llm.server_common import unresolved_key
+from slife2.plugins.llm.server_common import Leased, unresolved_key
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +295,12 @@ class EmbeddingClient:
         a remote provider otherwise fails the catalogue build and takes the
         whole stack down (`RemoteEmbedder.embed` makes the same case for the
         hop it owns).
+
+        **The order is the protocol's own `index`, not the list's.**
+        `data[].index` says which input each vector answers, and an endpoint
+        that returns the list in any other order would otherwise attribute one
+        text's vector to another — silently, because every vector still looks
+        right.
         """
         if not texts:
             return []
@@ -312,7 +322,10 @@ class EmbeddingClient:
                 exc,
             )
             response = await self._embed_request(texts)
-        return [list(item.embedding) for item in response.data]
+        return [
+            list(item.embedding)
+            for item in sorted(response.data, key=lambda item: item.index)
+        ]
 
     async def _embed_request(self, texts: list[str]) -> Any:
         """The one request, split out so the retry repeats exactly that call."""
@@ -369,6 +382,83 @@ class EmbeddingClient:
         response.raise_for_status()
         expected = len(documents) if top_n is None else min(top_n, len(documents))
         return _rerank_answer(response.json(), len(documents), expected=expected)
+
+    async def close(self) -> None:
+        """Close whichever HTTP clients this one built.
+
+        **A client owns a connection pool and its socket**, and nothing closes
+        it at collection.  This is called only when the config moved past this
+        provider and its last call is done (`LiveEmbedding`).
+        """
+        for client in (self._client, self._http):
+            if client is None:
+                continue
+            close = getattr(client, "close", None)
+            if close is None:
+                close = getattr(client, "aclose", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception:  # noqa: BLE001 - a close on the way out
+                logger.debug(
+                    "%s: an HTTP client did not close cleanly",
+                    SERVER_NAME,
+                    exc_info=True,
+                )
+
+
+class _HeldEmbedding(Leased):
+    """One `EmbeddingClient` and the calls holding it."""
+
+    def __init__(self, client: EmbeddingClient) -> None:
+        super().__init__()
+        self.client = client
+
+    async def _close(self) -> None:
+        await self.client.close()
+
+
+class LiveEmbedding:
+    """The active embedding provider, re-read when the config changes.
+
+    **The process used to pin its provider at boot**, so an `embeddings:` edit
+    — the model, its base URL or its key — was silently ineffective until a
+    restart, and `describe()` went on answering the old identity a store's
+    check compares against (invariant 9).  `load_cached` hands back the same
+    `Config` object while the file is untouched and a new one when it is not,
+    which is the signal the chat backends' `LiveProviders` uses and this one
+    uses the same way.
+
+    **A retired client is closed when its last call ends**, not when the edit
+    lands: a call in flight is a request somebody billed for, and closing its
+    pool cuts it off (`slife2.plugins.llm.server_common.Leased` is the one rule
+    for both backends).
+    """
+
+    def __init__(self) -> None:
+        self._config: Config | None = None
+        self._held: _HeldEmbedding | None = None
+
+    @contextlib.asynccontextmanager
+    async def lease(self) -> AsyncIterator[EmbeddingClient]:
+        """The active provider's client for one call, holding it while it runs."""
+        config = load_cached()
+        retired: _HeldEmbedding | None = None
+        if self._held is None or config is not self._config:
+            retired = self._held
+            self._held = _HeldEmbedding(
+                EmbeddingClient(config.embeddings.active_provider())
+            )
+            self._config = config
+        held = self._held
+        held.hold()
+        try:
+            if retired is not None:
+                await retired.retire()
+            yield held.client
+        finally:
+            await held.release()
 
 
 def _rerank_answer(
@@ -454,7 +544,7 @@ def provider_refusal(exc: Any) -> str:
     if status == 402:
         hint = (
             "the account is in arrears — free models are gated too; top up or "
-            "switch `embeddings.active_model`"
+            "switch `embeddings.default`"
         )
     elif status == 401:
         hint = "check the provider's `api_key`"
@@ -468,12 +558,24 @@ def provider_refusal(exc: Any) -> str:
 
 
 def build_server(config: Config, *, client: EmbeddingClient | None = None) -> FastMCP:
-    """Build the embeddings MCP server.  `client` is injectable for tests."""
-    embedder = (
-        client
-        if client is not None
-        else EmbeddingClient(config.embeddings.active_provider())
-    )
+    """Build the embeddings MCP server.  `client` is injectable for tests.
+
+    Without an injected client, the provider is resolved per call from the
+    config as it is now (`LiveEmbedding`), so an `embeddings:` edit reaches the
+    next `describe`, `embed` or `rerank` rather than waiting for a restart.
+    `config` is kept for the injected path and for nothing else.
+    """
+    live = LiveEmbedding() if client is None else None
+
+    @contextlib.asynccontextmanager
+    async def embedder() -> AsyncIterator[EmbeddingClient]:
+        """The client for this call — the injected one, or the live provider's."""
+        if client is not None:
+            yield client
+            return
+        assert live is not None
+        async with live.lease() as found:
+            yield found
 
     mcp: FastMCP = house_server(
         SERVER_NAME,
@@ -496,10 +598,11 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
         """
         from openai import APIStatusError
 
-        try:
-            return await embedder.describe()
-        except APIStatusError as exc:
-            raise ToolError(provider_refusal(exc)) from exc
+        async with embedder() as active:
+            try:
+                return await active.describe()
+            except APIStatusError as exc:
+                raise ToolError(provider_refusal(exc)) from exc
 
     @mcp.tool
     async def embed(texts: list[str]) -> dict[str, Any]:
@@ -511,10 +614,11 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
         """
         from openai import APIStatusError
 
-        try:
-            return {"vectors": await embedder.embed(texts)}
-        except APIStatusError as exc:
-            raise ToolError(provider_refusal(exc)) from exc
+        async with embedder() as active:
+            try:
+                return {"vectors": await active.embed(texts)}
+            except APIStatusError as exc:
+                raise ToolError(provider_refusal(exc)) from exc
 
     @mcp.tool
     async def rerank(
@@ -531,12 +635,15 @@ def build_server(config: Config, *, client: EmbeddingClient | None = None) -> Fa
             documents: The candidates, in the caller's order.
             top_n: How many results to keep, when the endpoint supports it.
         """
-        try:
-            scored = await embedder.rerank(query, documents, top_n)
-        except httpx2.HTTPError as exc:
-            raise ToolError(f"the rerank provider refused the call ({exc})") from exc
-        except (RuntimeError, ValueError) as exc:
-            raise ToolError(str(exc)) from exc
+        async with embedder() as active:
+            try:
+                scored = await active.rerank(query, documents, top_n)
+            except httpx2.HTTPError as exc:
+                raise ToolError(
+                    f"the rerank provider refused the call ({exc})"
+                ) from exc
+            except (RuntimeError, ValueError) as exc:
+                raise ToolError(str(exc)) from exc
         return {
             "results": [
                 {"index": index, "relevance_score": score} for index, score in scored

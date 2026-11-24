@@ -1,21 +1,23 @@
-"""`slife2-file-tunnel`: the registry, the two tools, and the one route.
+"""`slife2-file-tunnel`: the registry, the two tools, and the one public route.
 
-Three halves, each driven where it can be reached without a tunnel.
+Three halves, each driven where it can be reached without a real tunnel.
 
 The *tools* run over the in-memory transport with a fake tunnel injected, so
 what is under test is which file, which token and what the far end is told —
 an injected provider makes that a contract rather than a patched module global.
-The *route* is driven through the real ASGI app
-(`FastMCP.http_app()`), which is the half worth being hardest about: it is the
-one thing about this plugin that is new to slife2, and a URL handed to a vision
-model is worthless if `/share/<token>` does not answer.  The *guards* — the
-credential denylist, the stat pin, the RFC 5987 filename — each one was a bug
-before it was a test.
+The *public surface* is the share listener: a URL handed to a vision model is
+worthless if `/share/<token>` does not answer, and dangerous if anything else
+on the same hostname does.  The app is driven through ASGI for its answers,
+and through a real loopback socket for the one property that matters — the
+port the tunnel is given answers `/share/{token}` and nothing else.  The
+*guards* — the credential denylist, the stat pin, the RFC 5987 filename — each
+one was a bug before it was a test.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
@@ -26,17 +28,25 @@ from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FileTunnelSettings, load
+from slife2.libs.host.paths import data_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
-from slife2.plugins.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
+from slife2.plugins.file_tunnel.providers import (
+    _TUNNEL_URL_ENV,
+    DEFAULT_PROVIDER,
+    KNOWN_PROVIDERS,
+    _TunnelProviderBase,
+)
 from slife2.plugins.file_tunnel.server import (
     Exposed,
     Exposure,
     Revoked,
+    ShareListener,
     _ensure,
     build_server,
     content_disposition,
     is_credential_path,
     serve_exposed,
+    share_app,
 )
 
 pytestmark = pytest.mark.unit
@@ -70,6 +80,7 @@ class FakeTunnel:
         state: str | None = None,
         reason: str = "",
         vanishes: bool = False,
+        inherited: bool = False,
     ) -> None:
         self.url = url
         self.active = active
@@ -80,6 +91,8 @@ class FakeTunnel:
         #: Reports a URL, then cannot build one — the tunnel dying between the
         #: reachability check and the call that hands the link over.
         self.vanishes = vanishes
+        #: Whether the URL it reports is another process's (`SLIFE2_FILE_TUNNEL_URL`).
+        self.inherited = inherited
         self.started: list[int] = []
         self.monitors: list[int] = []
         self.stops = 0
@@ -154,6 +167,57 @@ class SlowStartTunnel(FakeTunnel):
         self.active = True
 
 
+class NeverStarted(_TunnelProviderBase):
+    """A provider whose monitor is the only thing that could start it."""
+
+    label = "never"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = 0
+
+    def _do_start(self, port: int) -> str:
+        self.started += 1
+        return "https://second.test"
+
+    def _teardown(self) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_a_monitor_leaves_an_inherited_tunnel_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**An inherited URL is a tunnel this process did not start.**
+
+    `SLIFE2_FILE_TUNNEL_URL` is another process handing down a tunnel that is
+    already published; there is no child here to probe or respawn.  The monitor
+    tested its own `_public_url` only, so a process with no tunnel of its own
+    fell through to `start()` — minting a *second* tunnel and overwriting the
+    variable the parent passed down, after which links minted here and there
+    point at two different hostnames.
+    """
+    monkeypatch.setenv(_TUNNEL_URL_ENV, "https://inherited.test")
+    monkeypatch.setattr(_T.timeouts.pacing, "tunnel_retry_delay", 0.01)
+    monkeypatch.setattr(_T.timeouts.pacing, "tunnel_health", 0.01)
+    provider = NeverStarted()
+    provider.start_monitor(0)
+    try:
+        await asyncio.sleep(0.15)  # several passes of the monitor
+    finally:
+        provider.stop_monitor()
+        await asyncio.sleep(0)
+
+    assert provider.started == 0, "the monitor started a second tunnel"
+    assert provider.public_url == "https://inherited.test"
+    assert os.environ[_TUNNEL_URL_ENV] == "https://inherited.test", (
+        "the inherited URL was overwritten"
+    )
+
+
 def server_for(tunnel: FakeTunnel | None = None) -> FastMCP:
     """The plugin over the default config, with one fake tunnel."""
     return build_server(load(), provider=tunnel or FakeTunnel())
@@ -185,6 +249,12 @@ async def fetch(app: Any, path: str) -> httpx2.Response:
     """One GET against the real ASGI app — no socket, no tunnel."""
     transport = httpx2.ASGITransport(app=app)
     async with httpx2.AsyncClient(transport=transport, base_url="http://t") as http:
+        return await http.get(path)
+
+
+async def fetch_live(port: int, path: str) -> httpx2.Response:
+    """One GET against the loopback port the tunnel is pointed at."""
+    async with httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
         return await http.get(path)
 
 
@@ -257,6 +327,41 @@ async def test_exposing_answers_with_a_public_url(tmp_path: Path) -> None:
     # so it is answered as a field of its own rather than left to be cut out.
     assert answer["token"] == exposed_url(answer).rsplit("/", 1)[-1]
     assert len(answer["token"]) == 30
+
+
+@pytest.mark.asyncio
+async def test_an_inherited_url_refuses_to_expose(tmp_path: Path) -> None:
+    """**A URL another process started is served by that process.**
+
+    `SLIFE2_FILE_TUNNEL_URL` names a tunnel whose share listener is not this
+    process's, and `Exposed` is per process: a token minted here is a link the
+    far end answers 403 for.  The tool refuses rather than handing one out.
+    """
+    picture = tmp_path / "photo.png"
+    picture.write_bytes(b"png-bytes")
+
+    async with Client(server_for(FakeTunnel(inherited=True))) as client:
+        with pytest.raises(ToolError, match="403"):
+            await ask_json(client, "expose_local_image", path=str(picture))
+
+
+@pytest.mark.asyncio
+async def test_a_relative_path_is_the_models_working_directory() -> None:
+    """**A relative path is the data directory's, not this daemon's.**
+
+    The agent's tools run in the data directory, so a path one of them printed
+    is relative to it — and that is what the tool tells a model.  The file
+    tunnel's own process runs in `runtime/` (the directory this package calls
+    reconstructible), so resolving a relative path there named a different
+    file, or, as here, no file at all.
+    """
+    picture = data_dir() / "relative.png"
+    picture.write_bytes(b"png-bytes")
+
+    async with Client(server_for()) as client:
+        answer = await ask_json(client, "expose_local_image", path="relative.png")
+
+    assert answer["file"] == "relative.png"
 
 
 @pytest.mark.asyncio
@@ -426,18 +531,22 @@ async def test_a_tunnel_that_died_mid_call_is_a_failure(tmp_path: Path) -> None:
 # --- withdrawing --------------------------------------------------------------
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_unexposing_stops_the_link(tmp_path: Path) -> None:
     picture = tmp_path / "photo.png"
     picture.write_bytes(b"png-bytes")
-    server = server_for()
-    app = server.http_app()
+    tunnel = FakeTunnel(active=False)
+    server = build_server(load(), provider=tunnel)
 
     async with Client(server) as client:
         token = (await ask_json(client, "expose_local_image", path=str(picture)))[
             "token"
         ]
-        assert (await fetch(app, f"/share/{token}")).status_code == 200
+        # The tunnel's target is the share listener, so this is the URL a
+        # remote fetcher would reach — the same bytes, one hop of loopback.
+        port = tunnel.started[-1]
+        assert (await fetch_live(port, f"/share/{token}")).status_code == 200
 
         # A whole share URL works as well as the token, and the answer names the
         # token it actually withdrew rather than what it was handed.
@@ -446,7 +555,7 @@ async def test_unexposing_stops_the_link(tmp_path: Path) -> None:
         )
         assert answer == {"token": token}
 
-    assert (await fetch(app, f"/share/{token}")).status_code == 403
+        assert (await fetch_live(port, f"/share/{token}")).status_code == 403
 
 
 @pytest.mark.asyncio
@@ -609,29 +718,70 @@ async def test_a_start_that_outlives_its_budget_is_left_alone(
 
 @pytest.mark.asyncio
 async def test_an_unknown_token_is_403() -> None:
-    response = await fetch(server_for().http_app(), "/share/deadbeef")
+    response = await fetch(share_app(Exposed()), "/share/deadbeef")
     assert response.status_code == 403
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_the_route_serves_what_the_tool_exposed(tmp_path: Path) -> None:
-    """The whole feature in one test: a tool call, a token, and the bytes a
-    third party gets by fetching the URL it was handed."""
+async def test_the_share_listener_answers_one_route_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    """**The security property, at the listener.**  A tunnel forwards a port,
+    so the public surface is whatever that port answers.  This one answers the
+    share route and refuses every other path — in particular the MCP endpoint
+    that shares the process and the hostname's would-be port.
+    """
     payload = b"file-content-bytes"
     picture = tmp_path / "data.bin"
     picture.write_bytes(payload)
-    server = server_for()
-    app = server.http_app()
+    exposed = Exposed()
+    exposure = exposed.register(str(picture), None)
+    listener = ShareListener(share_app(exposed))
+    port = await listener.start()
+    try:
+        served = await fetch_live(port, f"/share/{exposure.token}")
+        assert served.status_code == 200
+        assert served.content == payload
+        assert served.headers["Content-Type"].startswith("application/octet-stream")
+        assert served.headers["Content-Length"] == str(len(payload))
+        assert served.headers["Content-Disposition"] == 'inline; filename="data.bin"'
+
+        assert (await fetch_live(port, "/mcp")).status_code == 404
+        assert (await fetch_live(port, "/")).status_code == 404
+        # The route exists but has no POST; Starlette answers 405, not 404.
+        async with httpx2.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+            assert (await http.post(f"/share/{exposure.token}")).status_code == 405
+    finally:
+        await listener.stop()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_the_tunnel_is_pointed_at_the_share_listener(tmp_path: Path) -> None:
+    """The whole feature, and the boundary, in one test: a tool call, a token,
+    the bytes a third party gets from the port the tunnel was actually given —
+    and a 404 for the MCP endpoint on that same port.
+
+    The port comes from the injected tunnel rather than from the config,
+    because that is the claim: the tunnel is handed the listener's address,
+    not the MCP server's.
+    """
+    payload = b"file-content-bytes"
+    picture = tmp_path / "data.bin"
+    picture.write_bytes(payload)
+    tunnel = FakeTunnel(active=False)
+    server = build_server(load(), provider=tunnel)
 
     async with Client(server) as client:
         answer = await ask_json(client, "expose_local_image", path=str(picture))
+        port = tunnel.started[-1]
+        served = await fetch_live(port, f"/share/{answer['token']}")
+        mcp = await fetch_live(port, "/mcp")
 
-    response = await fetch(app, f"/share/{answer['token']}")
-    assert response.status_code == 200
-    assert response.content == payload
-    assert response.headers["Content-Type"].startswith("application/octet-stream")
-    assert response.headers["Content-Length"] == str(len(payload))
-    assert response.headers["Content-Disposition"] == 'inline; filename="data.bin"'
+    assert served.status_code == 200
+    assert served.content == payload
+    assert mcp.status_code == 404, "the MCP endpoint is on the public port"
 
 
 @pytest.mark.asyncio
@@ -652,6 +802,39 @@ async def test_a_replaced_file_is_refused(tmp_path: Path) -> None:
     exposure = Exposure("t" * 30, str(picture), None)
     picture.write_bytes(b"replaced, and longer than before")
     assert (await serve_exposed(exposure)).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_a_file_replaced_after_the_check_streams_the_pinned_bytes(
+    tmp_path: Path,
+) -> None:
+    """**The pin, the length and the bytes are one observation of the file.**
+
+    A `stat` followed by a lazy `open` is two looks at a path a writer can
+    change in between: the response was built from the pinned file's size and
+    then streamed whatever the path held at iteration, so a replaced file was
+    served despite its pin (and a longer one overran the length).  The handle is
+    opened first and the body comes from it.
+    """
+    picture = tmp_path / "data.txt"
+    picture.write_bytes(b"the pinned bytes")
+    exposure = Exposure("t" * 30, str(picture), None)
+
+    response = await serve_exposed(exposure)
+    assert response.status_code == 200
+    # The writer rotates the file after the response has been decided: a new
+    # file renamed over the path.  On Windows the open handle refuses the
+    # rename; on POSIX the handle keeps the inode the pin was taken from.
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_bytes(b"new bytes written after the check, and longer")
+    try:
+        os.replace(replacement, picture)
+    except PermissionError:
+        pass  # the open handle is why; the pinned bytes are still readable
+
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    assert body == b"the pinned bytes"
+    assert response.headers["Content-Length"] == str(len(b"the pinned bytes"))
 
 
 @pytest.mark.asyncio
@@ -743,6 +926,30 @@ def test_distinct_files_get_distinct_tokens(tmp_path: Path) -> None:
     )
 
 
+def test_one_file_exposed_by_two_conversations_is_two_links(tmp_path: Path) -> None:
+    """**A token belongs to the conversation that minted it.**
+
+    Reuse used to be keyed by the path alone, so a second conversation exposing
+    one file was handed the first's token: it could not revoke its own link,
+    and the first conversation's revoke killed the second's.  The same owner
+    re-exposing an unchanged file still gets its token back — that is the reuse
+    this registry is for.
+    """
+    picture = tmp_path / "a.png"
+    picture.write_bytes(b"x")
+    exposed = Exposed()
+    first = exposed.register(str(picture), ("jack", ""))
+    second = exposed.register(str(picture), ("jill", ""))
+
+    assert first.token != second.token
+    assert exposed.register(str(picture), ("jack", "")).token == first.token
+
+    assert exposed.revoke(first.token, ("jill", "")) is Revoked.FOREIGN
+    assert exposed.revoke(first.token, ("jack", "")) is Revoked.OK
+    assert exposed.lookup(second.token) is second, "the other conversation's link"
+    assert exposed.revoke(second.token, ("jill", "")) is Revoked.OK
+
+
 def test_an_unknown_token_looks_up_to_nothing() -> None:
     assert Exposed().lookup("deadbeef") is None
 
@@ -827,3 +1034,41 @@ def test_the_shipped_config_reaches_the_plugin() -> None:
     config = load(root / "slife2.yaml")
     assert config.server("file-tunnel").port == 24038
     assert "file-tunnel" in config.plugins()
+
+
+@pytest.mark.asyncio
+async def test_the_lifespan_does_not_start_over_an_inherited_tunnel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The eager attempt ran before `inherited` was ever consulted.**  A
+    process handed a live tunnel by `SLIFE2_FILE_TUNNEL_URL` started a second
+    one on load, overwrote the variable, and from then on handed out links the
+    parent's listener did not serve."""
+    monkeypatch.setenv(_TUNNEL_URL_ENV, "https://inherited.test")
+    provider = FakeTunnel(inherited=True, url="https://inherited.test")
+
+    async with Client(server_for(provider)):
+        pass
+
+    assert provider.started == [], "the lifespan minted a second tunnel"
+    assert os.environ[_TUNNEL_URL_ENV] == "https://inherited.test"
+
+
+def test_the_live_token_is_not_written_to_the_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The token is the whole capability**, and its 30 hex characters are
+    deliberately under what a generic redactor masks.  The debug line therefore
+    wrote a live share URL capability into a log `slife2 logs` shows."""
+    import logging
+
+    from slife2.plugins.file_tunnel.server import Exposed
+
+    path = tmp_path / "private.txt"
+    path.write_text("not for everybody", encoding="utf-8")
+    exposed = Exposed()
+
+    with caplog.at_level(logging.DEBUG, logger="slife2.plugins.file_tunnel.server"):
+        exposure = exposed.register(str(path), None)
+
+    assert exposure.token not in caplog.text

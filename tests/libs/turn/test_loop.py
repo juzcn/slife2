@@ -32,6 +32,7 @@ from slife2.libs.turn.events import (
     ToolCallFinished,
     ToolCallStarted,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall
 from slife2.libs.turn.messages import (
@@ -116,7 +117,12 @@ async def test_text_only_turn() -> None:
     assert result.text == "hello there"
     assert result.iterations == 1
     assert result.stop_reason == "stop"
-    assert observer.kinds() == ["TextDelta", "TextDelta", "TurnFinished"]
+    assert observer.kinds() == [
+        "TextDelta",
+        "TextDelta",
+        "UsageReported",
+        "TurnFinished",
+    ]
     assert [m.role for m in messages] == ["user", "assistant"]
 
 
@@ -127,8 +133,9 @@ async def test_reasoning_lands_on_the_message_the_way_text_does() -> None:
     channels is allowed to drop fragments.  Scripted contradictorily on purpose:
     the chunks spell one thing and the result another, so a loop that
     reassembled the reasoning from what it forwarded would be caught here.  That
-    the provider is never sent it back is `to_wire`'s, and
-    `tests/libs/model/test_wire.py` states it.
+    it rides the wire is `to_wire`'s, and `tests/libs/model/test_wire.py` states
+    it; whether a provider is sent it again is the adapter's decision
+    (`Message.thinking`).
     """
     turn = ScriptedTurn(
         result=StreamChatResult(text="42", thinking="six sevens are forty-two"),
@@ -162,6 +169,32 @@ async def test_the_result_wins_over_the_deltas() -> None:
     assert messages[-1].content == "authoritative"
 
 
+@pytest.mark.parametrize("text", ["", " \n\t"])
+async def test_a_final_call_that_answers_nothing_fails_the_turn(text: str) -> None:
+    """**An empty answer is a failure, not a verdict.**
+
+    A provider can legitimately stop without producing text, and that result is
+    the same shape as a call that produced nothing at all.  Read as a verdict it
+    becomes a turn recorded as finished with no answer in it — a blank screen,
+    and nothing anywhere saying a thing was missing.  The loop is the one place
+    that knows the call ended the turn, so it is where the decision is made,
+    once (SDD §5.1, Appendix C).  Whitespace alone is nothing too: it renders
+    blank.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text=text, stop_reason="length"))
+    )
+    observer = ListObserver()
+    messages: list[Message] = []
+
+    with pytest.raises(RuntimeError, match="no text and no tool call") as raised:
+        await AgentLoop(backend, registry()).run_turn(messages, "hi", observer)
+
+    assert "'length'" in str(raised.value), "the stop reason is part of the account"
+    assert [m.role for m in messages] == ["user"], "no empty answer was written down"
+    assert observer.kinds() == [], "a failed turn announces no end"
+
+
 # --- the tool round trip -----------------------------------------------------
 
 
@@ -183,8 +216,10 @@ async def test_tool_call_runs_and_feeds_back() -> None:
     # the provider's business and asserting on it would make this test break
     # for a reason that is not a regression.
     assert [k for k in observer.kinds() if k != "TextDelta"] == [
+        "UsageReported",
         "ToolCallStarted",
         "ToolCallFinished",
+        "UsageReported",
         "TurnFinished",
     ]
 
@@ -221,7 +256,7 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     )
     harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
 
-    def auto() -> AutoCall | None:
+    async def auto() -> AutoCall | None:
         """Asked at the top of *every* iteration; delivers once, on the second.
 
         The gate is the caller's, and it is the cheap half of the split: whether
@@ -286,6 +321,48 @@ async def test_a_harness_tool_is_called_through_the_registry() -> None:
     ] == ["c1"]
 
 
+async def test_a_large_cut_in_is_fitted_like_any_other_result() -> None:
+    """**The harness's own pair is a tool result too** (SDD §5.2.4).
+
+    A message typed while a turn runs arrives through `auto`, and the pair the
+    loop writes carries its text.  That road used to skip `_fit` entirely while
+    the same tool called by the model went through it — so a large paste entered
+    the conversation, its row and every later request whole, and the dump the
+    window exists for was never written.  The event still carries the person's
+    words for the live line; only the conversation's copy is bounded.
+    """
+    big = "a log line\n" * 900
+
+    async def check_new_input(_arguments: dict[str, Any]) -> str:
+        return big
+
+    backend = FakeBackend(text_turn("done"))
+    harness_tools = [*tools(), a_tool("_check_new_input", check_new_input)]
+    observer = ListObserver()
+    messages: list[Message] = []
+    asked = 0
+
+    async def auto() -> AutoCall | None:
+        nonlocal asked
+        asked += 1
+        if asked == 1:
+            return AutoCall("_check_new_input", channel="tui", receipt="s-1")
+        return None
+
+    async def compress(_call: ToolCall, _text: str) -> str:
+        return "the fitted head"
+
+    await AgentLoop(backend, ToolRegistry(harness_tools), compress=compress).run_turn(
+        messages, "one", observer, auto=auto
+    )
+
+    answered = [m for m in messages if m.role == "tool" and m.channel == "tui"]
+    assert [m.content for m in answered] == ["the fitted head"]
+    assert [e for e in observer.events if isinstance(e, MessageCutIn)] == [
+        MessageCutIn(text=big, channel="tui", receipt="s-1")
+    ]
+
+
 async def test_an_auto_call_that_took_nothing_is_not_a_cut_in() -> None:
     """The delivery verdict is the inbox's, not the gate's optimism.
 
@@ -309,7 +386,7 @@ async def test_an_auto_call_that_took_nothing_is_not_a_cut_in() -> None:
     messages: list[Message] = []
     asked = 0
 
-    def auto() -> AutoCall | None:
+    async def auto() -> AutoCall | None:
         nonlocal asked
         asked += 1
         if asked == 1:
@@ -505,7 +582,7 @@ async def test_max_iterations_cuts_off_a_runaway_loop() -> None:
         [], "go", observer
     )
 
-    assert result.hit_iteration_limit is True
+    assert result.stop_reason == "max_iterations"
     assert result.iterations == 3
     assert len(backend.calls) == 3
     final = observer.events[-1]
@@ -742,6 +819,107 @@ async def test_an_interruption_in_the_fit_keeps_the_result_it_had() -> None:
     assert messages[-1].content == "the real answer"
 
 
+async def test_an_interrupted_cut_in_keeps_the_channel_of_the_message_it_took() -> None:
+    """A message folded just before the interruption is still a cut-in.
+
+    The batch's cancel path completes the pair with the answer the call had
+    returned — and when that answer is a message's own words, the channel has
+    to ride it exactly as the success path writes it: a rebuilt transcript
+    draws the line from this field, and without it the line wears the window's
+    bubble (`slife2.tui.restore`), as though the person had typed it there.
+    """
+    taken: list[str] = []
+    committed: list[bool] = []
+    started = asyncio.Event()
+
+    async def check_new_input(_arguments: dict[str, Any]) -> str:
+        taken.append("one")
+        return "the message that arrived mid-turn"
+
+    async def fit(_call, _text) -> str:
+        started.set()
+        await asyncio.Event().wait()  # cancelled by the turn, never returns
+        return "never chosen"
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="_check_new_input", arguments={}))
+    )
+    loop = AgentLoop(
+        backend,
+        ToolRegistry([*tools(), a_tool("_check_new_input", check_new_input)]),
+        compress=fit,
+    )
+    messages: list[Message] = []
+
+    task = asyncio.create_task(
+        loop.run_turn(
+            messages,
+            "go",
+            folded=lambda: ("wechat", "submission-9"),
+            folded_commit=committed.append,
+            injected=lambda: len(taken),
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == "the message that arrived mid-turn"
+    assert messages[-1].channel == "wechat", "the rebuilt line needs the bubble"
+    assert committed == [1], "the completed pair is a delivery"
+
+
+async def test_an_interrupted_cut_in_that_never_answered_is_not_a_delivery() -> None:
+    """**A take whose words were never written stays owed its own turn.**
+
+    The call took the message and was cut before it answered, so the batch
+    writes `INTERRUPTED` instead of the person's words.  Crediting the take
+    would answer its parked sender "delivered, no text" and the message would
+    be in neither the inbox nor the conversation.  It is committed as zero
+    written takes, and the `INTERRUPTED` line wears no bubble: the person's
+    message will run its own turn and draw itself there.
+    """
+    taken: list[str] = []
+    committed: list[int] = []
+    started = asyncio.Event()
+
+    async def check_new_input(_arguments: dict[str, Any]) -> str:
+        taken.append("one")
+        started.set()
+        await asyncio.Event().wait()  # cancelled by the turn, never returns
+        return "never arrives"
+
+    backend = FakeBackend(
+        tool_turn(ToolCall(id="c1", name="_check_new_input", arguments={}))
+    )
+    loop = AgentLoop(
+        backend,
+        ToolRegistry([*tools(), a_tool("_check_new_input", check_new_input)]),
+    )
+    messages: list[Message] = []
+
+    task = asyncio.create_task(
+        loop.run_turn(
+            messages,
+            "go",
+            folded=lambda: ("wechat", "submission-9"),
+            folded_commit=committed.append,
+            injected=lambda: len(taken),
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == INTERRUPTED
+    assert messages[-1].channel == "", "the harness line is not the person's bubble"
+    assert committed == [0], "a wordless take is not committed as delivered"
+
+
 async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:
     """The tool has returned before the event is emitted, so its answer stands.
 
@@ -774,6 +952,40 @@ async def test_an_interruption_in_the_closing_event_keeps_the_answer() -> None:
     assert messages[-1].content == "the work's answer"
 
 
+async def test_an_interruption_in_the_usage_report_keeps_the_model_s_request() -> None:
+    """The call completed before the report, so its request is not lost.
+
+    `UsageReported` is an await between a completed call and the batch that
+    writes it down.  A cancellation landing in it — the report is emitted
+    through an observer whose `on_event` awaits — completes the batch with
+    `INTERRUPTED` rather than leaving the model's request unwritten: none of
+    the calls ran, and the sentence is what promises no result is coming.  It
+    is the same repair the batch loop makes for a cancellation inside a batch.
+    """
+
+    async def answer(_arguments: dict[str, Any]) -> str:
+        return "never asked"
+
+    backend = FakeBackend(tool_turn(ToolCall(id="c1", name="tool", arguments={})))
+    loop = AgentLoop(backend, ToolRegistry([a_tool("tool", answer)]))
+    messages: list[Message] = []
+    holder: list[asyncio.Task[Any]] = []
+
+    class Cancelling:
+        async def on_event(self, event: object) -> None:
+            if isinstance(event, UsageReported):
+                holder[0].cancel()
+                await asyncio.sleep(0)  # deliver the cancel inside the emit
+
+    task = asyncio.create_task(loop.run_turn(messages, "go", Cancelling()))
+    holder.append(task)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m.role for m in messages] == ["user", "assistant", "tool"]
+    assert messages[-1].content == INTERRUPTED
+
+
 async def test_observer_receives_deltas_in_order() -> None:
     backend = FakeBackend(text_turn("abc", chunks=["a", "b", "c"]))
     observer = ListObserver()
@@ -784,6 +996,44 @@ async def test_observer_receives_deltas_in_order() -> None:
         "a",
         "b",
         "c",
+    ]
+
+
+async def test_each_model_call_reports_the_size_it_left() -> None:
+    """**The bar follows the conversation per call, not per turn.**
+
+    A turn that calls a tool makes several model calls, and the context grows
+    with each.  Waiting for `TurnFinished` held the previous turn's figure for
+    the whole run — on a long tool loop, minutes of a bar describing a
+    conversation nobody is in any more.  Each report is that call's own usage,
+    never the running bill, and it arrives after the call's answer and before
+    the tool it asked for runs.
+    """
+    first = Usage(prompt_tokens=10, completion_tokens=2)
+    second = Usage(prompt_tokens=20, completion_tokens=3)
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                usage=first,
+                tool_calls=(ToolCall(id="c1", name="now", arguments={}),),
+                stop_reason="tool_calls",
+            )
+        ),
+        ScriptedTurn(result=StreamChatResult(text="done", usage=second)),
+    )
+    observer = ListObserver()
+
+    await AgentLoop(backend, registry()).run_turn([], "go", observer)
+
+    reports = [e for e in observer.events if isinstance(e, UsageReported)]
+    assert [report.last_usage for report in reports] == [first, second]
+    assert [k for k in observer.kinds() if k != "TextDelta"] == [
+        "UsageReported",
+        "ToolCallStarted",
+        "ToolCallFinished",
+        "UsageReported",
+        "TurnFinished",
     ]
 
 

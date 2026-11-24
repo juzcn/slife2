@@ -33,6 +33,7 @@ MCP server。
 | **conversation id** | `(agent, subagent)`：一次调用所面向的对话身份。 |
 | **conversation** | 一个 agent 自己的历史，或它的某个 subagent 的历史。 |
 | **turn** | 一次交换：输入、模型的回答以及它发起的工具调用。 |
+| **plan** | 模型为一个对话维护的当前步骤列表，每项带状态。它存放在对话目录旁，每轮开始时重放，并显示在输入框上方。 |
 | **channel** | 消息到达的位置：`tui`、`wechat`、`peer_agent:<peer>`、`agent:<name>`、`subagent:<name>`、`agent-task:<name>` 或 `async-tool:<name>`。 |
 | **marker** | 发送者在消息前添加的机器可读前缀，例如 `[Wechat:{…}]`。随消息存储，只在显示时移除。 |
 | **family** | 拥有一个配置节或文件夹，并向 hub 声明其所含行的 plugin。 |
@@ -112,8 +113,9 @@ powershell -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.c
 
 只有机器上没有 Python 3.13 时才会安装它；`uv python upgrade 3.13` 可升级到更新的
 补丁版本。安装器会把随附的 `skills/` 和 `jobs/` 放入数据目录，**同名文件会被覆盖**；
-用其他名字添加的 skill 或 job 不受影响。`AGENTS.md` 和 `slife2.yaml` **永不覆盖**：
-随附版本有变化时，会写回 `AGENTS-default.md` / `slife2-default.yaml` 供你比较合并。
+用其他名字添加的 skill 或 job 不受影响。`AGENTS.md` 同样会被覆盖——它是系统交付的
+模型工具指南，不是供你编辑的文件。`slife2.yaml` **永不覆盖**：随附版本有变化时，会
+写回 `slife2-default.yaml` 供你比较合并。
 
 从源码检出目录运行安装器：
 
@@ -163,7 +165,8 @@ export DEEPSEEK_API_KEY=...
 ```
 
 `slife2.yaml` 是必需的——没有内置配置。安装器会把随附文件放入新的 home；源码检出
-直接使用代码旁的 `slife2.yaml`。`AGENTS.md` 同样必需，规则相同。
+直接使用代码旁的 `slife2.yaml`。`AGENTS.md` 同样必需；它由安装器写入，重装时会被
+替换。
 
 ### Docker
 
@@ -176,37 +179,24 @@ docker build -f docker/Dockerfile -t slife2:local .
 镜像以非 root 用户 `slife2` 运行；源码和数据目录是 `/opt/slife2`，runtime 目录是
 `/home/slife2/.slife2/runtime`。镜像约 3 GB，因为它包含完整配置点名的程序。
 
-镜像没有 OS keyring，所以把 key 放在卷里的 credstore 加密文件中。创建一次，并把
-配置点名的每个 key 存进去：
+镜像没有 OS keyring，所以 key 以环境变量传入。构建运行与宿主机相同的
+`scripts/install.sh`，因此其日志会列出随附配置点名的每个凭据；把它们逐行写进一个
+env 文件，用 `--env-file` 传入——不要用 `-e KEY=...`，那会把值放进进程表：
 
 ```bash
-docker volume create slife2-cred
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
-  --entrypoint bash slife2:local
-# 在该 shell 中：
-credstore set-password            # 设置主密码
-credstore set DEEPSEEK_API_KEY    # 然后逐条执行构建日志列出的行
-```
+cat > slife2.env <<'EOF'
+DEEPSEEK_API_KEY=...
+SILICONFLOW_API_KEY=...
+SERPER_API_KEY=...
+EOF
 
-构建运行与宿主机相同的 `scripts/install.sh`，因此其日志会列出随附配置所需的每一条
-`credstore set <KEY>`。跑一次 prompt 然后退出——镜像会询问主密码，配置里的每个
-`${VAR}` 都从文件解析：
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore \
+docker run --rm -it --env-file slife2.env \
   slife2:local 'Use the shell tool to run pwd and report the output.'
 ```
 
-或者以 headless 方式启动并保持运行（同样会询问密码）：
-
-```bash
-docker run --rm -it -v slife2-cred:/home/slife2/.credstore slife2:local
-```
-
-key 配置在容器的 credstore 中，而不是命令行上。挂载的、值为字面量的 `slife2.yaml`
-是另一种受支持的来源。如果对话和日志要在容器之外保留，挂载 `/opt/slife2/agents`
-和 `/home/slife2/.slife2`。凭据配置、一次性 prompt 和容器相关说明见
-[docker/README.md](docker/README.md)。
+挂载的、值为字面量的 `slife2.yaml` 是另一种受支持的来源。如果对话和日志要在容器之外
+保留，挂载 `/opt/slife2/agents` 和 `/home/slife2/.slife2`。凭据配置、一次性 prompt
+和容器相关说明见 [docker/README.md](docker/README.md)。
 
 ## 快速开始
 
@@ -263,7 +253,7 @@ Commands:
 | `--keep-servers` | 本实例退出后保留共享 server。 |
 | `--headless` | 运行同一个窗口、server、连接和轮次，但不显示任何内容。agent 仍在 peer 网络上可达。Ctrl+C 退出。 |
 | `--lang {en,zh}` | 设置窗口语言。不带该参数时从操作系统检测。 |
-| `--json` | `status` 以 JSON 输出（`ok`、`servers`、`broker`；每个 server 行带日志路径）。 |
+| `--json` | `status` 以 JSON 输出（`ok`、`servers`、`brokers`；每行带日志路径）。 |
 | `--force` | 即使另一个客户端正在使用，也停止共享 server。仅 `down`。 |
 | `--prompt TEXT` | 要问运行中 agent 的任务。仅 `probe`。 |
 | `--timeout SECONDS` | `probe` 等待完整回答的秒数。默认 3600。 |
@@ -317,13 +307,14 @@ prompt、工具 schema 和日志行保持英文。外部文本（工具结果、
 | `slife2-schedule` | 定时任务及其账本 | 24039 |
 | `slife2-a2a` | 基于 MQTT 的 peer-agent 网络 | 24040 |
 
-subagent 网络由同一模块在 24041 端口提供，以
-`python -m slife2.plugins.a2a.local_server` 启动，没有单独的控制台脚本。
+subagent 网络通过自己的入口模块 `python -m slife2.plugins.a2a.local_server`
+运行同一实现，端口 24041，没有单独的控制台脚本。
 
 **WSL2 使用 `networkingMode=mirrored` 时，WSL 实例把端口整体偏移 100**（agent
 24100、toolhub 24120）。本地 MQTT broker 不偏移：两套栈共享它。镜像模式让 Windows
 和 WSL 的 loopback 合一，默认端口上的 WSL 栈会被 Windows 实例看到并被静默复用。
 `wsl_port_offset` 改变偏移量：默认 100，`0` 关闭，在镜像模式之外被忽略。
+
 ## 使用终端界面
 
 ### 按键
@@ -335,7 +326,7 @@ subagent 网络由同一模块在 24041 端口提供，以
 | `Esc` | 打断正在运行的轮次。 |
 | `Ctrl+C` | 有选中内容时复制；否则打断；再否则退出。 |
 | `Ctrl+S` | 打开模型选择器。`↑`/`↓` 移动，`Enter` 选择，`Esc` 关闭。 |
-| `Ctrl+O` | 打开 subagent 选择器；选中后打开只读视图。`Esc` 关闭。 |
+| `Ctrl+O` | 打开 subagent 和正在运行的 agent task 的选择器；选中后打开只读视图。`Esc` 关闭。 |
 | `Ctrl+Q` | 退出（Textual 的标准绑定；不在状态栏显示，因为带流控的终端可能先截获它）。 |
 | `PageUp` / `PageDown` | 翻页。 |
 | `Home` / `End` | 跳到对话开头或结尾。 |
@@ -345,9 +336,18 @@ subagent 网络由同一模块在 24041 端口提供，以
 
 ### 发送消息
 
-轮次运行期间发送的消息会排队；当前轮结束后再运行排队消息。状态栏显示队列深度。
-`Esc` 打断当前轮，但保留队列。轮次运行期间到达的消息——窗口里输入的、其他 channel
-移交的、headless 窗口的输入——会在下一个迭代边界并入该轮。
+轮次运行期间发送的消息会排队。运行中的轮次会在下一个迭代边界取走它并入该轮；
+这一轮没有取到的消息，按顺序各自作为新的一轮运行。状态栏显示队列深度。`Esc`
+打断当前轮，但保留等待中的消息。
+
+### 计划
+
+模型可以为手头的工作维护一个计划。每一项是一行文本加一个状态——`pending`、
+`active`、`done` 或 `blocked`——模型用 `plan_write` 写入整份列表。列表随每一轮
+开头的 `[TURN-PROMPT:{…}]` 一起重放，因此上下文重建不会丢掉它；存在计划时，输入框
+上方的条带会显示它，计划比条带长时条带内可滚动。状态是模型自己的声明，不是 harness
+的观测：slife2 不会从工具调用推导状态。计划存为对话目录中的 `plan.yaml`；写入空列表
+即删除它。
 
 ### 模型选择
 
@@ -355,23 +355,29 @@ subagent 网络由同一模块在 24041 端口提供，以
 调用的 `model_switch`。对话保留历史，在下一轮切到新模型；进行中的轮次在它启动时的
 模型上跑完。
 
-### 观看 subagent
+### 观看 subagent 或 agent task
 
-`Ctrl+O` 列出本 agent 创建的 subagent，并打开其中一个的只读视图。视图先显示已存储
-的对话，再显示正在进行的轮次——包括打开时已经在运行的那一轮。`Esc` 返回。视图是
-只读的：观看不会让你成为该 subagent 的窗口，prompt 不显示，审批请求也不会交给你。
-在被观看的对话中，唤醒它的消息显示为 `Agent(<name>)>`；来自兄弟 subagent 的消息
-显示为 `Subagent(<name>)>`。
+`Ctrl+O` 列出本 agent 创建的 subagent 和正在运行的 agent task，并打开选中项的只读
+视图。视图先显示已存储的对话，再显示正在进行的轮次——包括打开时已经在运行的那一轮。
+task 没有已存储的对话：它的视图以收到的 description 开头，然后是它唯一的一轮。
+`Esc` 返回。视图是只读的：观看不会让你成为该 subagent 的窗口，prompt 不显示，审批
+请求也不会交给你。在被观看的对话中，唤醒它的消息显示为 `Agent(<name>)>`；来自兄弟
+subagent 的消息显示为 `Subagent(<name>)>`；task 的话显示为 `AsyncTask(<name>)>`。
+
+只列出正在运行的 task。task 如果在 picker 打开后停止，视图会以最终状态和结局说明
+打开——task 不记录任何东西，所以没有事件可以重放。观看不会让 task 变成 `finished`：
+答案仍然通过 hand-over 回到会话。
 
 ### 恢复对话
 
 关闭再打开窗口、重启 server、或经过空闲清理，都不会开始新对话。对话按原始时间戳、
 工具调用和结果恢复；推理折叠在它原来折叠的位置。
 
-状态栏报告上一次模型调用留下的上下文大小及其占模型窗口的比例。每一轮之前，一条
-注释说明上下文决策保留了什么、召回了什么。它还显示 `tools 26/358`：hub 已加载的
-清单，以及目录的总量。skill、job、CLI 条目都计入总量，已下线 server 的工具也计入；
-前半部分是下一次请求实际携带的。两个数字来自同一次询问。
+状态栏报告上一次模型调用留下的上下文大小及其占 **prompt 预算**（模型窗口减去 `max_tokens`，
+provider 把两者算在同一个窗口里）的比例。每一轮开始时，
+`_context_rebuild` 的回答会说明上下文决策保留了什么、召回了什么。它还显示
+`tools 26/358`：hub 已加载的清单，以及目录的总量。skill、job、CLI 条目都计入总量，
+已下线 server 的工具也计入；前半部分是下一次请求实际携带的。两个数字来自同一次询问。
 
 ### 图片
 
@@ -405,57 +411,56 @@ embedding provider。文件缺失时启动停止，并用一行错误指出搜�
 `slife2.yaml`。
 
 `AGENTS.md` 与配置并列，同样必需。它是模型对自己工具的指南，包含在每个对话开头的
-system prompt 中；修改后下一个对话即可读到。安装器按配置的规则放置它：你的副本有
-差异时写 `AGENTS-default.md`。
+system prompt 中。它是系统交付物，不是供人编辑的文件：重装时会被覆盖，也不会生成
+`AGENTS-default.md`。想给提示词加内容，使用 `agent.system_prompt` 指定的自定义模板。
 
 `slife2.yaml` 可以安全地提交到版本库，它不应包含秘密；每个凭据都是运行时解析的
-`${VAR}` 或 `keyring:` 引用。
+`${VAR}` 引用。
 
 ### 配置节
 
 | 节 | 用途 |
 |---|---|
-| `servers:` | 每个 plugin server 的地址和端口。缺省时使用默认值。 |
-| `providers:` | chat provider 及其模型。 |
-| `default:` | 新对话使用的模型，`provider/model`。 |
-| `agent:` | 迭代上限和 system-prompt 模板。 |
-| `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
-| `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
-| `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider，每个可带一个可选的 `rerank_model` 供召回的精排使用。 |
-| `context:` | 上下文决策的限额。 |
-| `tool_load:` | 已加载工具上限，以及启动即加载、永不被逐出的工具。 |
-| `tool_result:` | 单个工具结果的 token 预算。 |
+| `providers:` | chat provider 及其模型；`providers.default:` 指定新对话使用的模型，`provider/model`。 |
+| `embeddings:` | 轮次、工具和文件柜索引使用的 embedding provider；`embeddings.default:` 选择使用哪一个，每个可带一个可选的 `rerank_model` 供召回的精排使用。 |
+| `media:` | 图片、视频、语音和转写 provider。 |
+| `file-tunnel:` | 本地文件的公网 URL provider；`file-tunnel.default:` 选择使用哪一个。 |
 | `mcp:` | 外部 MCP server（stdio 或 HTTP）。 |
 | `rest-api:` | 暴露为工具的 OpenAPI 文档。 |
 | `cli:` | 机器上已经安装的命令。 |
 | `skills:` | `skills/` 下 playbook 的环境变量。 |
-| `media:` | 图片、视频、语音和转写 provider。 |
-| `file-tunnel:` | 本地文件的公网 URL provider。 |
+| `agent:` | 迭代上限和 system-prompt 模板。 |
+| `context:` | 上下文决策的限额。 |
+| `agent-task:` | `max_running`，每个 agent 的后台任务数。 |
+| `subagent:` | `max_running`，以及本地 subagent 网络的 broker 和 `org`。 |
 | `peer_agent:` | 远端 peer-agent 网络。 |
+| `tool_load:` | 已加载工具上限，以及启动即加载、永不被逐出的工具。 |
+| `tool_result:` | 单个工具结果的尺寸预算，按 UTF-8 字节。 |
+| `servers:` | 每个 plugin server 的地址和端口。缺省时使用默认值。 |
 
 没有 `wechat:`、`cabinet:`、`schedule:` 或 `tui:` 节。微信登录通过扫码创建并保存在
 agent 目录下。文件柜、调度器和终端收件箱由各自的 server 及其持有的数据启用。
 
 ### 秘密
 
-值可以是字面量字符串；`${VAR}`，依次从 shell 环境、
-[credstore](https://pypi.org/project/credstore/)、可选的默认值（`${VAR:-default}`）
-解析；或 `keyring:<service>/<key>`，直接对 OS keyring 解析。
+值可以是字面量字符串，原样使用；或 `${VAR}`，依次从 shell 环境、
+[credstore](https://pypi.org/project/credstore/) 的 OS keyring 解析。
 
-**只有 credstore 管理的秘密会被输出保护。** slife2 从 credstore 解析出的凭据——一个
-`keyring:` 引用，或 store 回答了的一个 `${VAR}`——在工具结果、工具清单和日志行中以
-掩码形式显示（至少各留四个字符时显示前四后四，否则显示 `***`）。短于八个字符的值
-不登记。环境变量或字面量是操作者自己的。把每个秘密都放进 credstore：它是 slife2
-唯一会在各处遮罩的存储。
+**只有 credstore 管理的秘密会被输出保护。** slife2 从 credstore 解析出的凭据——store
+回答了的一个 `${VAR}`——在工具结果、工具清单和日志行中以掩码形式显示（至少各留四个
+字符时显示前四后四，否则显示 `***`）。短于八个字符的值不登记。环境变量或字面量是
+操作者自己的。把每个秘密都放进 credstore：它是 slife2 唯一会在各处遮罩的存储。
 
-解析是惰性且宽松的。未解析的引用原样保留，因此缺失的 key 会在 API 调用处失败并点名
-它。
+解析是惰性且宽松的。provider 或 media 调用在凭据未解析时会在使用前拒绝。工具服务器的
+`env:` 或 `headers:` 条目若仍持有引用，则会被省略并给出警告，由子进程自己的缺失 key
+策略决定：有的服务器无 key 运行，有的用它自己的话拒绝。
 
 ### 示例
 
 ```yaml
 agent:
   max_iterations: 0          # 0 或缺省表示不设上限
+  compact_at: 0.9            # 占 prompt 预算（窗口 − max_tokens）的比例；0 关闭自动压缩
   # system_prompt: prompts/jack.j2
 
 agent-task:
@@ -467,21 +472,21 @@ subagent:
   broker: {host: localhost, port: 1883}
 
 context:
-  ceiling: 0.8               # keep + 召回合计顶到的总量上限
+  ceiling: 0.8               # 占 prompt 预算（窗口 − max_tokens）的比例
   recall_page_limit: 80       # 每路召回的候选数；融合结果不再截断
   min_similarity: 0.52       # 要高于嵌入模型的噪声底
   keyword_weight: 1.0        # 加权 RRF；语义腿固定 1.0
-  rerank_min_score: 0.1      # cross-encoder 的分数下限，0-1；0 表示全保留
+  rerank_min_score: 0.3      # cross-encoder 的分数下限，0-1；0 表示全保留
   timeout: 20.0              # 判别调用的秒数
 
 tool_load:
   threshold: 100             # 超出后逐出最久未使用的已加载工具
   autoload: [tool_search, tool_list, func_tool_load, _func_tool_unload,
-             _check_new_input, skill_use, check_async, cancel_async,
-             turn_read]                                # 且永不被逐出
+             _check_new_input, _turn_compact, _context_rebuild, skill_use,
+             check_async, cancel_async, turn_read]    # 且永不被逐出
 
 tool_result:
-  tokens: 8000               # 每个结果的预算；最小 512
+  bytes: 32768               # 每个结果的预算；最小 2048
 
 mcp:
   arxiv:
@@ -523,7 +528,7 @@ skills:
 | `cli:` | `cli_get`、`cli_set`、`cli_list`、`cli_remove`、`cli_set_enabled` |
 | `skills:` | `skill_draft`、`skill_set`、`skill_edit`、`skill_list`、`skill_remove`、`skill_set_enabled` |
 | `jobs/`（文件夹） | `job_set`、`job_list`、`job_read`、`job_run`、`job_remove` |
-| `providers:` 与 `default:` | `model_get`、`model_set`、`model_list`、`model_remove`、`model_switch` |
+| `providers:`（含其 `default:`） | `model_get`、`model_set`、`model_list`、`model_remove`、`model_switch` |
 
 所有写入都经过同一个模块（`slife2.libs.host.configfile`），在跨进程锁下进行。写入
 保留注释，结果由启动时同一个 loader 校验。loader 拒绝的条目会被还原，并告诉调用方
@@ -531,28 +536,50 @@ skills:
 
 `set` 写整个条目：没写的字段就是被删掉。`model`、`mcp`、`rest-api`、`cli` 是例外：
 先读对应的 `*_get`，它返回整个对象，`*_set` 原样接收，所有字段都必填——漏一个字段是
-schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有审批关卡；特别是
-`mcp_set` 带 `command:` 时记录的是 slife2 将要启动的程序。
+schema 错误，不是删除。`set_enabled` 只改 `enabled`。写入前没有审批关卡。
 
 ## 能力
 
 ### 对话与记忆
 
-对话不会无界地累积上下文。每一轮之前，`slife2-context` 进行一次模型调用，决定保留
-哪些轮次、从轮次日志中召回哪些轮次；这一轮在两者合并后的结果上按时间顺序运行。如果
-召回匹配到的内容超过容量，只返回放得下的部分。决策失败时保留手头的上下文；轮次存储
-缺失则使该轮失败。
+对话不会无界地累积上下文。每一轮的第一个 boundary，harness 先让决策模型填出选择（一次强制的
+`_context_rebuild` 调用），再带着这些参数调用工具：保留哪些历史轮次、从轮次日志中召回哪些轮次；
+这一轮在两者合并后的结果上按时间顺序运行，当前轮跟在最后。当前轮永远不在选择范围内。当工作已经转向时，
+模型也可以自己调用 `_context_rebuild`，带上自己的 `mode`/`turn_ids`/`recall` —— 同一份 schema，
+按原样应用，工具内部不再发决策调用；回答会带上这一轮从那儿开始运行所需的上下文估算。如果召回匹配到的内容超过容量，只返回放得下的部分。**预算按 prompt 算，不按窗口算**：
+provider 把 prompt 和请求里的 `max_tokens` 算在同一个窗口里，所以上限是 `context.ceiling`
+乘以「窗口 − `max_tokens`」。选择超过上限时——包括折叠或重启恢复出来的旧列表——会从最旧的
+轮次开始裁到预算内，回答里的 `fitted` 说明裁掉了几轮。决策失败时保留手头的上下文，
+并且这一轮不再重问；轮次存储缺失则使该轮失败。
+
+`_context_rebuild` 和 `_turn_compact` 是两个决策工具：harness 先向 `decide` / `select_live`
+要参数，再带参调用工具；模型自己的调用则自己提供参数。合法性由工具检查，失败就是 tool error，
+agent 能看到并自行纠正。
+
+一轮的内容超过 prompt 预算（窗口 − `max_tokens`）的 `agent.compact_at`（默认 0.9）时，该轮还会从自己的模型
+上下文中丢掉不再需要的消息。`_turn_compact` 是视图，不是编辑：live view 给人的消息和
+工具结果标注它们的 id（`[MESSAGE:{"id": …}]`），模型可以自己指定要丢掉的 id；harness
+的自动调用会先问 selector，回答会报告有多少条离开。选择里出现视图没有提供的 id，会
+被拒绝并说明原因，模型可以改正，视图保持完整；一次工具调用只要命中其中一条消息，整个
+交换（调用与全部结果）一起离开。轮次日志保留每一条消息，下一轮仍从完整对话开始，而
+`_context_rebuild` 会让这个视图重新开始。决定「全部保留」或失败的决策会停止这一轮
+余下时间的自动压缩；模型仍可自己调用 `_turn_compact`，之后成功丢下消息会恢复自动压缩。
 
 模型用 `turn_list` 浏览历史、用 `turn_search` 按一轮讲的内容搜索、用 `turn_read`
 读完整的某一轮、用 `turn_summarize` 写摘要和标签。`turn_list` 按最新优先，每轮一行；
 `since`/`until` 接受 ISO 日期或 `yesterday` 之类的说法，`limit`/`offset` 按
 `total` 翻页。`turn_search` 使用同一个时间窗口，返回同样的一行外加 `similarity`
-分数；它的 `query` 词把包含这些词的轮次排在前面，但不是过滤器。这些工具都不接受
+分数；它的 `keywords` 把包含这些词的轮次排在前面，但不是过滤器。默认搜索整个日志；
+`exclude_context: true` 会把当前对话正在使用的轮次排除在外。这些工具都不接受
 agent 参数：模型只能读取自己的历史。
 
-每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now` 和 `token-usage`；它是提示文本，不会
-存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和
-跨度。大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
+`turn_search`、`cabinet_search` 和 `tool_search` 共用一套写法：都接受 `keywords`
+和 `sentences`，回答 `results`，并在旁边给出 `best`、`confidence`、`browsed` 和
+`limit`。`confidence` 在排序页上是 `sure`、`weak` 或 `none`，在浏览页上是
+`null`。
+
+每一轮以 `[TURN-PROMPT:{…}]` 开头，携带 `now`，以及存在时的 `plan`；它是提示文本，
+不会存储。被重建进上下文的每一轮另外带有 `[TURN:{…}]` 脚注，写明它的 id、channel 和跨度。大写 marker 是 harness 添加的注解；读起来像词的 marker（例如 `[Wechat:{…}]`）
 是发送者写的，会随消息一起存储。
 
 ### 工具
@@ -581,19 +608,21 @@ hub 提供四个集合级工具：
 
 重启恢复的是离开时的样子：对话上下文，以及当时已加载的工具清单。已加载集合存在
 catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变它，而且只会增加。
-它由 `tool_load.threshold` 限制（默认 100）。超出后，最久未被调用的工具被卸载；
+它由 `tool_load.threshold` 限制（默认 100）。超出后，最久未被使用或加载的工具被卸载；
 `tool_load.autoload` 里的名字永不被逐出，模型也不能卸载其中任何一个。从列表里移除
 一个名字不会卸载它，只是不再保护它。裁剪发生在轮次边界，并以一次工具调用及其结果
 写入对话。
 
 工具命名：`mcp:` 条目的工具是 `{server}__{tool}`，例如
-`arxiv__arxiv_search_papers`；plugin 自己的工具用裸名字。
+`arxiv__arxiv_search_papers`；plugin 自己的工具用裸名字。两个会呈现同一个名字的
+工具——另一个 source 已占用的名字，或只有 provider 字母表会替换掉的字符不同的两个
+远端名字——会在 source 处被拒绝；不会一个静默覆盖另一个。
 
 工具结果是 JSON 对象，只有两类回答的文本本身就是内容：`_check_new_input` 原样交出
 人的消息，`skill_use` 交出 playbook 文本。列表回答
 `{"<noun>": [], "total": N, "limit": L, "offset": O}`；`total` 说明是否还有下一页。
 拒绝或未命中会抛出 `ToolError`，harness 将其报告为带原因的工具失败。任何回答都不应
-超过 `tool_result.tokens`；超过预算的输出会存成 dump（见[文件柜](#文件柜)）。
+超过 `tool_result.bytes`；超过预算的输出会存成 dump（见[文件柜](#文件柜)）。
 
 #### 工具调用选项
 
@@ -601,8 +630,8 @@ catalogue 里而不是进程里；只有 `tool_load.autoload` 的变更会改变
 
 | 参数 | 效果 |
 |---|---|
-| `_timeout` | 本次调用的秒数，覆盖工具默认值。`0` 或负数表示"用默认值"，绝不是"不限时"。工具自己声明了 `timeout` 参数时由它自己执行。两者都没有时，调用一直运行到结束。 |
-| `_async` | 后台运行。模型收到 `task_id`；结果带 `[AgentToolResult:{…}]` marker 从 `async-tool:<tool>` channel 回来。`check_async` 报告状态；`cancel_async` 放弃它。结果预算仍然适用。agent task 的循环没有 `_async`。 |
+| `_timeout` | 本次调用的秒数，覆盖工具默认值。任何不是正有限数的值——`0`、负数、文本——都会使本次调用失败；该值绝不会被读作"不限时"或"默认值"。工具自己声明了 `timeout` 参数时由它自己执行。两者都没有时，调用一直运行到结束。 |
+| `_async` | 后台运行。模型收到 `task_id`；结果带 `[AgentToolResult:{…}]` marker 从 `async-tool:<tool>` channel 回来。`check_async` 报告状态；`cancel_async` 放弃它。结果预算仍然适用。agent task 只有一个 turn：提示词告诉模型不要使用 `_async` 或再启动一个任务。 |
 | `_approve` | 运行前询问用户。终端画一行（`y` 批准，`n` 或 `Esc` 拒绝）并通过 `answer_approval` 回答。channel 背后没有人时直接运行。能回答的调用方用 `watched=true` 声明。 |
 
 #### skill 与命令
@@ -656,8 +685,10 @@ job 通过 `slife2.job` 的两个通用句柄组合系统的其余部分：
 
 - `generate_image`——按提示词画图。
 - `generate_video`——按提示词或图片生成视频。
-- `text_to_speech`——把文本写成语音文件。
-- `transcribe_audio`——转写音频文件，按 `offset` 和 `limit` 分页。
+- `text_to_speech`——把 `text` 或 `input` 指定的文本文件读成语音文件。
+- `transcribe_audio`——转写 `input` 指定的音频文件；`output` 把 transcript 写到你指定的路径（相对路径相对于该对话的工作目录）并回答该路径；不指定 `output` 时回答 transcript，长文本会存成 dump。
+
+生成工具默认写进 agent 的 media 目录；`output` 改为指定文件（相对路径相对于该对话的工作目录）。每个工具都以文本回答文件路径；`transcribe_audio` 不指定 `output` 时回答 transcript 本身。
 
 每个模型声明自己的用途：
 
@@ -681,9 +712,9 @@ media:
 支持的 `api:` 值是 `dashscope-aigc`（图片、视频、语音、转写）和 `openai-images`
 （仅图片生成）。选择不支持所请求 kind 的模型会被拒绝。
 
-生成的文件写在 `<data>/agents/<agent>/media/` 下。`folder` 参数在该根目录内创建
-子目录；越界的路径会被拒绝。超时仍未完成的长时间视频调用会带着 provider 的 job id
-被拒绝，而不是返回结果。
+生成的文件默认写在 `<data>/agents/<agent>/media/` 下。每个生成工具还接受一个
+`output` 路径：相对路径相对于该对话的工作目录，绝对路径按原样使用，产物写到那里。
+超时仍未完成的长时间视频调用会带着 provider 的 job id 被拒绝，而不是返回结果。
 
 ### 文件隧道
 
@@ -695,7 +726,8 @@ unexpose_local_image(token)   -> 该 URL 失效
 ```
 
 文件从原位置提供。文件变化、调用 `unexpose_local_image`、或进程退出时链接失效。共享
-比创建它的轮次活得更久。私钥、`.env` 文件和保存的密码会按名字被拒绝。
+比创建它的轮次活得更久。私钥、`.env` 文件和保存的密码会按名字被拒绝。`path` 是绝对
+路径，或相对于数据目录（agent 自己的工具在这里运行）的相对路径。
 
 支持三个 provider。同时只有一个生效；其余可以保留配置但不参与。
 
@@ -733,7 +765,7 @@ corpus。语义检索只覆盖 agent 自己写的三类——note、diary、repo
 
 dump 是对对话而言过大的工具输出。输出完整存储在**它的文件**里，以工具调用 id 为键；
 文件柜里的行只是地址，不保存正文，所以大输出不会在 SQLite 里再存一份。对话携带的是在
-`tool_result.tokens` 内的开头一段，前面有 marker：文件大小，以及文件相对于数据目录的
+`tool_result.bytes` 内的开头一段，前面有 marker：文件大小，以及文件相对于数据目录的
 路径（agent 自己的工具就在这个目录下运行，数据目录迁移后仍然有效）；不做任何改写，
 也不数行或字符——大小直接来自镜像文件的 `stat`，不需要再扫一遍内容。模型用
 `dump_read` 读回任意部分：`mode="line"` 按行读，`offset` 从 1 开始、负数从末尾数；
@@ -766,9 +798,9 @@ note、diary、report 的文件全文；保存的文件只按词匹配；dump �
 它们的大小不受 agent 控制，语义检索暂时搁置，以后要做可能需要一层 RAG。
 `cabinet_summarize` 为文档写描述；文件的描述只是关键词文本，不会重新 embed；dump 和
 图片不写描述，因为它们不参与搜索。`file_save` 复制本地文件（从不移动它），或抓取
-`http(s)` URL。抓取只面向公网：带凭据的 URL、`localhost` 和非全局可路由的字面地址
-会被拒绝，响应上限
-为 50 MiB。
+`http(s)` URL。一次调用可以给出多个来源，每个来源各自保存或被拒绝——答案里列出存下了
+什么、哪些失败了以及原因。抓取只面向公网：带凭据的 URL、`localhost` 和非全局可路由的
+字面地址会被拒绝，响应上限为 50 MiB。
 
 ### 微信
 
@@ -799,8 +831,9 @@ note、diary、report 的文件全文；保存的文件只按词匹配；dump �
 
 ### Agent 任务
 
-agent task 是同一个 agent 的另一条循环，用名字和描述启动，稍后以消息形式在同一对话中
-回答。
+agent task 是发起对话——agent 自己的，或某个 subagent 的——的另一个 turn，用名字和
+描述启动，稍后以消息形式回答。它只有一个 turn：提示词告诉它不要使用 `_async` 或再
+启动任务，因为结果到达时已经没有下一轮可以接收。
 
 | 工具 | 用途 |
 |---|---|
@@ -809,25 +842,32 @@ agent task 是同一个 agent 的另一条循环，用名字和描述启动，�
 | `agent_task_list` | 列出本 agent 的任务，运行中的在前。 |
 | `agent_task_cancel` | 停止任务，并报告调用后的状态。 |
 
-任务以 agent 身份运行，使用相同的 system prompt、模型、工具和上下文决策。它没有启动
-它的那一轮，因此描述必须复述相关上下文。回答带 `[AgentTaskResult:{…}]` marker 从
-`agent-task:<name>` channel 到达，显示为 `AsyncTask(<name>)>`。任务停止时没有窗口
-显示该对话，任务以 `failed` 结束——回答就是产物，不会被保留——日志记录原因。
+任务以发起它的对话身份运行：agent 发起的任务使用 agent 的 system prompt、模型、工具
+和自己的上下文决策；subagent 发起的任务使用 subagent 的提示词、角色和模型。**上下文
+是副本**：任务读取对话的上下文，自行决定本轮要跑什么；任务结束后，对话存储的上下文
+不变。它没有启动它的那一轮，因此描述必须复述相关上下文。回答带
+`[AgentTaskResult:{…}]` marker 从 `agent-task:<name>` channel 到达，显示为
+`AsyncTask(<name>)>`。subagent 没有窗口，所以 subagent 的任务回答投递到其 agent 的
+对话。任务停止时没有窗口显示该 agent，任务以 `failed` 结束——回答就是产物，不会被
+保留——日志记录原因。
 
 ```yaml
 agent-task:
   max_running: 4
 ```
 
-`max_running` 是该节唯一的键；其余来自 `agent:`。任务可以再启动任务，因此
-`max_running` 限制的是并发，不是一段时间内的总工作量。
+`max_running` 是该节唯一的键；其余来自 `agent:`。任务的提示词告诉它不要启动另一个
+任务——它只有一个 turn，和 `_async` 一样。`max_running` 限制的是并发，不是一段时间
+内的总工作量。
 
 ### 定时任务
 
 定时任务是模型写下的名字、描述和 cron 表达式。`slife2-schedule` 在 slife2 运行期间
 触发它。任务到期时，调度器先问是否有窗口正在显示该 agent：没有窗口就把这次运行记为
-`missed`——结果将无处送达——有窗口则直接以 agent task 启动工作。不会打开一轮对话，
-也不消耗模型调用。终端无法询问或派发失败时，运行记为 `failed` 并记录原因。
+`missed`——结果将无处送达——有窗口则直接以 agent task 启动工作。每次运行的工作以
+`<任务名>@<到期时间>` 命名，因此同一任务两次重叠的运行是两个任务，而不是一个名字同时
+代表两者。不会打开一轮对话，也不消耗模型调用。终端无法询问或派发失败时，运行记为
+`failed` 并记录原因。
 
 | 工具 | 用途 |
 |---|---|
@@ -846,8 +886,10 @@ agent-task:
 
 任务只在 slife2 运行时触发。启动时，扫描会关闭被停止的进程遗留的运行——从未启动的
 记为 `missed`，已经命名了 task 的记为 `failed`——轮询为每个任务记录最新的错过触发。
-`schedule_runs(status="missed")` 和 `status="failed"` 列出它们；两者都可以用
-`schedule_run_now(name, due_at)` 重跑，或用 `schedule_run_skip` 关闭。
+停在派发过程中的运行按名字向 agent-task 插件核对：还在跑的任务接管到账本，已经结束的
+按它的结局关闭，插件不持有的记为 `failed`。`schedule_runs(status="missed")` 和
+`status="failed"` 列出它们；两者都可以用 `schedule_run_now(name, due_at)` 重跑，或用
+`schedule_run_skip` 关闭。
 
 账本是 `<data>/agents/<agent>/schedule.db`。没有配置节。任务的 `timezone` 是 IANA
 名字；省略时使用机器当前时钟，不跟随夏令时变化。
@@ -928,13 +970,17 @@ peer_agent:
 
 subagent 是属于另一个 agent 的 agent。它有创建者的工具集、自己的角色化 system
 prompt 和自己的对话，但没有进程、没有窗口、不占用 agent 名字，也没有外部身份。它只在
-本地 subagent 网络上可达，在有消息发给它时运行。`subagent_set` 和 `subagent_remove`
-会拒绝 subagent 调用者。
+本地 subagent 网络上可达，在有消息发给它时运行。`subagent_create` 和 `subagent_remove`
+会拒绝 subagent 调用者。subagent 是常驻的，有自己的记忆；只是在对话旁临时做一件事，
+用 agent task——它跑在创建者上下文的一个副本上，用一条消息回答。
 
-subagent 用 `subagent_set` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
+subagent 用 `subagent_create` 创建，用 `subagent_remove` 删除。创建后，它在本地网络上以
 与 peer agent 相同的操作、以 `subagent_*` 名字寻址：`subagent_send_message`、
 `subagent_task_response`、`subagent_continue_task`、`subagent_cancel_task`、
-`subagent_list`、`subagent_task_list`、`subagent_broadcast`，以及六个群组工具。成员身份就是目录集合，点名的名字不是成员时，
+`subagent_list`、`subagent_task_list`、`subagent_broadcast`，以及六个群组工具。
+`subagent_cancel_task` 会把该 task 结算为 cancelled，并用一条消息告诉成员，成员可以停止、
+不需要再发 task_response；`subagent_remove` 删除前会中断正在运行的 turn，并把与它往来两个
+方向的 task 都记为 cancelled。成员身份就是目录集合，点名的名字不是成员时，
 发送在发布前被拒绝。这个网络上的群消息带 `[SubagentGroup:…]` 和
 `subagent_group:<group>:<sender>` channel，无论发送者是创建者还是兄弟，每个成员
 维护自己的 `subagent-groups.yaml`——本地网络的文件，与 peer 网络的 `groups.yaml`
@@ -945,14 +991,10 @@ subagent 用 `subagent_set` 创建，用 `subagent_remove` 删除。创建后，
 | `name` | subagent 的名字和目录。 |
 | `model` | `provider/model`；为空则用创建者的模型。 |
 | `role` | 包含在 subagent prompt 里的一个词。 |
-| `fork` | 复制创建者当前的对话作为起点。fork 的轮次不存储，只活当前会话。 |
 
-非 fork 的 subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db`、
-`subagent.yaml`、文件柜和媒体目录。fork 只有 `subagent.yaml` 记录：对话以创建者对话
-的副本保存在内存中，读取创建者的轮次日志作为上下文，共享创建者的文件柜和媒体。
-fork 是会话级的；下一次 server 启动时会删除所有 fork 记录。**fork 不能拉进群组**：
-`subagent_group_set` 会拒绝它，它的群消息会被丢弃。调度留在 agent 一侧。subagent
-不能再创建或删除 subagent。
+subagent 位于 `agents/<maker>/subagents/<name>/`，有自己的 `turns.db`、
+`subagent.yaml`、文件柜和媒体目录。调度留在 agent 一侧。subagent 不能再创建或删除
+subagent。
 
 删除 subagent 时，先让本地网络释放它的位置，再停止它的循环，最后删除目录。网络通知
 无法完成时，subagent 保持不变。正在观看它的窗口会被告知对话已不存在。
@@ -991,8 +1033,8 @@ subagent:
       media/                   生成的图片、视频和音频
       wechat.yaml              本 agent 的微信登录
       subagents/
-        <name>/                非 fork subagent 的 turns.db、subagent.yaml、
-                               cabinet/ 和 media/；fork 只有记录
+        <name>/                subagent 的 turns.db、subagent.yaml、
+                               cabinet/ 和 media/
 ```
 
 工具目录放在 agent 目录旁边，因为它属于整个 home，而不是某个 agent。
@@ -1063,8 +1105,7 @@ Windows 上 `uv run pytest` 不能在活栈旁边运行：`uv` 每次运行都�
   点。
 - 配置编辑之前没有审批关卡，包括带 `command:` 的 `mcp_set`——它记录的是 slife2 将
   启动的程序。
-- agent task 可以再启动 agent task；`agent-task.max_running` 限制并发，不限制一段
-  时间内的总工作量。
+- `agent-task.max_running` 限制并发任务数，不限制一段时间内的总工作量。
 
 ## 许可证
 

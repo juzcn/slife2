@@ -1,10 +1,16 @@
-"""The window's two languages: English and Chinese, chosen from the OS.
+"""The interface's two languages: English and Chinese, chosen from the OS.
 
 One translation table and a :func:`t` accessor.  Two languages only, no YAML, no
 catalogs, no dependency — detection is the OS's own answer in a dozen lines of
 stdlib, and the whole user-facing surface is the strings in this one file.
 
-**What is translated is the window, and nothing else.**  The model never reads
+**It lives in the libraries because the lines cross process boundaries.**  The
+window draws most of these, and two of them — a peer or a channel coming online —
+are composed by a *daemon* that must not import the terminal package for the
+vocabulary (`slife2.libs.harness.notes`).  One table, imported by both sides,
+is what keeps `⚡ jill online` from being spelled twice.
+
+**What is translated is the interface, and nothing else.**  The model never reads
 any of this: the system prompt, every tool schema, every job's result strings and
 every log line are English by rule, and a conversation that changed language with
 the terminal's would be a second variable in the one place a difference is
@@ -109,8 +115,8 @@ def set_language(lang: str) -> None:
 
 #: key → {lang: text}.  Every user-facing string of the window lives here.
 #:
-#: **The glyphs are not in these strings.**  `slife2.tui.theme.GLYPHS`' marks
-#: (▸ ▾ ⟐ ↑ ✗ ✅ …) are attached as their own spans at the call site, so a
+#: **The glyphs are not in these strings.**  `slife2.libs.harness.glyphs.GLYPHS`' marks
+#: (▸ ▾ ⟐ ↑ ✗ ✓ …) are attached as their own spans at the call site, so a
 #: translation cannot drop one, and no entry carries a symbol that is not a word.
 #: The one thing that *is* inside the text is a trailing or leading space where
 #: the string is a fragment of a line rather than a line — `" requests
@@ -123,7 +129,7 @@ def set_language(lang: str) -> None:
 #: is the only place that knows the count, and a language that inflects
 #: differently from English is a value change rather than a code change.
 _STRINGS: dict[str, dict[str, str]] = {
-    # ── the harness's own lines (`slife2.tui.notes`) ──────────────────────
+    # ── the harness's own lines (`slife2.libs.harness.notes`) ──────────────────────
     # The count of turns, in the two spellings the notes below are written in.
     "turn_one": {
         "en": "{n} turn",
@@ -138,29 +144,39 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "restored {turns}",
         "zh": "已恢复 {turns}",
     },
-    # What one turn's discriminator decided to run on.  Two counts that are not
+    # What one turn's context decision chose to run on.  Two counts that are not
     # the same number: what it kept of the conversation in hand, and how many
     # earlier turns it went to the log for.
-    "kept": {
-        "en": "kept {turns}, recalled {recalled}",
-        "zh": "保留 {turns}，召回 {recalled}",
+    # The trim's five lists, as the one sentence the transcript shows.  The
+    # verdict a name carries is its list's, so each label is that verdict.
+    "trim_unloaded": {
+        "en": "unloaded: {names}",
+        "zh": "已卸载：{names}",
+    },
+    "trim_refused": {
+        "en": "refused (the system needs them): {names}",
+        "zh": "拒绝（系统需要）：{names}",
+    },
+    "trim_no_load_state": {
+        "en": "no load state: {names}",
+        "zh": "无加载状态：{names}",
+    },
+    "trim_unknown": {
+        "en": "unknown: {names}",
+        "zh": "未知：{names}",
+    },
+    "trim_not_loaded": {
+        "en": "not loaded: {names}",
+        "zh": "未加载：{names}",
+    },
+    "trim_nothing": {
+        "en": "nothing to unload",
+        "zh": "没有可卸载的",
     },
     # A recall that could not use its cross-encoder.  The status is the context
     # server's (`"unavailable"`, `"failed"`, `"empty"`); the sentence is the
     # window's, and it says what the person actually lost — the fused order
     # stands in place of the ranker's.
-    "rerank_unavailable": {
-        "en": "rerank off — the recall keeps its fused order",
-        "zh": "重排不可用 —— 召回保持融合顺序",
-    },
-    "rerank_failed": {
-        "en": "rerank failed — the recall keeps its fused order",
-        "zh": "重排失败 —— 召回保持融合顺序",
-    },
-    "rerank_empty": {
-        "en": "rerank returned nothing — the recall keeps its fused order",
-        "zh": "重排没有返回结果 —— 召回保持融合顺序",
-    },
     # A turn the person stopped.
     "interrupted": {
         "en": "interrupted",
@@ -359,41 +375,56 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "cancel",
         "zh": "取消",
     },
-    "picker_cancelled": {
-        "en": "Cancelled",
-        "zh": "已取消",
-    },
-    # Trailing space: the reference the conversation moved onto follows it.
-    "picker_switched": {
-        "en": "Switched to ",
-        "zh": "已切换到 ",
-    },
-    # ── the subagent picker (`slife2.tui.widgets.ConversationPicker`) ─────
+    # ── the conversation picker (`slife2.tui.widgets.ConversationPicker`) ─
     "conversation_picker_title": {
-        "en": "Watch a subagent",
-        "zh": "观看 subagent",
+        "en": "Watch a subagent or agent task",
+        "zh": "观看 subagent 或 agent task",
     },
-    # The decision line, once a name has been chosen.  The screen opens on it,
-    # so the wording is "watching" rather than "opened".
-    "conversation_watching": {
-        "en": "Watching {name}",
-        "zh": "正在观看 {name}",
+    # The two kinds of row.  A subagent and a task may share a name, so the
+    # kind is what says which server the row belongs to.
+    "picker_kind_subagent": {
+        "en": "subagent",
+        "zh": "subagent",
+    },
+    "picker_kind_task": {
+        "en": "task",
+        "zh": "task",
     },
     # `Ctrl+O` with nothing to offer.  Said rather than shown as an empty
     # picker, for `no_models`'s reason: a list with no rows is a key that looks
-    # broken, and the tool that would fix it is the thing worth naming.
-    "no_subagents": {
-        "en": "{agent} has no subagents yet; the model makes one with `subagent_set`",
-        "zh": "{agent} 还没有 subagent；模型可用 `subagent_set` 创建",
+    # broken, and the tools that would fix it are the things worth naming.
+    "nothing_to_watch": {
+        "en": (
+            "{agent} has nothing to watch yet; the model makes a subagent with "
+            "`subagent_create` or starts a task with `agent_task_start`"
+        ),
+        "zh": (
+            "{agent} 还没有可观看的 subagent 或 agent task；模型可用 "
+            "`subagent_create` 创建，或用 `agent_task_start` 启动"
+        ),
     },
     "subagents_failed": {
         "en": "the subagents could not be listed: {err}",
         "zh": "无法列出 subagent：{err}",
     },
+    "tasks_failed": {
+        "en": "the agent tasks could not be listed: {err}",
+        "zh": "无法列出 agent task：{err}",
+    },
     # ── the watch screen (`slife2.tui.watch`) ─────────────────────────────
     "watch_header": {
         "en": "watching {subagent} — Esc closes",
         "zh": "正在观看 {subagent} — Esc 关闭",
+    },
+    "watch_task_header": {
+        "en": "watching task {task} — Esc closes",
+        "zh": "正在观看 task {task} — Esc 关闭",
+    },
+    # The task's brief, above the live turn.  The status is the server's word
+    # (`running`, `finished`, ...), drawn as it was written rather than mapped.
+    "task_brief_title": {
+        "en": "task {name} — {status}",
+        "zh": "task {name} — {status}",
     },
     "watch_failed": {
         "en": "the conversation could not be watched: {err}",
@@ -455,6 +486,14 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "vision",
         "zh": "视觉",
     },
+    # ── the plan strip (`slife2.tui.widgets.PlanView`) ────────────────────
+    # How much of the model's own list it says is done.  The statuses themselves
+    # are glyphs, and the item text is the model's, so this is the only word the
+    # strip adds.
+    "plan_header": {
+        "en": "plan {done}/{total}",
+        "zh": "计划 {done}/{total}",
+    },
     # ── the status bar (`slife2.tui.widgets.StatusBar`) ───────────────────
     "status_working": {
         "en": "working",
@@ -477,8 +516,8 @@ _STRINGS: dict[str, dict[str, str]] = {
     # — because they are what is printed on the keyboard and a translated one
     # breaks the key-to-action scan; the words after them are the words.
     "status_keybinds": {
-        "en": "Esc/Ctrl+C interrupt  Ctrl+S model  Ctrl+O subagents  Ctrl+C quit",
-        "zh": "Esc/Ctrl+C 中断  Ctrl+S 模型  Ctrl+O subagent  Ctrl+C 退出",
+        "en": "Esc/Ctrl+C interrupt  Ctrl+S model  Ctrl+O watch  Ctrl+C quit",
+        "zh": "Esc/Ctrl+C 中断  Ctrl+S 模型  Ctrl+O 观看  Ctrl+C 退出",
     },
 }
 

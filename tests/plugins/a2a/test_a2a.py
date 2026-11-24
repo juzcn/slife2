@@ -40,6 +40,7 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness.handover import DeliveryFailed
 from slife2.libs.host.config import (
     BROADCAST,
     CANCEL_TASK,
@@ -87,7 +88,6 @@ from slife2.plugins.a2a.mesh import (
     AgentCard,
     AgentName,
     FIFOCache,
-    _backoff_delay,
     _card_instance,
     _decode_payload,
     _NotConnected,
@@ -125,6 +125,7 @@ from slife2.plugins.a2a.server import (
     channel_for,
     marker,
 )
+from slife2.plugins.a2a.states import WORKING
 from slife2.plugins.a2a.task_store import TaskStore, get_store
 from slife2.tui.client import MCPMeshClient
 
@@ -178,6 +179,15 @@ def a2a_message_type(text: str, net: Net) -> str | None:
         return None
     mtype = payload.get("type")
     return mtype if mtype in A2A_TYPES else None
+
+
+def quick_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the requester ladder without its pauses — the schedule has its own test."""
+    monkeypatch.setattr(
+        _T.timeouts.pacing,
+        "requester_retry",
+        _T.Retry(base=0.0, factor=1.0, cap=0.0),
+    )
 
 
 # ── the marker: one envelope, written and read ──────────────────────────────
@@ -361,6 +371,31 @@ def test_the_instance_id_is_read_out_of_the_nested_card() -> None:
     assert _card_instance({"capabilities": {"extensions": ["nonsense"]}}) == ""
 
 
+def test_the_shared_wire_readers_are_the_packages_one_copy() -> None:
+    """**One rule, one place**: the control-character pattern and the
+    user-property reader are `states`' — the mesh scrubs and the group gates
+    refuse with the same pattern, and the mesh's presence and the responder's
+    context check read properties through one function.  A copy in either
+    module is the drift coming back.
+    """
+    from types import SimpleNamespace
+
+    from slife2.plugins.a2a import groups, mesh, responder, states
+
+    assert mesh.CONTROL_RE is states.CONTROL_RE
+    assert groups.CONTROL_RE is states.CONTROL_RE
+    assert mesh.user_property is states.user_property
+    assert responder.user_property is states.user_property
+
+    props = SimpleNamespace(
+        UserProperty=[("a2a-status", "offline"), ("a2a-status", "online")]
+    )
+    assert states.user_property(props, "a2a-status") == "offline", "the first pair wins"
+    assert states.user_property(props, "absent") == ""
+    assert states.user_property(None, "a2a-status") == ""
+    assert states.user_property(SimpleNamespace(), "a2a-status") == ""
+
+
 def test_a_reply_says_which_ending_it_was() -> None:
     def wire(state: str) -> dict:
         return {"result": {"statusUpdate": {"status": {"state": state}}}}
@@ -455,9 +490,10 @@ async def test_a_terminal_reply_outliving_both_caches_is_still_delivered() -> No
 
 def test_the_retry_ladder_is_the_profiles_own_numbers() -> None:
     """1000/2000/4000 ms ± 20 %, and the last rung is the one that repeats."""
-    for attempt in range(6):
-        delay = _backoff_delay(attempt)
-        base = [1.0, 2.0, 4.0][min(attempt, 2)]
+    policy = _T.timeouts.pacing.requester_retry
+    for failures in range(1, 7):
+        delay = policy.delay(failures)
+        base = [1.0, 2.0, 4.0][min(failures - 1, 2)]
         assert base * 0.8 <= delay <= base * 1.2
 
 
@@ -565,7 +601,7 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     mesh._sends["message-1"] = _OutboundSend(
         "message-1", PEER, "session", "{}", record=False
     )
-    mesh._note_inbound("owed-1", PEER)
+    mesh._inbound.add("owed-1", PEER)
 
     rows = mesh.open_tasks()
 
@@ -575,6 +611,28 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     ]
     assert {r["member"] for r in rows} == {PEER}
     assert "message-1" not in {r["task_id"] for r in rows}, "a message is not a task"
+
+
+def test_a_paused_send_is_listed_however_long_ago_it_paused(tmp_path: Path) -> None:
+    """**A task waiting for a person stays open until it is answered.**  The
+    listing hid an interrupted send after `pacing.a2a_task_ttl`, while
+    `continue_task` still accepted it and the peer still held the question — so
+    the one read for "what is waiting on me" stopped naming it."""
+    import time
+
+    import slife2.helpers.timeouts as _T
+
+    session = local_member(tmp_path, subagent="tester")
+    send = _OutboundSend("paused-1", PEER, "session", "{}")
+    send.interrupt = "input_required"
+    send.question = "which one?"
+    send.updated = time.monotonic() - _T.timeouts.pacing.a2a_task_ttl - 1
+    session.mesh._sends["paused-1"] = send
+
+    (row,) = session.mesh.open_tasks()
+
+    assert (row["task_id"], row["status"]) == ("paused-1", "interrupted")
+    assert row["question"] == "which one?"
 
 
 def test_completing_an_unknown_id_is_refused_with_the_sentence_that_fits() -> None:
@@ -636,6 +694,29 @@ def test_the_task_store_forgets_terminal_records_first() -> None:
     # And the pending records went in age order after it: the oldest first.
     assert store.get("pending0") is None
     assert store.get("pending50") is not None
+
+
+def test_the_task_store_evicts_a_paused_task_after_live_work() -> None:
+    """**The cap's order is one policy for both A2A tables.**
+
+    The inbound table already put an interrupted task after a live round,
+    because its peer is waiting on an answer somebody has to give.  The outbound
+    store's own copy of the order put every non-terminal record in one class, so
+    the oldest paused task went before a newer send still waiting for its first
+    reply.  Both now read `capacity.prune_to_cap`.
+    """
+    store = TaskStore()
+    for index in range(TaskStore.MAX_RECORDS - 1):
+        store.record_send(f"pending{index}", PEER)
+    store.record_send("paused", PEER)
+    store.record_interrupt("paused")
+    assert len(store._records) == TaskStore.MAX_RECORDS
+
+    store.record_send("last", PEER)
+
+    assert store.get("paused") is not None, "the paused task went first"
+    assert store.get("pending0") is None, "and the oldest live work went"
+    assert len(store._records) <= TaskStore.MAX_RECORDS
 
 
 # ── the broker: probed, started, or fatal ───────────────────────────────────
@@ -1095,13 +1176,19 @@ async def test_a_bare_message_is_marked_task_less(window: Window) -> None:
 async def test_a_peer_withdrawal_is_a_message_and_not_a_control_signal(
     window: Window,
 ) -> None:
-    """Only the model knows whether it is still working on that task."""
+    """Only the model knows whether it is still working on that task.
+
+    **The id rides the marker**, as it does on every task-shaped envelope: the
+    model reading the line has to be able to tell which of its tasks the
+    withdrawal names, or "stop working on it" has nothing to stop.
+    """
     session = wired(window=window)
     session.mesh.on_peer_cancel(TASK, PEER)
     await drain_until_idle(session, window=window)
 
     text = window.handed[-1]["text"]
     assert a2a_message_type(text, REMOTE) == "cancel_task"
+    assert f'"task_id": "{TASK}"' in text, "the withdrawal did not name its task"
     assert "withdrew this task" in text
     assert window.handed[-1]["channel"] == f"peer_agent:{PEER}"
 
@@ -1365,7 +1452,7 @@ async def test_a_publish_that_may_have_left_hands_the_id_over(
 
     monkeypatch.setattr(mesh, "_publish_props", publish)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda _n: 0.001)
+    quick_retry(monkeypatch)
 
     task_id = await mesh.send_message(PEER, "hi")
 
@@ -1400,7 +1487,7 @@ async def test_a_retry_cannot_overtake_the_first_publish(
 
     monkeypatch.setattr(mesh, "_publish_props", publish)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.001)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda _n: 0.001)
+    quick_retry(monkeypatch)
 
     sending = asyncio.create_task(mesh.send_message(PEER, "hi"))
     await asyncio.sleep(0.05)
@@ -1542,7 +1629,7 @@ async def test_a_failed_retry_publish_is_a_warning_naming_the_task_and_attempt(
     monkeypatch.setattr(mesh, "_publish_props", lands)
     monkeypatch.setattr(mesh, "_publish_attempt", refuse_the_first)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+    quick_retry(monkeypatch)
 
     with caplog.at_level(logging.WARNING, logger="slife2.plugins.a2a.mesh"):
         await mesh._deliver(send)
@@ -1579,7 +1666,7 @@ async def test_a_publish_that_never_left_still_spends_an_attempt(
     mesh.on_task_completion = lambda *args: done.append(args)
     monkeypatch.setattr(mesh, "_publish_attempt", a_link_that_drops)
     monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.0)
-    monkeypatch.setattr("slife2.plugins.a2a.mesh._backoff_delay", lambda attempt: 0.0)
+    quick_retry(monkeypatch)
 
     await mesh._deliver(send)
 
@@ -1734,6 +1821,95 @@ async def test_a_handler_bug_in_the_outbound_loop_is_logged_not_read_as_a_drop(
         "a2a_outbound_loop_error" in record.getMessage() and record.exc_info is not None
         for record in caplog.records
     ), "the handler bug left no trace anywhere"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_the_classifier_cannot_read_is_the_tasks_ending() -> None:
+    """**A shape the SDK's classifier raises on is the unclassified path.**
+
+    `classify_reply` reads `.get` off whatever `result`, `statusUpdate` or
+    `error` holds, so a list, a number or a string there raises
+    `AttributeError` — which used to escape to the outbound loop and cost a
+    live connection, the roster and a resubscribe for one malformed reply.
+    The raise is caught beside the call and routed where an unclassifiable
+    reply already goes: the task ends `failed` with the sentence that says
+    this build cannot read it, and the send is forgotten (SDD Appendix C).
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
+
+    shapes = (
+        {"result": []},
+        {"result": {"statusUpdate": 42}},
+        {"error": "boom"},
+    )
+    for index, shape in enumerate(shapes):
+        task_id = f"task-unreadable-{index}"
+        corr = f"corr-unreadable-{index}"
+        send = _OutboundSend(task_id, PEER, "session", "{}")
+        mesh._sends[task_id] = send
+        mesh._corr_to_task[corr] = _Route(task_id, send.round, send.agent, "task")
+        get_store().record_send(task_id, PEER)
+
+        mesh._handle_reply(
+            FakeMessage(
+                "a2a/v1/reply/org/unit/jack/s1",
+                json.dumps(shape).encode(),
+                corr=corr,
+            )
+        )
+
+        assert get_store().get(task_id).status == "failed"
+        assert task_id not in mesh._sends, "the unreadable answer is still an ending"
+        assert done[-1][0] == task_id
+        assert done[-1][2] == FAILED
+        assert "cannot read" in done[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_reply_does_not_reconnect_the_outbound_client(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**One malformed reply is one task's ending, not one reconnect.**
+
+    The classifier's raise used to reach `_run_outbound`'s handler clause,
+    which logs it and then leaves the client — so the loop dialled again,
+    cleared the roster and resubscribed over a reply it could have settled.
+    The reply is settled here instead, and the client the loop opened is the
+    only one it needed.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    task_id = "task-malformed-on-the-loop"
+    corr = "corr-malformed-on-the-loop"
+    send = _OutboundSend(task_id, PEER, "session", "{}")
+    mesh._sends[task_id] = send
+    mesh._corr_to_task[corr] = _Route(task_id, send.round, send.agent, "task")
+    get_store().record_send(task_id, PEER)
+    done: list[tuple[Any, ...]] = []
+    mesh.on_task_completion = lambda *args: done.append(args)
+
+    broker = _OneMessageBroker(
+        FakeMessage(
+            "a2a/v1/reply/org/unit/jack/s1",
+            json.dumps({"result": {"statusUpdate": 42}}).encode(),
+            corr=corr,
+        ),
+        mesh,
+    )
+    monkeypatch.setattr(
+        "slife2.plugins.a2a.mesh.aiomqtt.Client", lambda **kwargs: broker
+    )
+
+    with caplog.at_level(logging.ERROR, logger="slife2.plugins.a2a.mesh"):
+        await mesh._run_outbound()
+
+    assert broker.entries == 1, "the malformed reply cost a reconnect"
+    assert not any(
+        "a2a_outbound_loop_error" in record.getMessage() for record in caplog.records
+    ), "the reply was read as a handler bug rather than settled"
+    assert done and done[0][2] == FAILED
+    assert get_store().get(task_id).status == "failed"
 
 
 @pytest.mark.parametrize("subagent", ["", "child"])
@@ -1987,6 +2163,85 @@ async def test_one_bad_message_does_not_end_the_writer(
     )
 
 
+@pytest.mark.asyncio
+async def test_a_hand_over_that_did_not_come_back_leaves_the_task_round_open(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**An unverified delivery is not a rejection.**
+
+    A hand-over whose call did not come back may already have put the message
+    in the conversation (`DeliveryFailed.unknown`).  Settling that as `rejected`
+    told the peer a task it was working on was dead, and the model's later
+    `task_response` was then refused because the task was terminal.  A task
+    round therefore stays open — the model's own answer is what settles it —
+    while a bare message, which has no later answer, is still settled so the
+    peer knows whether to re-send.
+    """
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    async def did_not_come_back(*args: Any, **kwargs: Any) -> None:
+        raise DeliveryFailed(
+            AGENT,
+            "the hand-over did not come back, so it was not repeated",
+            unknown=True,
+        )
+
+    monkeypatch.setattr(a2a_server, "hand_over", did_not_come_back)
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
+
+    session = wired()
+    session.mesh.on_inbound_task(PEER, "hello", TASK)
+    await writer_until(
+        session,
+        lambda: any(
+            "a2a_delivery_unverified" in record.getMessage()
+            for record in caplog.records
+        ),
+    )
+
+    assert settled == [], "an unverified task round was settled as an outcome"
+    assert any(
+        "a2a_delivery_unverified" in record.getMessage()
+        and f"task={TASK}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_message_whose_hand_over_did_not_come_back_is_still_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A message has no later answer, so its round is where the truth ends.
+
+    The task case waits because the model's own `task_response` can still
+    settle it.  A bare message is owed only "the conversation has it", and no
+    `task_response` will come for one — so leaving it open would be a round
+    nobody ends, and `rejected` is the answer that tells its sender to re-send.
+    """
+    settled: list[tuple[str, str, str]] = []
+
+    def task_response(self: A2AMesh, task_id: str, outcome: str, text: str = "") -> str:
+        settled.append((task_id, outcome, text))
+        return "ok"
+
+    async def did_not_come_back(*args: Any, **kwargs: Any) -> None:
+        raise DeliveryFailed(AGENT, "the hand-over did not come back", unknown=True)
+
+    monkeypatch.setattr(a2a_server, "hand_over", did_not_come_back)
+    monkeypatch.setattr(A2AMesh, "task_response", task_response)
+
+    session = wired()
+    session.mesh.on_inbound_task(PEER, "hello", TASK, kind="message")
+    await drain_until_idle(session)
+
+    assert settled and settled[0][:2] == (TASK, REJECTED)
+
+
 # ── the orphan notice, which is nobody's but this plugin's ──────────────────
 #
 #  The one message here that no peer will ever re-send, and the one the plugin
@@ -2055,7 +2310,7 @@ def build(**overrides: Any) -> FastMCP:
     config = default_config()
     if overrides.pop("on_the_mesh", False):
         object.__setattr__(config, "peer_agent", settings(**overrides))
-    return build_server(config, source=lambda: config, connecting=False)
+    return build_server(source=lambda: config, connecting=False)
 
 
 @pytest.mark.asyncio
@@ -2126,9 +2381,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     network is named `subagent`, which is this project's word for it rather than
     the gloss the design talks about it with.
     """
-    tools = await build_server(
-        default_config(), net=LOCAL, connecting=False
-    ).list_tools()
+    tools = await build_server(net=LOCAL, connecting=False).list_tools()
     by_name = {t.name: t for t in tools}
 
     local_tools = [
@@ -2413,7 +2666,7 @@ async def test_join_puts_the_agent_on_the_mesh_and_says_nothing_about_it(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2451,7 +2704,7 @@ async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
-    mcp = build_server(config, source=lambda: config, connecting=False)
+    mcp = build_server(source=lambda: config, connecting=False)
 
     caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
     async with Client(mcp) as client:
@@ -2494,7 +2747,7 @@ async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
@@ -2547,7 +2800,7 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with served(mcp) as url:
@@ -2607,7 +2860,7 @@ async def test_a_call_does_not_keep_a_card_up_after_its_window_has_gone(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2628,6 +2881,48 @@ async def test_a_call_does_not_keep_a_card_up_after_its_window_has_gone(
 
 
 @pytest.mark.asyncio
+async def test_a_call_accepted_during_the_departure_gets_its_own_window(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**A send taken during the wait is not cancelled under its own ladder.**
+
+    The departure timer removed `USED` without asking when it was taken, so a
+    call that arrived after the window went — one whose caller had already been
+    told the message was sent — had its connection closed at the next deadline.
+    A holder that arrives during the wait restarts it; the mesh still leaves
+    once that send has had its window.
+    """
+    monkeypatch.setattr(_T.timeouts.pacing, "mesh_departure", 0.2)
+    joined, left = _a_mesh_that_records_its_ends(monkeypatch)
+    holds = _joins_that_wait(monkeypatch)
+    sessions = _sessions_that_hold_a_window(monkeypatch)
+    config = default_config()
+    object.__setattr__(config, "peer_agent", settings())
+    mcp = build_server(
+        source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        holding = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: holds != [], "the join never reached its hold")
+        sessions[0].hold(USED)  # a send before the window went: still dropped
+        holding.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await holding
+
+        # The wait is running.  A call accepted inside it is a send whose
+        # caller was just told it went out.
+        await asyncio.sleep(0.1)
+        sessions[0].hold(USED)
+
+        # Past the first deadline: the restarted wait has not run out yet.
+        await asyncio.sleep(0.25)
+        assert left == [], "the mesh left under a send accepted during the wait"
+
+        await until(lambda: left == [AGENT], "the restarted wait never left")
+
+
+@pytest.mark.asyncio
 async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
     monkeypatch: pytest.MonkeyPatch, window: Window
 ) -> None:
@@ -2645,7 +2940,7 @@ async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2667,6 +2962,64 @@ async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
         with contextlib.suppress(asyncio.CancelledError):
             await second
         await until(lambda: left == [AGENT], "the second departure never came")
+
+
+@pytest.mark.asyncio
+async def test_an_edited_mesh_address_reaches_a_member_that_already_exists(
+    monkeypatch: pytest.MonkeyPatch, window: Window
+) -> None:
+    """**The address is read per call, and an existing member moves with it.**
+
+    `mesh_for` runs when a session is first built, so an edited `peer_agent:`
+    used to reach only members built afterwards; an existing one kept its old
+    broker and namespace until a restart, and two members of one network could
+    not hear each other.  The member is rebuilt on the address the config names
+    at its next call, and the abandoned mesh is torn down rather than left
+    answering on a network this process has left.
+    """
+    joined: list[tuple[str, str]] = []
+    left: list[str] = []
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+        joined.append((self.agent_name, self.settings.address))
+
+    async def disconnect(self: Any) -> None:
+        left.append(self.agent_name)
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    holds = _joins_that_wait(monkeypatch)
+    sessions = _sessions_that_hold_a_window(monkeypatch)
+
+    old = settings(broker_host="old.test", broker_port=1883)
+    new = replace(old, broker_host="new.test", broker_port=1884)
+    config = default_config()
+    object.__setattr__(config, "peer_agent", old)
+    mcp = build_server(
+        source=lambda: config, window_client=window.client, connecting=False
+    )
+
+    async with Client(mcp) as client:
+        first = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 1, "the join never reached its hold")
+        assert sessions[0].mesh.settings.address == old.address
+        assert joined == [(AGENT, old.address)]
+
+        # The operator edits the section while that member is on the old broker.
+        object.__setattr__(config, "peer_agent", new)
+        second = asyncio.create_task(client.call_tool(JOIN, {"agent": AGENT}))
+        await until(lambda: len(holds) == 2, "the second join never arrived")
+
+        assert sessions[0].mesh.settings.address == new.address
+        assert joined[-1] == (AGENT, new.address), "the call dialled the new broker"
+        assert left == [AGENT], "the mesh on the old address was abandoned"
+
+        for task in (first, second):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await until(lambda: left.count(AGENT) >= 2, "the new mesh never left")
 
 
 def _a_mesh_that_records_its_ends(
@@ -2794,7 +3147,7 @@ async def test_two_windows_showing_one_agent_are_two_holds(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2860,7 +3213,7 @@ async def test_a_window_arriving_as_the_mesh_is_torn_down_gets_a_live_one(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2924,6 +3277,42 @@ async def test_a_withdrawal_that_could_not_be_published_is_not_recorded(
 
 
 @pytest.mark.asyncio
+async def test_a_cancel_stops_the_requester_retry_ladder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A rung asleep between attempts is still a rung.**
+
+    `cancel_task` recorded the row and published the withdrawal, but the
+    requester ladder kept its own schedule: the next rung published the same
+    request after the cancellation and started work on a peer that had just
+    come back — while the row said `cancelled`, so the peer's ending was
+    discarded.  The ladder is stopped before the withdrawal is published, and
+    the wait for its loops is what makes "nothing publishes after this" true.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple[str, str]] = []
+
+    async def publish(topic: str, payload: str, props: Any, *, qos: int = 1) -> None:
+        published.append((topic, payload))
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    monkeypatch.setattr(_T.timeouts.deliver, "reply_first", 0.01)
+    monkeypatch.setattr(
+        _T.timeouts.pacing,
+        "requester_retry",
+        _T.Retry(base=0.01, factor=1.0, cap=0.01),
+    )
+
+    task_id = await mesh.send_message(PEER, "do it")
+    await until(lambda: len(published) >= 3, "the ladder's retries")
+    assert await mesh.cancel_task(PEER, task_id) == "cancelled"
+
+    after = len(published)
+    await asyncio.sleep(0.1)  # timeouts: long enough for several rungs to have fired
+    assert len(published) == after, "a rung published after the withdrawal"
+
+
+@pytest.mark.asyncio
 async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2952,6 +3341,46 @@ async def test_a_withdrawal_is_recorded_so_a_late_answer_cannot_undo_it(
     assert get_store().get(TASK).status == "cancelled"
     get_store().record_error(TASK)
     assert get_store().get(TASK).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_reads_the_owner_off_the_row_when_the_send_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The row outlives the send, and still names the peer.**
+
+    The ownership guard fired only while the send was in `_sends` — but the
+    store is process-wide: a non-reviving teardown clears the sends, the FIFO
+    cap evicts the oldest, and another agent's mesh never held the send at
+    all.  With the send gone, a cancel naming the wrong peer published the
+    withdrawal to that peer and recorded the row cancelled while the real
+    peer kept working.  The record's agent is the owner when the send is
+    gone, and the refusal is the same sentence.
+    """
+    mesh = A2AMesh(default_config().peer_agent, AGENT)
+    published: list[tuple] = []
+
+    async def publish(*args, **kwargs) -> None:
+        published.append(args)
+
+    monkeypatch.setattr(mesh, "_publish_props", publish)
+    task_id = "task-row-without-a-send"
+    get_store().record_send(task_id, PEER)
+    assert mesh._sends.get(task_id) is None, "the state this test is about"
+
+    refused = await mesh.cancel_task("someone-else", task_id)
+    assert refused == (
+        f"Error: task_id {task_id!r} is with {PEER!r}, not 'someone-else'."
+    )
+    assert published == [], "the withdrawal went to the caller-named peer"
+    assert get_store().get(task_id).status == "pending"
+
+    # The peer the row names can still withdraw it, and the withdrawal is
+    # published to that peer's topic.
+    assert await mesh.cancel_task(PEER, task_id) == "cancelled"
+    assert get_store().get(task_id).status == "cancelled"
+    assert len(published) == 1
+    assert published[0][0] == mesh._topics.request(PEER)
 
 
 # ── the local network: a member takes its place ─────────────────────────────
@@ -3018,10 +3447,10 @@ def write_subagent(maker: str, name: str) -> Path:
 
     `subagent_dirs` is the whole of what membership means, so this is what the
     send path's look finds — written the way the agent server writes it
-    (`subagent_set`), because the two have to agree about what makes a member.
+    (`subagent_create`), because the two have to agree about what makes a member.
     """
     path = subagent_file(maker, name)
-    # A read does not make the directory; `subagent_set` (and this fixture) do.
+    # A read does not make the directory; `subagent_create` (and this fixture) do.
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"name: {name}\nrole: test\n", encoding="utf-8")
     return path
@@ -3066,7 +3495,7 @@ def local_build(**overrides: Any) -> FastMCP:
     object.__setattr__(
         config, "subagent", replace(config.subagent, network=settings(**overrides))
     )
-    return build_server(config, net=LOCAL, source=lambda: config, connecting=False)
+    return build_server(net=LOCAL, source=lambda: config, connecting=False)
 
 
 @pytest.mark.asyncio
@@ -3098,6 +3527,63 @@ async def test_a_task_to_a_subagent_is_a_turn_in_the_subagents_own_conversation(
         }
     ], "the turn did not reach the member's own conversation"
     assert window.handed == [], "a subagent's message is not a window's"
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_reaches_a_working_member_as_a_message(
+    tmp_path: Path,
+) -> None:
+    """**A turn is not a task, so a withdrawal is told, not executed.**
+
+    The responder settles the task as cancelled when it accepts the withdrawal;
+    what reaches the work is the same marker a peer's model gets, and the model
+    owes no response.  Nothing here cancels the member's call: one turn can fold
+    in several tasks' messages, a task can outlive the turn that started it, and
+    a call carrying a task's message is not that task's work.  The peer network
+    has always worked this way; the local one now says the same thing.
+    """
+    started = asyncio.Event()
+    note_seen = asyncio.Event()
+    cancelled = asyncio.Event()
+    prompts: list[str] = []
+    mcp: FastMCP = FastMCP("agent")
+
+    @mcp.tool
+    async def send_message(
+        agent: str, prompt: str = "", subagent: str = "", channel: str = ""
+    ) -> dict[str, Any]:
+        prompts.append(prompt)
+        if len(prompts) > 1:
+            note_seen.set()
+            return {"text": "done"}
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async with Client(mcp) as client:
+        session = local_member(tmp_path)
+        writer = asyncio.create_task(_drain(session, default_config(), None, client))
+        try:
+            session.mesh.on_inbound_task(AGENT, "do it", TASK)
+            await asyncio.wait_for(started.wait(), 2)  # timeouts: the test's own wait
+
+            session.mesh.on_peer_cancel(TASK, AGENT)
+
+            await asyncio.wait_for(note_seen.wait(), 2)  # timeouts: the test's own wait
+            note = prompts[1]
+            assert a2a_message_type(note, LOCAL_AGENT) == "cancel_task"
+            assert f'"task_id": "{TASK}"' in note, (
+                "the withdrawal did not name its task"
+            )
+            assert "withdrew this task" in note
+            assert not cancelled.is_set(), "the withdrawal cancelled the member's turn"
+        finally:
+            writer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await writer
 
 
 @pytest.mark.asyncio
@@ -3622,7 +4108,7 @@ async def test_the_remote_network_places_nothing_and_lists_only_cards(
         write_subagent(AGENT, PEER)
         config = default_config()
         object.__setattr__(config, "peer_agent", settings(configured=True))
-        server = build_server(config, source=lambda: config, connecting=False)
+        server = build_server(source=lambda: config, connecting=False)
         async with Client(server) as client:
             await client.call_tool(
                 PEER_SEND_MESSAGE,
@@ -3683,7 +4169,7 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
     no `peer_agent:` section — a key it does not have — and taught the word `A2A` for
     the network the rest of its tools call `subagent`.
     """
-    server = build_server(default_config(), net=LOCAL, connecting=False)
+    server = build_server(net=LOCAL, connecting=False)
     async with Client(server) as client:
         with pytest.raises(ToolError) as refused:
             await client.call_tool(
@@ -3762,7 +4248,7 @@ async def test_a_task_list_on_a_switched_off_network_names_its_own_section() -> 
     answers are about one switch — and it must not name the other network's
     section, which is a key this machine does not have.
     """
-    server = build_server(default_config(), net=LOCAL, connecting=False)
+    server = build_server(net=LOCAL, connecting=False)
     async with Client(server) as client:
         answer = await client.call_tool(
             LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
@@ -3869,6 +4355,118 @@ async def test_forget_gives_up_a_members_place(
     assert connected == [AGENT, "tester", "tester"], (
         "the place was not given up: the same session answered the second send"
     )
+
+
+@pytest.mark.asyncio
+async def test_forgetting_a_member_withdraws_the_tasks_sent_to_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**A forced removal ends the member's work, so the ledger says so.**
+
+    `subagent_remove` tells the network to forget the member, and the tasks
+    sent *to* it are filed in the senders' sessions, which stay alive.  Left
+    open, each is a `pending` row in `task_list` — a row documented as "still
+    running" whose member no longer exists.  The withdrawal is recorded
+    locally: there is no member left on its topic to publish to.
+    """
+    task = "task-the-member-was-removed-with"
+
+    async def connect(self: Any) -> None:
+        self._connected = True
+
+    async def disconnect(self: Any, **kwargs: Any) -> None:
+        pass
+
+    async def send_message(
+        self: Any, agent: str, message: str, *, message_type: str = "task_request"
+    ) -> str:
+        get_store().record_send(task, agent)
+        self._sends[task] = _OutboundSend(task, agent, "session", "{}")
+        return task
+
+    inbound_members: list[str] = []
+
+    async def withdraw_inbound_from(self: Any, member: str) -> int:
+        inbound_members.append(member)
+        return 0
+
+    monkeypatch.setattr(A2AMesh, "connect", connect)
+    monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
+    monkeypatch.setattr(A2AMesh, "send_message", send_message)
+    monkeypatch.setattr(A2AMesh, "withdraw_inbound_from", withdraw_inbound_from)
+
+    with in_home(tmp_path):
+        write_subagent(AGENT, "tester")
+        server = local_build(configured=True)
+        async with Client(server) as client:
+            await client.call_tool(
+                LOCAL.tool(SEND_MESSAGE),
+                {"agent": "tester", "message": "hello"},
+                meta=conversation_meta(AGENT),
+            )
+            before = await client.call_tool(
+                LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
+            )
+            await client.call_tool(
+                FORGET,
+                {"agent": AGENT, "subagent": "tester"},
+                meta=conversation_meta(AGENT),
+            )
+            after = await client.call_tool(
+                LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)
+            )
+
+    assert [(row["task_id"], row["status"]) for row in before.data["tasks"]] == [
+        (task, "pending")
+    ], "the send is open before the member is removed"
+    assert after.data["tasks"] == [], (
+        "a removed member is still reported as running a task"
+    )
+    record = get_store().get(task)
+    assert record is not None and record.status == "cancelled"
+    assert set(inbound_members) == {"tester"}, (
+        "the tasks the member sent were not swept"
+    )
+
+
+@pytest.mark.asyncio
+async def test_withdrawing_a_removed_member_settles_the_tasks_it_sent(
+    window: Window,
+) -> None:
+    """**The other direction: the rows the removed member left behind.**
+
+    A task the member sent lives in the *receiver's* inbound table, not in the
+    member's session, so dropping that session leaves it open.  Its reply topic
+    is gone — no answer can ever be published — and a live round keeps a
+    responder slot waiting for one.  Settling it as cancelled makes `task_list`
+    true again, and the receiver's model gets the same withdrawal line a cancel
+    delivers.  A bare message is not a task; its delivery settles it.
+    """
+    session = wired(window=window)
+    session.mesh._connected = True
+    session.mesh._inbound.add(TASK, PEER)
+    session.mesh._inbound.add("a-message", PEER, kind="message")
+    session.mesh._inbound.add("someone-elses", "other")
+
+    withdrawn = await session.mesh.withdraw_inbound_from(PEER)
+
+    assert withdrawn == 1
+    removed = session.mesh._inbound.get(TASK)
+    message = session.mesh._inbound.get("a-message")
+    other = session.mesh._inbound.get("someone-elses")
+    assert removed is not None and removed.state == CANCELLED
+    assert message is not None and message.state == WORKING
+    assert other is not None and other.state == WORKING
+    assert {row["task_id"] for row in session.mesh.open_tasks()} == {
+        "a-message",
+        "someone-elses",
+    }, "the removed member's task is still open"
+
+    await drain_until_idle(session, window=window)
+    text = window.handed[-1]["text"]
+    assert a2a_message_type(text, REMOTE) == "cancel_task"
+    assert f'"task_id": "{TASK}"' in text
+    assert "withdrew this task" in text
 
 
 # ── groups: the vocabulary, the store, the wire, and the five tools ─────────
@@ -4388,17 +4986,6 @@ async def test_a_local_group_message_wears_subagent_group_from_the_maker(
     )
 
 
-def test_a_fork_never_receives_group_traffic(tmp_path: Path) -> None:
-    session = local_member(tmp_path, subagent="forked")
-    session.fork = True
-    payload = group_event(sender=AGENT, owner=AGENT, members=(AGENT, "forked"))
-
-    session.mesh._handle_event(directed(payload, "forked"))
-
-    assert session.queue.empty()
-    assert session.groups.get(GROUP) is None
-
-
 @pytest.mark.asyncio
 async def test_a_learned_group_is_saved_and_a_restart_reads_it(
     tmp_path: Path, window: Window
@@ -4628,7 +5215,7 @@ async def test_a_send_to_an_empty_group_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_the_local_group_roster_refuses_unknown_and_forked_members(
+async def test_the_local_group_roster_refuses_unknown_members(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     async def connect(self: Any) -> None:
@@ -4642,9 +5229,6 @@ async def test_the_local_group_roster_refuses_unknown_and_forked_members(
 
     with in_home(tmp_path):
         write_subagent(AGENT, "tester")
-        fork = subagent_file(AGENT, "forked")
-        fork.parent.mkdir(parents=True, exist_ok=True)
-        fork.write_text("name: forked\nrole: test\nfork: true\n", encoding="utf-8")
         server = local_build(configured=True)
         async with Client(server) as client:
             with pytest.raises(ToolError, match="subagents"):
@@ -4652,18 +5236,6 @@ async def test_the_local_group_roster_refuses_unknown_and_forked_members(
                     LOCAL.tool(GROUP_SET),
                     {"group": GROUP, "members": ["nobody"]},
                     meta=conversation_meta(AGENT),
-                )
-            with pytest.raises(ToolError, match="forked"):
-                await client.call_tool(
-                    LOCAL.tool(GROUP_SET),
-                    {"group": GROUP, "members": ["forked"]},
-                    meta=conversation_meta(AGENT),
-                )
-            with pytest.raises(ToolError, match="forked subagent"):
-                await client.call_tool(
-                    LOCAL.tool(GROUP_SET),
-                    {"group": GROUP, "members": ["tester"]},
-                    meta=conversation_meta(AGENT, "forked"),
                 )
 
 
@@ -4816,3 +5388,64 @@ async def test_a_subagent_turn_is_submitted_while_the_previous_one_runs(
         writer.cancel()
         with pytest.raises(asyncio.CancelledError):
             await writer
+
+
+def test_the_inbound_cap_evicts_a_paused_task_last() -> None:
+    """**The cap is terminal-first, and interrupted work last.**  The key put a
+    `working` round and an `interrupted` one in the same class, so the older
+    paused task — the one whose peer is waiting on a person — was evicted before
+    a newer live round."""
+    from slife2.plugins.a2a.inbound_store import MAX_INBOUND, InboundStore
+
+    store = InboundStore()
+    store.add("paused", PEER)
+    store.interrupt("paused", "input_required", "which one?")
+    for index in range(MAX_INBOUND + 60):
+        store.add(f"round-{index}", PEER)
+
+    store.prune(ttl=10**9)
+
+    assert store.get("paused") is not None, "the paused task went first"
+    assert len(store._tasks) <= MAX_INBOUND
+
+
+def test_a_roster_is_measured_after_de_duplicating_on_both_reads() -> None:
+    """**The wire parser and the groups file are one validation.**  The parser
+    refused more than `MAX_MEMBERS` *raw* entries before de-duplicating while
+    the loader de-duplicated first, so the same roster loaded from a file and
+    was dropped as a `group_set`."""
+    from slife2.plugins.a2a.groups import MAX_MEMBERS
+
+    raw = [PEER] * (MAX_MEMBERS + 1)
+    assert group_store._roster(PEER, raw) == (PEER,)
+
+    event = group_store.parse_event(
+        {
+            "kind": group_store.KIND_SET,
+            "sender": PEER,
+            "group": GROUP,
+            "owner": PEER,
+            "gid": GID,
+            "members": raw,
+        }
+    )
+    assert event is not None and event.members == (PEER,)
+
+
+def test_an_answer_target_falls_back_to_the_route_and_its_kind(tmp_path: Path) -> None:
+    """**Three caches, one order.**  The send, then the record, then the route
+    that outlives both; the kind is the route's, so a bare message's pause is
+    not reported as a task line."""
+    from types import SimpleNamespace
+
+    from slife2.plugins.a2a.mesh import _OutboundSend, _Route
+
+    mesh = local_member(tmp_path, subagent="tester").mesh
+    route = _Route(task_id="t", round=1, agent=PEER, kind="message")
+    record = SimpleNamespace(agent_name=PEER)
+
+    assert mesh._answer_target(None, None, route) == (PEER, "message")
+    assert mesh._answer_target(None, record, route) == (PEER, "task")
+    plain = _OutboundSend("t", PEER, "session", "{}", record=False)
+    assert mesh._answer_target(plain, record, route) == (PEER, "message")
+    assert mesh._answer_target(None, None, None) is None

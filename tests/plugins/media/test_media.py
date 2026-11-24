@@ -2,16 +2,17 @@
 
 Three halves, and each is tested where it can be driven without a network.  The
 *tools* run over the in-memory transport with a fake adapter injected, so what is
-under test is which provider, which model, which parameters and which folder a
-call reaches.  The *config* is parsed from text.  The *adapters* are driven
-against a fake `_request`, which is where the vendor's shapes live — the request
-body, the poll, and the four ways a call can fail.
+under test is which provider, which model, which parameters and which output
+path a call reaches.  The *config* is parsed from text.  The *adapters* are
+driven against a fake `_request`, which is where the vendor's shapes live — the
+request body, the poll, and the four ways a call can fail.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -27,17 +28,21 @@ from slife2.libs.host.config import (
     _media,
     load,
 )
-from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir, subagent_file
+from slife2.libs.host.paths import agent_dir
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
 from slife2.plugins.media import adapters
 from slife2.plugins.media.adapters import (
     DashScopeAIGCAdapter,
     MediaAdapterError,
     OpenAICompatAdapter,
-    media_dir,
     merge_params,
 )
-from slife2.plugins.media.server import build_server, check_size
+from slife2.plugins.media.server import (
+    _place,
+    _replace_text,
+    build_server,
+    check_size,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -73,9 +78,9 @@ class FakeAdapter:
     """An adapter that records its calls and answers with a path.
 
     The tool half is about *addressing* — which provider, model, parameters and
-    folder a call reaches — and a fake that records exactly that is what makes
-    those assertions readable.  A class with four methods says what the
-    contract is, in a way a `MagicMock` cannot.
+    output directory a call reaches — and a fake that records exactly that is
+    what makes those assertions readable.  A class with four methods says what
+    the contract is, in a way a `MagicMock` cannot.
     """
 
     def __init__(self, *, answer: str = "/tmp/out") -> None:
@@ -111,6 +116,28 @@ class Failing(FakeAdapter):
 
     async def generate_image(self, **kwargs: Any) -> str:
         raise self.error
+
+
+class Writing(FakeAdapter):
+    """An adapter that writes the artifact its call would have saved."""
+
+    async def generate_image(self, **kwargs: Any) -> str:
+        self.calls["image"] = kwargs
+        return _written(kwargs["outputs_dir"], "png")
+
+    async def generate_video(self, **kwargs: Any) -> str:
+        self.calls["video"] = kwargs
+        return _written(kwargs["outputs_dir"], "mp4")
+
+    async def text_to_speech(self, **kwargs: Any) -> str:
+        self.calls["tts"] = kwargs
+        return _written(kwargs["outputs_dir"], "wav")
+
+
+def _written(outputs_dir: Path, suffix: str) -> str:
+    target = Path(outputs_dir) / f"made.{suffix}"
+    target.write_bytes(suffix.encode())
+    return str(target)
 
 
 def server_for(adapter: FakeAdapter | None = None) -> FastMCP:
@@ -162,7 +189,7 @@ async def test_the_four_tools_are_the_models() -> None:
     assert all(for_the_model(tool.meta) for tool in listed.values())
 
 
-# --- which provider, model, parameters and folder -----------------------------
+# --- which provider, model, parameters and output path -----------------------
 
 
 @pytest.mark.asyncio
@@ -171,13 +198,26 @@ async def test_an_image_call_reaches_the_configured_default() -> None:
     async with Client(server_for(adapter)) as client:
         answer = await ask(client, "generate_image", prompt="a cat", size="1024*1024")
 
-    assert answer == {"path": "/media/a.png"}
+    assert answer == "/media/a.png"
     call = adapter.calls["image"]
     assert call["model"] == "img", "`defaults.image` names it"
     assert call["prompt"] == "a cat"
     assert call["size"] == "1024*1024"
     assert call["extra_params"] == {"size": "1024*1024"}
     assert call["outputs_dir"] == agent_dir("jack") / "media"
+
+
+@pytest.mark.asyncio
+async def test_an_image_reference_is_resolved_from_the_working_directory() -> None:
+    """A local reference is the caller's path; a URL is passed through."""
+    adapter = FakeAdapter()
+    async with Client(server_for(adapter)) as client:
+        await ask(client, "generate_image", prompt="x", image="ref.png")
+        assert adapter.calls["image"]["image"] == str(agent_dir("jack") / "ref.png")
+        await ask(
+            client, "generate_image", prompt="x", image="https://example.test/a.png"
+        )
+        assert adapter.calls["image"]["image"] == "https://example.test/a.png"
 
 
 @pytest.mark.asyncio
@@ -207,33 +247,167 @@ async def test_a_voice_falls_back_to_the_config_and_a_model_can_be_named() -> No
         assert adapter.calls["tts"]["model"] == "say"
 
 
+@pytest.mark.parametrize(
+    ("tool", "arguments", "call", "suffix"),
+    [
+        ("generate_image", {"prompt": "x", "size": "1024*1024"}, "image", "png"),
+        ("generate_video", {"prompt": "x"}, "video", "mp4"),
+        ("text_to_speech", {"text": "hi"}, "tts", "wav"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_a_folder_is_a_subdirectory_of_the_media_root() -> None:
+async def test_an_output_path_names_the_artifact(
+    tool: str, arguments: dict[str, str], call: str, suffix: str
+) -> None:
+    """The caller names the file; the adapter writes into its directory and the
+    tool moves the artifact to that name.  A relative path is relative to the
+    agent's working directory.
+    """
+    adapter = Writing()
+    async with Client(server_for(adapter)) as client:
+        answer = await ask(client, tool, output=f"art/a.{suffix}", **arguments)
+
+    target = agent_dir("jack") / "art" / f"a.{suffix}"
+    assert answer == str(target)
+    assert target.read_bytes() == suffix.encode()
+    assert adapter.calls[call]["outputs_dir"] == agent_dir("jack") / "art"
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_output_path_is_used_as_written(tmp_path) -> None:
+    adapter = Writing()
+    target = tmp_path / "a.png"
+    async with Client(server_for(adapter)) as client:
+        answer = await ask(client, "generate_image", prompt="x", output=str(target))
+
+    assert answer == str(target)
+    assert target.read_bytes() == b"png"
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="drive-relative paths are a Windows spelling"
+)
+@pytest.mark.asyncio
+async def test_a_drive_relative_input_is_the_work_directorys_or_refused() -> None:
+    """The rule is `local_path`'s with the work directory as its base: the same
+    drive resolves under it, another drive is refused with the fix — and the
+    refusal names the working directory the media tools resolve against, not
+    the home `local_path` defaults to."""
+    base = agent_dir("jack")
+    other = "D:" if base.drive.casefold() != "d:" else "C:"
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
-        await ask(client, "generate_image", prompt="x", folder="project")
-        escaped = await refused(
-            client, "generate_image", prompt="x", folder="../../elsewhere"
+        await ask(client, "transcribe_audio", input=f"{base.drive}a.wav")
+        assert adapter.calls["asr"]["audio_path"] == base / "a.wav"
+        answer = await refused(client, "transcribe_audio", input=f"{other}a.wav")
+
+    assert "relative to drive" in answer
+    assert "working directory" in answer
+    assert str(base) in answer, "the anchor the refusal names is the base itself"
+
+
+@pytest.mark.asyncio
+async def test_a_subagents_input_resolves_in_its_own_work_directory() -> None:
+    """The base is the conversation's `work_dir`, subagent half included: a
+    worker's relative path is its own directory, not its maker's."""
+    adapter = FakeAdapter()
+    async with Client(server_for(adapter)) as client:
+        await client.call_tool(
+            "transcribe_audio",
+            {"input": "a.wav"},
+            meta=conversation_meta("jack", "researcher"),
         )
 
     assert (
-        adapter.calls["image"]["outputs_dir"] == agent_dir("jack") / "media" / "project"
+        adapter.calls["asr"]["audio_path"] == agent_dir("jack", "researcher") / "a.wav"
     )
-    assert "not a folder inside the media directory" in escaped, (
-        "a model does not choose where to write"
-    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_move_keeps_the_file_that_was_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The old artifact is replaced by a complete one or not at all.**
+
+    `_place` used to remove the destination and then move, so a move that failed
+    — a Windows sharing violation, an antivirus hold — left the caller with
+    neither the file they had nor the one the tool just made.  A same-directory
+    `Path.replace` is the atomic operation both are, and a refusal leaves the
+    old document exactly as it was.
+    """
+    target = tmp_path / "art" / "cover.png"
+    target.parent.mkdir()
+    target.write_bytes(b"the old cover")
+    source = target.parent / "generated.png"
+    source.write_bytes(b"the new cover")
+
+    def refuse(self: Path, other: Path) -> Path:
+        raise OSError("the file is held by another program")
+
+    monkeypatch.setattr(Path, "replace", refuse)
+
+    with pytest.raises(ToolError, match="could not write"):
+        await _place(str(source), target)
+
+    assert target.read_bytes() == b"the old cover", "the old file was destroyed"
+    assert source.read_bytes() == b"the new cover", "the artifact is still there"
+
+
+def test_a_transcript_write_replaces_whole_or_leaves_the_old_file(
+    tmp_path: Path,
+) -> None:
+    """**A write that failed is not a write that happened.**
+
+    `_write_transcript` used `write_text`, which truncates the destination
+    before writing — so a full disk or a character UTF-8 cannot encode left the
+    previous transcript gone and the call reporting failure.  The text goes to a
+    temporary file beside it and is renamed over it; a failure removes the
+    temporary file and the old transcript stands.
+    """
+    target = tmp_path / "transcripts" / "meeting.txt"
+    target.parent.mkdir()
+    target.write_text("the earlier transcript", encoding="utf-8")
+
+    with pytest.raises(UnicodeError):
+        _replace_text(target, "half a character: \ud83d")
+
+    assert target.read_text(encoding="utf-8") == "the earlier transcript"
+    assert list(target.parent.glob("*.tmp")) == [], "the temporary file outlived it"
+
+    _replace_text(target, "the new transcript")
+    assert target.read_text(encoding="utf-8") == "the new transcript"
+
+
+@pytest.mark.asyncio
+async def test_a_text_file_is_read_for_speech() -> None:
+    """The file-to-file case: a text file in, the audio file's path out."""
+    script = agent_dir("jack") / "script.txt"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("hello from a file", encoding="utf-8")
+    adapter = Writing()
+    async with Client(server_for(adapter)) as client:
+        answer = await ask(client, "text_to_speech", input="script.txt")
+
+    assert adapter.calls["tts"]["text"] == "hello from a file"
+    assert Path(answer).read_bytes() == b"wav"
+
+
+@pytest.mark.asyncio
+async def test_speech_needs_text_or_a_text_file() -> None:
+    async with Client(server_for(FakeAdapter())) as client:
+        answer = await refused(client, "text_to_speech")
+
+    assert "nothing to say" in answer
 
 
 @pytest.mark.asyncio
 async def test_a_transcript_is_the_answer_and_writes_nothing() -> None:
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
-        answer = await ask(client, "transcribe_audio", path="a.wav")
+        answer = await ask(client, "transcribe_audio", input="a.wav")
 
-    assert answer["text"] == "hello home"
-    assert answer["total"] == len("hello home")
-    assert answer["offset"] == 0, "the whole of it was in one page"
-    assert adapter.calls["asr"]["audio_path"] == Path("a.wav")
+    assert answer == "hello home"
+    assert adapter.calls["asr"]["audio_path"] == agent_dir("jack") / "a.wav"
 
 
 class Says(FakeAdapter):
@@ -249,43 +423,49 @@ class Says(FakeAdapter):
 
 
 @pytest.mark.asyncio
-async def test_a_transcript_is_read_in_pages() -> None:
-    """**The one answer here whose length is the recording's.**  An hour of
-    speech is a text no single answer may carry, so a page is read by offset and
-    `offset + len(text) < total` is how the next one is asked for.
-    """
-    async with Client(server_for(Says("abcdefghij"))) as client:
-        first = await ask(client, "transcribe_audio", path="a.wav", limit=4)
-        second = await ask(
-            client,
-            "transcribe_audio",
-            path="a.wav",
-            offset=first["offset"] + len(first["text"]),
-            limit=4,
-        )
-
-    assert first["text"] == "abcd"
-    assert first["total"] == 10, "the whole transcript, not the page"
-    assert second["text"] == "efgh"
-    assert second["offset"] == 4
-    assert second["offset"] + len(second["text"]) < second["total"], "more remains"
-
-
-@pytest.mark.asyncio
-async def test_a_page_never_outgrows_the_tool_result_budget() -> None:
-    """**`limit` counts characters and the budget counts tokens**, so the budget
-    is the last word: a page of Chinese is several times what a page of English
-    of the same length costs, and an answer over `tool_result.tokens` would be a
-    result the harness had to shorten again — our own reader feeding our own
-    shortening.
+async def test_a_long_transcript_is_answered_whole() -> None:
+    """**A transcript is a tool output like any other.**  The tool does not
+    estimate, page or clip it; the harness's byte bound is the one place a
+    result is fitted, and a task's turn cuts it there.  The failure this pins is
+    the old one: a page cut to a token budget whose marker made `offset +
+    len(text)` skip the marker's characters.
     """
     whole = "字" * 9000
     async with Client(server_for(Says(whole))) as client:
-        page = await ask(client, "transcribe_audio", path="a.wav")
+        answer = await ask(client, "transcribe_audio", input="a.wav")
 
-    assert page["total"] == 9000
-    assert len(page["text"]) < 9000, "the budget cut the page short"
-    assert "do not fit" in page["text"], "and the cut is announced"
+    assert answer == whole
+    assert "do not fit" not in answer
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_can_be_written_to_a_named_file() -> None:
+    """The output path replaces the text in the answer: the transcript goes to
+    the file, and what enters the conversation is the path.
+    """
+    async with Client(server_for(Says("hello home"))) as client:
+        answer = await ask(
+            client, "transcribe_audio", input="a.wav", output="transcripts/meeting.txt"
+        )
+
+    assert answer != "hello home", "the text does not enter the conversation"
+    assert Path(answer).read_text(encoding="utf-8") == "hello home"
+    assert Path(answer) == agent_dir("jack") / "transcripts" / "meeting.txt"
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_can_be_written_to_an_absolute_path(tmp_path) -> None:
+    """A path the caller names is the caller's: an absolute one is used as
+    written, not moved under a directory the tool chose.
+    """
+    target = tmp_path / "elsewhere" / "meeting.txt"
+    async with Client(server_for(Says("hello home"))) as client:
+        answer = await ask(
+            client, "transcribe_audio", input="a.wav", output=str(target)
+        )
+
+    assert answer == str(target)
+    assert target.read_text(encoding="utf-8") == "hello home"
 
 
 # --- the refusals -------------------------------------------------------------
@@ -294,14 +474,15 @@ async def test_a_page_never_outgrows_the_tool_result_budget() -> None:
 @pytest.mark.asyncio
 async def test_a_size_is_checked_before_the_call_is_paid_for() -> None:
     """The one argument a model gets plausibly wrong, refused here rather than
-    at the provider, where the refusal arrives after the call has been billed."""
+    at the provider, where the refusal arrives after the call has been billed.
+    The *grammar* is the tool's half, shared by every adapter; the pixel range
+    is a vendor's fact and is refused in the adapter that knows it
+    (`test_dashscope_refuses_a_size_outside_its_range`)."""
     adapter = FakeAdapter()
     async with Client(server_for(adapter)) as client:
         bad = await refused(client, "generate_image", prompt="x", size="1024")
-        small = await refused(client, "generate_image", prompt="x", size="10x10")
 
     assert "is not a size" in bad
-    assert "too small" in small
     # `close` is recorded by the lifespan's teardown, so the question is which
     # *capabilities* were reached — and none were.
     assert not {"image", "video", "tts", "asr"} & set(adapter.calls)
@@ -372,8 +553,10 @@ def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
     assert check_size("1024*1024") == "1024*1024"
     assert check_size("1024x1024") == "1024x1024"
     assert check_size("") == "", "empty means the model's own default"
-    with pytest.raises(ToolError, match="too large"):
-        check_size("8192*8192")
+    # The grammar is the whole of this check: a pixel range is a vendor's fact,
+    # and one provider's numbers may not refuse another provider's size.
+    assert check_size("8192*8192") == "8192*8192"
+    assert check_size("10x10") == "10x10"
 
 
 # --- the config's four steps --------------------------------------------------
@@ -382,19 +565,26 @@ def test_the_size_check_accepts_the_three_ways_it_is_written() -> None:
 def test_a_provider_entry_has_to_say_what_it_speaks_and_where() -> None:
     """Refused at load, which is right for where this parsing happens: the
     loader is the judge, rather than a call-time reader that has to skip a bad
-    entry."""
-    with pytest.raises(ConfigError, match="needs `api`"):
+    entry.
+
+    The section readers raise `SectionError` — the loader's own vocabulary —
+    and `slife2.libs.host.config._build` is the one boundary that turns it into
+    the `ConfigError` a person's command reports.
+    """
+    from slife2.libs.host.section import SectionError
+
+    with pytest.raises(SectionError, match="needs `api`"):
         _media(
             {"providers": {"p": {"base_url": "https://x", "models": []}}},
             MediaSettings(),
         )
-    with pytest.raises(ConfigError, match="needs `base_url`"):
+    with pytest.raises(SectionError, match="needs `base_url`"):
         _media({"providers": {"p": {"api": "a", "models": []}}}, MediaSettings())
-    with pytest.raises(ConfigError, match="needs `models`"):
+    with pytest.raises(SectionError, match="needs `models`"):
         _media(
             {"providers": {"p": {"api": "a", "base_url": "https://x"}}}, MediaSettings()
         )
-    with pytest.raises(ConfigError, match="`kind` must be one of"):
+    with pytest.raises(SectionError, match="`kind` must be one of"):
         _media(
             {
                 "providers": {
@@ -407,7 +597,7 @@ def test_a_provider_entry_has_to_say_what_it_speaks_and_where() -> None:
             },
             MediaSettings(),
         )
-    with pytest.raises(ConfigError, match="not a kind of media"):
+    with pytest.raises(SectionError, match="not a kind of media"):
         _media({"defaults": {"sound": "p/m"}}, MediaSettings())
 
 
@@ -533,6 +723,112 @@ def _saver_returning(path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("size", "extra", "direction"),
+    [
+        ("10x10", None, "too small"),
+        ("8192*8192", None, "too large"),
+        ("", {"size": "512*512"}, "too small"),
+    ],
+)
+async def test_dashscope_refuses_a_size_outside_its_range(
+    monkeypatch, tmp_path, size: str, extra: dict[str, Any] | None, direction: str
+) -> None:
+    """**The vendor's numbers, refused in the vendor's name.**
+
+    The range used to be checked at the tool, before the provider was resolved,
+    so `generate_image(model="…/dall-e-2", size="512*512")` was refused with
+    DashScope's floor attributed to the selected provider.  The check now lives
+    in the adapter that knows the bounds, and it is the *effective* size that is
+    checked — a configured `params.size` gets the same answer as a written one.
+    Either way the refusal arrives before the request, not after the call is
+    billed.
+    """
+    adapter = dashscope()
+    asked: list[str] = []
+
+    async def fake_request(method, url, *, extra_headers=None, json_body=None):
+        asked.append(url)
+        return {
+            "output": {
+                "choices": [{"message": {"content": [{"image": "https://cdn/x.png"}]}}]
+            }
+        }
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    with pytest.raises(MediaAdapterError, match=direction) as caught:
+        await adapter.generate_image(
+            model="img",
+            prompt="x",
+            size=size,
+            outputs_dir=tmp_path,
+            extra_params=extra,
+        )
+
+    assert "DashScope" in str(caught.value), "the bounds name their vendor"
+    assert "589824..16777216" in str(caught.value)
+    assert asked == [], "the refusal arrived before the call was paid for"
+
+
+@pytest.mark.asyncio
+async def test_a_range_refusal_names_the_provider_actually_called(
+    monkeypatch, tmp_path
+) -> None:
+    """The sentence the model reads is the adapter's, wrapped by `_run` — and
+    it names DashScope rather than a "this provider" the tool never resolved."""
+    adapter = dashscope()
+
+    async def fake_request(method, url, *, extra_headers=None, json_body=None):
+        raise AssertionError("the request was made before the size was refused")
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+    config = replace(load(), media=settings())
+    async with Client(build_server(config, adapters={"test": adapter})) as client:
+        answer = await refused(client, "generate_image", prompt="x", size="512*512")
+
+    assert answer.startswith("the image call failed:")
+    assert "too small" in answer
+    assert "DashScope" in answer
+
+
+@pytest.mark.asyncio
+async def test_an_openai_image_below_dashscopes_floor_reaches_the_wire(
+    monkeypatch, tmp_path
+) -> None:
+    """`512*512` is a size dall-e-2 takes; DashScope's floor is not OpenAI's.
+
+    The tool used to refuse it locally with DashScope's numbers attributed to
+    the selected provider.  The grammar passes, and the vendor is the judge of
+    its own range.
+    """
+    adapter = OpenAICompatAdapter(
+        MediaProviderSettings(name="o", api="openai-images", base_url="https://x/v1")
+    )
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client(_PostOnly):
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="dall-e-2", prompt="x", size="512*512", outputs_dir=tmp_path
+    )
+
+    assert seen["size"] == "512x512"
+
+
+@pytest.mark.asyncio
 async def test_a_video_submits_asynchronously_and_polls(monkeypatch, tmp_path) -> None:
     """The header is what asks for a job rather than a wait, and the poll is
     what turns it into a file — with the deadline the caller gave it."""
@@ -645,6 +941,39 @@ async def test_a_transcript_reads_three_answer_shapes(monkeypatch, tmp_path) -> 
     assert await adapter.transcribe_audio(model="hear", audio_path=audio) == "one"
     assert await adapter.transcribe_audio(model="hear", audio_path=audio) == "two"
     assert await adapter.transcribe_audio(model="hear", audio_path=audio) == "three"
+
+
+@pytest.mark.asyncio
+async def test_a_transcript_names_the_audios_own_format(monkeypatch, tmp_path) -> None:
+    """**The suffix is the only thing that knows what the bytes are.**
+
+    The vendor requires `parameters.format` and says to set it to match the
+    actual audio; the data URI's MIME is a second description with no documented
+    tie to it.  A fixed `wav` — and a fixed 16 kHz `sample_rate` — described
+    every mp3 and m4a wrongly.  A configured `sample_rate` still goes through.
+    """
+    audio = tmp_path / "a.MP3"
+    audio.write_bytes(b"ID3")
+    adapter = dashscope()
+    seen: dict[str, Any] = {}
+
+    async def fake_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        seen.update(json_body)
+        return {"output": {"text": "hi"}}
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+
+    await adapter.transcribe_audio(
+        model="hear",
+        audio_path=audio,
+        extra_params={"format": "wav", "sample_rate": "8000"},
+    )
+
+    assert seen["parameters"] == {"format": "mp3", "sample_rate": "8000"}
+    data = seen["input"]["messages"][0]["content"][0]["input_audio"]["data"]
+    assert data.startswith("data:audio/mpeg;base64,")
 
 
 @pytest.mark.asyncio
@@ -774,6 +1103,76 @@ async def test_a_provider_with_no_key_sends_no_authorization_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_poll_cuts_a_hung_request_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The caller's `timeout` bounds each request, not only the gaps.**
+
+    The clock was checked at the top of the loop and the request carried its own
+    180 s transport timeout, so `timeout: 5` could take minutes when one GET
+    hung near the boundary.  The sleep was not clipped either, so the deadline
+    was overshot by a whole poll period.
+    """
+    import slife2.helpers.timeouts as _T
+
+    monkeypatch.setattr(_T.timeouts.pacing, "media_poll", 0.01)
+    adapter = dashscope()
+
+    async def slow_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        await asyncio.sleep(0.2)
+        return {"output": {"task_status": "RUNNING"}}
+
+    monkeypatch.setattr(adapter, "_request", slow_request)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(MediaAdapterError, match="did not finish within"):
+        await adapter._poll("t-1", 0.05)
+    assert asyncio.get_running_loop().time() - started < 0.15
+
+
+@pytest.mark.asyncio
+async def test_a_poll_clips_its_sleep_to_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = dashscope()
+    slept: list[float] = []
+
+    async def running_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        return {"output": {"task_status": "RUNNING"}}
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(adapter, "_request", running_request)
+    monkeypatch.setattr(adapters.asyncio, "sleep", fake_sleep)
+    with pytest.raises(MediaAdapterError, match="did not finish within"):
+        await adapter._poll("t-1", 0.05)
+
+    assert slept and max(slept) <= 0.05, (
+        "the pause ran past the caller's deadline by a whole poll period"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_submit_answer_whose_output_is_not_an_object_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_json_object` only guarantees the top level; a nested value of the
+    wrong shape reached `.get` and escaped as `AttributeError`."""
+    adapter = dashscope()
+
+    async def bad_request(method: str, url: str, *, extra_headers=None, json_body=None):
+        return {"output": "oops"}
+
+    monkeypatch.setattr(adapter, "_request", bad_request)
+    with pytest.raises(MediaAdapterError, match="without an id"):
+        await adapter._submit("m", {}, {})
+
+
+@pytest.mark.asyncio
 async def test_a_video_that_outruns_its_timeout_names_the_job_it_left_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -822,6 +1221,21 @@ def _client_returning(client: Any):
     return ensure
 
 
+class _PostOnly:
+    """An httpx-shaped fake for an adapter that posts one JSON body.
+
+    The adapters call `request`, the one method both wires share, and the fakes
+    below spell only the one call their endpoint takes.  Delegating here keeps
+    each fake about its own answer rather than about an HTTP vocabulary.
+    """
+
+    async def post(self, url: str, json: dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+    async def request(self, method: str, url: str, **options: Any) -> Any:
+        return await self.post(url, json=options.get("json"))
+
+
 def _posting(body: Any, status_code: int = 200, text: str = "{}"):
     """A client whose one POST answers with *body* as JSON.
 
@@ -839,7 +1253,7 @@ def _posting(body: Any, status_code: int = 200, text: str = "{}"):
         def json() -> Any:
             return body
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             return Response()
 
@@ -899,7 +1313,7 @@ async def test_an_openai_image_size_is_written_with_its_own_separator(
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             seen.update(json)
             return Response()
@@ -914,6 +1328,103 @@ async def test_an_openai_image_size_is_written_with_its_own_separator(
 
 
 @pytest.mark.asyncio
+async def test_an_openai_image_size_survives_the_servers_extra_params(
+    monkeypatch, tmp_path
+) -> None:
+    """The server merges the caller's raw size into `extra_params`, so the
+    adapter's normalization must be the last word on `size`.
+
+    Applied before the merge, the documented `WIDTH*HEIGHT` was overwritten by
+    the raw spelling and reached the vendor verbatim — a 400 for every `*`-spelled
+    size, the very failure `_size_for` exists to prevent.
+    """
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client(_PostOnly):
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="img",
+        prompt="x",
+        size="1024*1024",
+        outputs_dir=tmp_path,
+        extra_params={"size": "1024*1024"},
+    )
+
+    assert seen["size"] == "1024x1024"
+
+
+@pytest.mark.asyncio
+async def test_the_openai_call_outranks_the_config(monkeypatch, tmp_path) -> None:
+    """**The call wins, as it does for every adapter.**
+
+    `body.update(extra_params)` put the configured `params:` last: a config
+    saying `n: 4` billed four images while only the first was saved, and a
+    configured `model` or `prompt` replaced the caller's own.  `merge_params`
+    is the one place that rule is written, and this is the adapter that had
+    not read it.
+    """
+    adapter = OpenAICompatAdapter(settings().providers["test"])
+    seen: dict[str, Any] = {}
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, Any]:
+            return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
+
+    class Client(_PostOnly):
+        async def post(self, url: str, json: dict[str, Any]) -> Any:
+            seen.update(json)
+            return Response()
+
+    monkeypatch.setattr(adapter, "_ensure_client", _client_returning(Client()))
+
+    await adapter.generate_image(
+        model="img",
+        prompt="x",
+        size="1024*1024",
+        outputs_dir=tmp_path,
+        extra_params={
+            "model": "other",
+            "prompt": "hijack",
+            "n": 4,
+            "size": "512*512",
+            "quality": "hd",
+        },
+    )
+
+    assert seen["model"] == "img"
+    assert seen["prompt"] == "x"
+    assert seen["n"] == 1, "four billed images, one saved"
+    assert seen["size"] == "1024x1024"
+    assert seen["quality"] == "hd", "the config supplies what the call leaves open"
+
+    # A size the call leaves open is the config's, in the vendor's spelling.
+    seen.clear()
+    await adapter.generate_image(
+        model="img",
+        prompt="x",
+        outputs_dir=tmp_path,
+        extra_params={"size": "512*512"},
+    )
+    assert seen["size"] == "512x512"
+
+
+@pytest.mark.asyncio
 async def test_an_openai_image_may_come_back_as_bytes(monkeypatch, tmp_path) -> None:
     adapter = OpenAICompatAdapter(settings().providers["test"])
     encoded = base64.b64encode(b"\x89PNG").decode()
@@ -925,7 +1436,7 @@ async def test_an_openai_image_may_come_back_as_bytes(monkeypatch, tmp_path) -> 
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": encoded}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             assert url.endswith("/images/generations")
             assert json["model"] == "img"
@@ -954,7 +1465,7 @@ async def test_an_images_answer_that_is_not_json_is_a_failure_not_a_traceback(
         def json() -> Any:
             raise ValueError("Expecting value: line 1 column 1 (char 0)")
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             return Response()
 
@@ -1017,18 +1528,3 @@ async def test_saving_an_artifact_goes_off_the_event_loop(
 
     assert Path(answer).read_bytes() == b"RIFF"
     assert any(getattr(func, "__name__", "") == "write_bytes" for func in hopped)
-
-
-def test_a_subagents_media_follows_its_fork_flag(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-fork subagent owns its media; a fork writes to its maker's."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    agent_dir("jack", "researcher")  # the record's directory; a read does not make it
-    record = subagent_file("jack", "researcher")
-
-    record.write_text("fork: false\n", encoding="utf-8")
-    assert media_dir("jack", "researcher") == agent_dir("jack", "researcher") / "media"
-
-    record.write_text("fork: true\n", encoding="utf-8")
-    assert media_dir("jack", "researcher") == agent_dir("jack") / "media"

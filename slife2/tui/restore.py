@@ -35,14 +35,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from slife2.libs.harness import notes
+from slife2.libs.harness.i18n import t
+from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.turn.attachments import IMAGE_PREFIX
 from slife2.libs.turn.context import turn_failed_error, turn_footnote
 from slife2.libs.turn.events import preview
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tools import CHECK_NEW_INPUT, is_harness
-from slife2.tui import notes
-from slife2.tui.i18n import t
-from slife2.tui.widgets import WINDOW_CHANNEL, ChatView
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    FUNC_TOOL_UNLOAD,
+    is_harness,
+    is_harness_call,
+)
+from slife2.tui.widgets import ChatView
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +117,8 @@ def _draw_turn(chat: ChatView, turn: dict[str, Any]) -> None:
     # asked for them — a tool panel is opened by an assistant message and
     # completed by a tool message further down — so one walk cannot both open a
     # panel and know what to put in it.  Each result carries its message's
-    # channel because a cut-in's line wears the bubble the message arrived on.
+    # channel because a real cut-in's delivery has one, and that is what tells
+    # it from a `_check_new_input` pair that took nothing.
     results: dict[str, tuple[str, str]] = {}
     for message in messages:
         if message.get("role") == "tool" and message.get("tool_call_id"):
@@ -208,17 +215,35 @@ def _draw_answer(
 
     for call in calls:
         text, channel = results.get(call.id, ("", ""))
-        if call.name == CHECK_NEW_INPUT:
-            # **The one harness call a rebuild draws.**  The pair is how a
+        if call.name == CHECK_NEW_INPUT and is_harness_call(call.id):
+            # **A pair that took nothing is not a line somebody sent.**  The
+            # loop writes the harness pair even when the queue was empty (or
+            # the head carried images), and the tool's answer is the
+            # `NOTHING_WAITING` sentence.  The stored channel is the second
+            # half: a real delivery has one, and a record from before that field
+            # is why the sentence alone is not trusted when a channel is present.
+            if text == NOTHING_WAITING and not channel:
+                continue
+            # **The cut-in's line is a harness note too.**  The pair is how a
             # message that arrived mid-turn entered the conversation, and the
-            # tool's answer is the message's own words.  `add_cut_in` keeps the
-            # turn open, exactly as the live event does, so the answer that
-            # follows this pair streams under the line rather than replacing it.
-            # The channel is the one `Message.to_record` kept: a record from
-            # before that field reads as this window's own, which is the only
-            # speaker a missing channel can honestly be.
-            chat.add_cut_in(text, channel=channel or WINDOW_CHANNEL)
-        elif not is_harness(call.name):
+            # tool's answer is the delivered words — from any channel.  The
+            # unified shape is the note, not a bubble.  A model's own
+            # `_check_new_input` call keeps its own id and is the ordinary panel
+            # below.  The channel rides along for the same reason the live
+            # event carries it: it is what strips a marker the sender's channel
+            # put in front of the words.
+            chat.add_note(text, channel=channel)
+        elif is_harness(call.name) and is_harness_call(call.id):
+            # **A pair the machinery wrote is a line the person can see.**  The
+            # pair is skipped as a panel; the machinery's answer is a note — and
+            # the trim's five lists become the names that left.  A model's own
+            # call to the same harness tool keeps its own call id and falls to
+            # the ordinary panel below: the call is the model's.
+            if text:
+                chat.add_note(
+                    notes.unloaded(text) if call.name == FUNC_TOOL_UNLOAD else text
+                )
+        else:
             _draw_tool(chat, call, text)
 
 

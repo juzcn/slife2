@@ -17,13 +17,13 @@ from slife2.libs.model.wire import decode_chunk, encode_chunk
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
     PREVIEW_CHARS,
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ToolCallFinished,
     ToolCallStarted,
     ToolsCounted,
     TurnFinished,
+    UsageReported,
     decode,
     encode,
     preview,
@@ -39,14 +39,10 @@ from slife2.libs.turn.messages import (
 pytestmark = pytest.mark.unit
 
 EVENTS = [
-    # The discriminator's answer, which arrives before any of the rest and is
-    # the only event a turn has that is about the context rather than the work.
-    ContextChosen(kept=12, recalled=3),
-    # The same event with the rerank stage's report — the key is omitted when
-    # empty, so both shapes have to round trip.
-    ContextChosen(kept=12, recalled=3, rerank="unavailable"),
     # The model's list against the catalogue: both halves on one ask.
     ToolsCounted(loaded=24, total=253),
+    # One model call's own usage, the figure the bar follows during a turn.
+    UsageReported(last_usage=Usage(7, 3, cache_read=2, cache_creation=1)),
     TextDelta(text="hello"),
     TextDelta(text="你好 — éè"),
     # The iteration counter, and the two keys that are omitted at zero: the first
@@ -170,6 +166,27 @@ def test_decode_chunk_returns_none_for_foreign_text() -> None:
     assert decode_chunk('{"k": "other"}') is None
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        '{"k":"chunk","d":42}',
+        '{"k":"chunk","th":42}',
+        '{"k":"chunk","t":"x"}',
+        '{"k":"chunk","t":[{"i":"x"}]}',
+        '{"k":"chunk","t":[{"i":0,"a":5}]}',
+        '{"k":"chunk","u":{"prompt_tokens":"lots"}}',
+        '{"k":"chunk","u":{"prompt_tokens":1}}',
+    ],
+)
+def test_a_malformed_chunk_is_dropped_not_raised(line: str) -> None:
+    """**The sentinel is the whole contract.**  The decoder exists for a line
+    from another build; coercing its fields read `{"d": 42}` as text `"42"`,
+    and casting its index or usage raised out of the progress handler — a
+    display line failing the model call streaming beside it.
+    """
+    assert decode_chunk(line) is None
+
+
 def test_assistant_message_with_tool_calls_round_trips() -> None:
     """Including the `content: ""` normalisation `to_wire` introduces."""
     message = Message(
@@ -273,6 +290,43 @@ def test_a_message_without_reasoning_has_no_thinking_key() -> None:
     assert Message.from_wire(wire).thinking == ""
 
 
+def test_the_opaque_reasoning_payload_round_trips() -> None:
+    """The adapter's own blocks are stored and travelled exactly as they arrived.
+
+    They are not display and not a provider field: each adapter replays its own
+    blocks and ignores the others, so the envelope has to survive the hop and
+    the turn log byte for byte.
+    """
+    payload = {
+        "model": "m",
+        "blocks": [
+            {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "zzz"},
+        ],
+    }
+    message = Message(role="assistant", content="42", reasoning=payload)
+
+    wire = message.to_wire()
+    assert wire["reasoning"] == payload
+    assert Message.from_wire(wire) == message
+    assert message.to_record()["reasoning"] == payload
+
+
+def test_an_unreadable_reasoning_payload_is_dropped_and_named(caplog) -> None:
+    """A structural value is not a payload, and a provider would answer 400.
+
+    The message keeps its place — the words are what the conversation is for —
+    and the loss is named rather than passing a shape nobody wrote downstream.
+    """
+    with caplog.at_level("WARNING"):
+        message = Message.from_wire(
+            {"role": "assistant", "content": "42", "reasoning": "not an envelope"}
+        )
+
+    assert message.reasoning is None
+    assert "reasoning payload" in caplog.text
+
+
 def test_a_message_without_a_readable_role_keeps_its_shape() -> None:
     """**A role that cannot be read is not permission to call it the user's.**
 
@@ -304,10 +358,59 @@ def test_stream_chat_result_from_wire_tolerates_an_empty_payload() -> None:
 
 
 def test_a_stream_chat_result_with_a_hole_is_refused() -> None:
-    """`to_wire` writes all five keys; a mapping missing one is not this
+    """`to_wire` writes all six keys; a mapping missing one is not this
     build's answer, and defaulting the hole would invent a fact."""
     wire = StreamChatResult(text="answer").to_wire()
     del wire["usage"]
+    with pytest.raises(KeyError, match="usage"):
+        StreamChatResult.from_wire(wire)
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["text", "tool_calls", "thinking", "reasoning", "usage", "stop_reason"],
+)
+def test_a_stream_chat_result_with_a_null_field_is_refused(key: str) -> None:
+    """**A null is a value `to_wire` never writes, not an empty answer.**
+
+    A server from another build can send `tool_calls: null`, `thinking: null`
+    or `usage: null`; read as no calls, no reasoning and zero tokens it turns
+    an unreadable answer into a confident empty one — the model's real reply
+    discarded and the turn reported as a success.
+    """
+    wire = StreamChatResult(text="answer").to_wire()
+    wire[key] = None
+    with pytest.raises(KeyError, match=key):
+        StreamChatResult.from_wire(wire)
+
+
+def test_a_stream_chat_result_with_a_malformed_tool_call_is_refused() -> None:
+    """A list is the shape; a null element in it is not a call."""
+    wire = StreamChatResult(text="answer").to_wire()
+    wire["tool_calls"] = [None]
+    with pytest.raises(KeyError, match="tool call"):
+        StreamChatResult.from_wire(wire)
+
+
+def test_a_tool_call_whose_function_is_not_an_object_is_refused() -> None:
+    """**The nesting is checked, so damage is a `KeyError` and not an
+    `AttributeError`.**  The model client turns `KeyError` into its named
+    "a model server from another build" refusal; `AttributeError` escaped the
+    turn as a Python traceback instead, on the hop that exists for exactly
+    this case.
+    """
+    for function in ("calc", 5, ["calc"]):
+        with pytest.raises(KeyError, match="function"):
+            ToolCall.from_wire({"id": "c1", "function": function})
+
+
+@pytest.mark.parametrize("value", ["12", 1.5, True, None])
+def test_a_stream_chat_result_with_a_non_integer_usage_is_refused(value) -> None:
+    """`int("12")` is a measurement nobody made, and `int("abc")` raised a
+    `ValueError` past the client's `KeyError` guard.  The four counts are
+    integers in this build's shape, so anything else is unreadable."""
+    wire = StreamChatResult(text="answer").to_wire()
+    wire["usage"]["prompt_tokens"] = value
     with pytest.raises(KeyError, match="usage"):
         StreamChatResult.from_wire(wire)
 

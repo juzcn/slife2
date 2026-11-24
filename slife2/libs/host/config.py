@@ -84,37 +84,26 @@ the hard way, and the fields carry the same meaning here.
 
 Secrets
 -------
-1. ``keyring:<service>/<key>``  -> credstore keyring, then its encrypted backup
-2. ``${VAR}``                   -> os.environ -> credstore keyring -> its
-                                   encrypted backup
-3. ``${VAR:-default}``          -> the same chain, then the literal default
-4. anything else                -> as-is
-
-The encrypted backup (`~/.credstore/credentials.crypt`, or `CREDSTORE_FILE`) is
-read when the keyring does not answer **and** `CREDSTORE_MASTER_PASSWORD` holds
-the master password the CLI would prompt for.  That is what lets a container,
-whose kernel keyring is blocked, resolve from the cred file `credstore` created
-inside it; without the password the backup stays locked and the chain steps
-past it.
+1. ``${VAR}``        -> os.environ -> credstore's OS keyring
+2. anything else     -> as-is
 
 A missing secret degrades to its literal form (``"${DEEPSEEK_API_KEY}"``),
 which fails loudly at the API call where it is a readable error, rather than at
 startup where it is not.  A store that is *there* and refuses — a locked
-keyring, a seed the master password does not unlock — raises where the secret
-is resolved instead.  Resolution is also *lazy*: the
-provider keeps the raw reference and only touches credstore when `api_key` is
-read, so the TUI process never opens the OS keyring.  A tool server's `env:`
-and `headers:` and a tunnel provider's options are lazy the same way — a
-``${VAR}`` is kept as written and resolved where the child is started — because
-every server process loads this config, and a lookup at load would be paid once
-per process for a credential only one of them uses.
+keyring — raises where the secret is resolved instead.  Resolution is also
+*lazy*: the provider keeps the raw reference and only touches credstore when
+`api_key` is read, so the TUI process never opens the OS keyring.  A tool
+server's `env:` and `headers:` and a tunnel provider's options are lazy the
+same way — a ``${VAR}`` is kept as written and resolved where the child is
+started — because every server process loads this config, and a lookup at load
+would be paid once per process for a credential only one of them uses.
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import logging
-import math
 import os
 import platform
 import re
@@ -134,10 +123,29 @@ from slife2.libs.host.model_config import (
     API_PROTOCOLS,
     ModelConfig,
     load_model,
-    load_provider,
 )
 from slife2.libs.host.paths import home
-from slife2.libs.host.tool_config import load_cli, load_mcp, load_rest_api
+from slife2.libs.host.section import (
+    Check,
+    Field,
+    SectionError,
+    bound,
+    parse_section,
+    read_int,
+    read_list,
+    read_mapping,
+    read_number,
+    read_scalar,
+    read_section,
+    read_switch,
+    read_text,
+    refuse_unknown,
+)
+from slife2.libs.host.tool_config import (
+    load_cli,
+    load_mcp,
+    load_rest_api,
+)
 
 #: The one place this module warns rather than refuses.  Everything else here
 #: raises a `ConfigError` at load, because a malformed section is a mistake in
@@ -164,10 +172,9 @@ class ConfigError(Exception):
 #: and the request names the provider whose credentials to use.
 MODEL_TOOL = "stream_chat"
 
-#: Matches `${VAR}` and `${VAR:-default}`.  The name is deliberately restricted
-#: to shell-safe identifiers so a literal `${...}` in a prompt does not become a
-#: lookup.
-_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+#: Matches `${VAR}`.  The name is deliberately restricted to shell-safe
+#: identifiers so a literal `${...}` in a prompt does not become a lookup.
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 #: The config file's name inside the data directory.
 DEFAULT_CONFIG_NAME = "slife2.yaml"
@@ -348,15 +355,15 @@ class Net:
         the remote one's segments are a room name — `default`, usually — so a
         word of its own is what keeps the two meshes from being one.
 
-        Neither segment is configured on that side.  There is nothing for a file
-        to get right: the unit cannot be anything but the agent's name without
-        merging two agents' subagents, and the org is the network's, so
-        `SubagentSettings.network` refuses a `unit:` and takes an `org:` only to
-        override the default.
+        The unit is not configured on that side: it cannot be anything but the
+        agent's name without merging two agents' subagents, so
+        `SubagentSettings.network` refuses a `unit:`.  The org is the network's
+        own word — `SUBAGENT_ORG` by default — and an `org:` the file writes
+        overrides it, which is how an operator groups meshes (SDD §4.5.5).
         """
         if self.shared_namespace:
             return settings.org, settings.unit
-        return SUBAGENT_ORG, agent
+        return settings.org, agent
 
 
 #: The remote network: an agent's peers, which may be on another machine and on
@@ -516,6 +523,16 @@ class Plugin:
     port: int
     api: bool = False
 
+
+#: The source names the **document plugins** file their rows under — a
+#: playbook's rows and a command's, and the jobs folder's code.  They live here
+#: rather than in `slife2.libs.plugin.protocol` because the loader is one of
+#: their readers: a hand-written `mcp:` entry under one of these names shadows a
+#: document source, and the file is refused at load (`_reserved_source`).  The
+#: protocol re-exports them, so no caller has two spellings.
+SKILLS_SOURCE = "skills"
+CLI_SOURCE = "cli"
+JOB_SOURCE = "job"
 
 #: Every server slife2 starts, in the order they are described in.
 #:
@@ -817,14 +834,14 @@ _BY_KEY: dict[str, Plugin] = {one.key: one for one in PLUGINS}
 
 
 def plugin(key: str) -> Plugin:
-    """The row *key* names.  **Never raises**, and that is on purpose.
+    """The row *key* names, or `KeyError` when there is none.
 
     The keys that reach here are the ones this module wrote down — a `Net`'s own
     key, a constant's own key — so an unknown one is a programming error inside
-    this file rather than anything a config can cause, and a `KeyError` traceback
-    naming the key is a better answer than a config refusal nobody can act on.
-    A key from *outside* is checked against `Config.server` first, which is the
-    one place a word somebody typed is judged.
+    this file rather than anything a config can cause.  It is raised as the
+    `KeyError` the lookup already is rather than turned into a config refusal
+    nobody can act on; a key from *outside* is checked against `Config.server`
+    first, which is the one place a word somebody typed is judged.
     """
     return _BY_KEY[key]
 
@@ -903,106 +920,11 @@ def net_settings(config: Config, net: Net) -> A2ASettings:
 A2A_BROKER_ENV_VAR = "SLIFE2_A2A_BROKER"
 
 
-#: The master password that unlocks credstore's encrypted backup.  The CLI asks
-#: for it (`credstore get KEY -p`); a daemon has no terminal to ask on, so a
-#: container gets it through the environment instead.
-CREDSTORE_PASSWORD_ENV_VAR = "CREDSTORE_MASTER_PASSWORD"
-
-#: What `check_backend()` said about the seed, by `CREDSTORE_FILE` spelling.
-#: Resolved once per process per path because `check_backend()` re-probes the
-#: platform keyring every time, and a container has no keyring to find — the
-#: probe's warnings would otherwise land on every `${VAR}` the config resolves.
-_cryptfile_state: dict[str, tuple[bool, str]] = {}
-
-#: Values already read from the seed, by `(CREDSTORE_FILE, key)`.  Unlocking is
-#: Argon2 at 64 MB and 15 passes, so a config with a dozen `${VAR}` references
-#: would pay that a dozen times; a credential does not change under a running
-#: stack.  A key the seed does not hold is cached as None for the same reason.
-_cryptfile_values: dict[tuple[str, str], str | None] = {}
-
-
-def _cryptfile_ready() -> tuple[bool, str]:
-    """Whether the encrypted backup is there, and where — asked once.
-
-    The key is `CREDSTORE_FILE`'s value, so a test (or a caller) that points the
-    store at another file gets that file's answer rather than the first one's.
-    """
-    from credstore import check_backend
-
-    key = os.environ.get("CREDSTORE_FILE", "")
-    state = _cryptfile_state.get(key)
-    if state is None:
-        info = check_backend()
-        state = (
-            bool(info.get("cryptfile_ready")),
-            str(info.get("cryptfile_path") or ""),
-        )
-        _cryptfile_state[key] = state
-    return state
-
-
-def _cryptfile_lookup(key: str) -> str | None:
-    """Read one credential from credstore's encrypted backup, when unlocked.
-
-    **The half that survives a container.**  credstore's public
-    `get_credential` reads the OS keyring only (`credstore` says so: the Python
-    API "returns None in cryptfile-only mode — it never prompts for the master
-    password").  Its encrypted backup is a file, and a file crosses into a
-    container where a kernel keyring does not: Docker blocks `keyctl`, so the
-    Linux backend reports `available: False` and every lookup answers None.
-    Without this fallback a cred file created inside the container is readable
-    by the CLI and by nobody slife2 runs.
-
-    **The password comes from `CREDSTORE_MASTER_PASSWORD`.**  The backup is
-    Argon2/AES-encrypted; no password is no fallback, because guessing one would
-    turn a missing secret into a wrong one.  A password that is present but does
-    not decrypt the file raises, like a keyring that refused: it is an answer
-    about the store, not an absence (SDD Appendix C).
-
-    **The file's location is credstore's.**  `check_backend()` owns
-    `CREDSTORE_FILE` and the `~/.credstore/credentials.crypt` default, and
-    `read_cryptfile_entry` is the same reader `credstore get -p` uses.  The
-    module is private because the public API deliberately excludes the
-    password-prompting path; duplicating the KDF here would be a second way to
-    read one file.
-    """
-    password = os.environ.get(CREDSTORE_PASSWORD_ENV_VAR)
-    if not password:
-        return None
-    try:
-        from credstore._backend import read_cryptfile_entry
-    except ImportError:
-        return None
-    # The password itself is a credential: keep it out of every surface that
-    # masks resolved values.
-    _secret_registry.register(password)
-    seed = os.environ.get("CREDSTORE_FILE", "")
-    cached = (seed, key)
-    if cached in _cryptfile_values:
-        return _cryptfile_values[cached]
-    ready, path = _cryptfile_ready()
-    if not ready:
-        return None
-    try:
-        value = read_cryptfile_entry(key, password, "credstore")
-    except ValueError as exc:
-        raise ConfigError(
-            f"{CREDSTORE_PASSWORD_ENV_VAR} does not unlock "
-            f"{path or 'the credential backup'}: {exc}"
-        ) from exc
-    _cryptfile_values[cached] = value
-    return value
-
-
 def _credstore_lookup(key: str) -> str | None:
     """Look up an environment-variable name in credstore.
 
     The env var name *is* the credential-store key, so ``DEEPSEEK_API_KEY``
     resolves whether it was exported or stored with ``credstore set``.
-
-    **The keyring first, then the encrypted backup.**  A keyring answers on a
-    desktop and a mounted `credentials.crypt` answers in a container; asking
-    the backup too on the desktop is how a key the keyring lost is still found.
 
     **No backend at all degrades to "not found"; a backend that failed does
     not.**  credstore itself answers None when this host has no keyring — a CI
@@ -1017,10 +939,7 @@ def _credstore_lookup(key: str) -> str | None:
         from credstore import get_credential
     except ImportError:
         return None  # credstore is not installed: there is no backend to consult
-    found = get_credential(key)
-    if found is not None:
-        return found
-    return _cryptfile_lookup(key)
+    return get_credential(key)
 
 
 def resolve_secret(value: object) -> str:
@@ -1030,65 +949,23 @@ def resolve_secret(value: object) -> str:
     and an API key written as a bare number should become a string rather than
     an exception.
 
+    **A missing secret degrades to its literal form.**  The reference is left
+    verbatim by the substitution below, so the failure lands where the value is
+    used, with its own name intact — the API call that returns a `401` naming
+    nothing is the reason (SDD Appendix C).
+
     **A keyring that is not installed degrades; a keyring that failed does
-    not.**  With no `credstore` there is no backend to consult, so a
-    ``keyring:`` reference falls to the `${VAR}` pass below and is left verbatim,
-    which is the declared degrade `_credstore_lookup` also names.  With one
-    installed, a `resolve_uri` that raises — the credential is not stored, the
-    backend is locked — is allowed out: reading it as "not found" would leave
-    the ``keyring:`` text to travel as the secret itself, which is the
-    deformation SDD Appendix C names.  The failure lands where the secret is
-    resolved.
-
-    **A credential that was never stored is a config mistake, and it is said as
-    one.**  credstore answers `KeyError` for that — its documented "not found",
-    as against a store that was asked and refused — and a bare `KeyError` out of
-    `load()` is not something any caller on this path catches: `slife2`'s entry
-    point and `family.py` both answer a bad config with their own one line for
-    `ConfigError` alone, so `env: {TOKEN: 'keyring:slife/a-key-nobody-stored'}`
-    printed a traceback instead of naming the reference, at the one place where
-    naming it is the whole of the fix.  The store that is *there* and refused
-    keeps raising rather than degrading, which is the registered behaviour and
-    the reason this catches the one exception type rather than all of them.
-
-    **Before that refusal, the encrypted backup is asked.**  A container's
-    keyring has no answer for any key; the cred file `credstore` created in it,
-    with `CREDSTORE_MASTER_PASSWORD`, does (`_cryptfile_lookup`), and a
-    `keyring:` URI is the same credential under its `service/key` spelling.
+    not.**  With no `credstore` there is no backend to consult, and the chain
+    steps past it to the reference.  With one installed, a `get_credential`
+    that raises — the backend is locked — is allowed out: reading it as "not
+    found" would leave the `${VAR}` text to travel as the secret itself.  The
+    failure lands where the secret is resolved.
     """
     if not isinstance(value, str):
         return str(value)
 
-    try:
-        from credstore import is_keyring_uri, resolve_uri
-    except ImportError:
-        # no backend to consult, so a `keyring:` reference is left to the
-        # `${VAR}` pass below, which leaves it verbatim — the declared degrade
-        pass
-    else:
-        if is_keyring_uri(value):
-            try:
-                resolved = resolve_uri(value)
-                _secret_registry.register(resolved)
-                return resolved
-            except KeyError as exc:
-                # **The backup is the second half of the same store.**  A
-                # container's keyring answers nothing, so a `keyring:` URI there
-                # has only the seed to read — the same key the CLI would find
-                # under `credstore get -p`.
-                recovered = _cryptfile_lookup(value.removeprefix("keyring:"))
-                if recovered is not None:
-                    _secret_registry.register(recovered)
-                    return recovered
-                raise ConfigError(
-                    f"{value}: this machine's credential store has no such "
-                    f"credential — store it with "
-                    f"`credstore set {value.removeprefix('keyring:')}`, or write "
-                    f"the value itself"
-                ) from exc
-
     def _replace(match: re.Match[str]) -> str:
-        var, default = match.group(1), match.group(2)
+        var = match.group(1)
         found = os.environ.get(var)
         if found:
             return found
@@ -1099,9 +976,9 @@ def resolve_secret(value: object) -> str:
             # shell is not the credential store.
             _secret_registry.register(found)
             return found
-        # Unresolvable and no default: leave the reference verbatim, so the
-        # failure surfaces where the value is used with its own name intact.
-        return default if default is not None else match.group(0)
+        # Unresolvable: leave the reference verbatim, so the failure surfaces
+        # where the value is used with its own name intact.
+        return match.group(0)
 
     return _ENV_PATTERN.sub(_replace, value)
 
@@ -1120,37 +997,26 @@ class _Reference(str):
 
 
 def defer_secret(value: object) -> str:
-    """Resolve *value* now unless it is a ``${VAR}`` reference.
+    """Keep a ``${VAR}`` reference for the process that consumes it.
 
     **A reference belongs to the process that consumes it**, not to the one that
-    read the file, so it is kept for :func:`resolve_deferred`.  A ``keyring:``
-    URI is *not* deferred: it names one credential that either exists or does
-    not, and the `ConfigError` for one that does not is an answer the load owes
-    the operator, not the first connection.
+    read the file, so it is kept for :func:`resolve_deferred`.  A literal is
+    not a lookup and is returned as written.
     """
     if not isinstance(value, str):
         return str(value)
-
-    try:
-        from credstore import is_keyring_uri
-    except ImportError:
-        pass
-    else:
-        if is_keyring_uri(value):
-            return resolve_secret(value)
-
     if _ENV_PATTERN.search(value):
         return _Reference(value)
-    return resolve_secret(value)
+    return value
 
 
 def resolve_deferred(value: object) -> str:
     """What a reference kept by :func:`defer_secret` stands for.
 
-    Anything that was resolved eagerly (a literal, a ``keyring:`` URI) is
-    returned unchanged rather than run through :func:`resolve_secret` a second
-    time: a stored secret is allowed to contain the characters a reference is
-    spelled with, and resolving it twice would read it as one.
+    A literal is returned unchanged rather than run through
+    :func:`resolve_secret` a second time: a stored secret is allowed to contain
+    the characters a reference is spelled with, and resolving it twice would
+    read it as one.
     """
     if isinstance(value, _Reference):
         return resolve_secret(str(value))
@@ -1162,24 +1028,20 @@ def unresolved_reference(value: object) -> str:
 
     **The other half of `resolve_secret`'s degrade, and the only place it is
     read.**  A value that could not be resolved is left *verbatim* by the
-    function above — a `${VAR}` neither the environment nor the keyring had, or
-    a `keyring:NAME` with no credstore installed to consult it — and every
-    caller that is about to *use* the value has to answer the same question
-    about it.  Four of them answered it separately, with four different rules:
-    the model servers tested `startswith("${")` (so a bare `keyring:NAME`
-    travelled as the secret), the tunnel and the skills reader had a regex each,
-    and `rest-api`'s note had a third.  A rule that decides whether a credential
-    is real cannot be four rules, because the permissive copy is the one that
-    sends the reference to somebody else's server.
+    function above — a `${VAR}` neither the environment nor the keyring had —
+    and every caller that is about to *use* the value has to answer the same
+    question about it.  Four of them answered it separately, with four different
+    rules: the model servers tested `startswith("${")`, the tunnel and the
+    skills reader had a regex each, and `rest-api`'s note had a third.  A rule
+    that decides whether a credential is real cannot be four rules, because the
+    permissive copy is the one that sends the reference to somebody else's
+    server.
 
     Returning the *reference* rather than a boolean is what lets a caller say
     which one did not resolve, which is the whole of what a person needs to fix
     it; a `401` from the far end says nothing.
     """
-    text = str(value).strip()
-    if text.startswith("keyring:"):
-        return text
-    match = _ENV_PATTERN.search(text)
+    match = _ENV_PATTERN.search(str(value).strip())
     return match.group(0) if match else ""
 
 
@@ -1193,24 +1055,87 @@ class ServerSettings:
 
     @property
     def url(self) -> str:
-        """The streamable-HTTP endpoint, as a client should address it."""
-        return f"http://{self.host}:{self.port}{self.path}"
+        """The streamable-HTTP endpoint, as a client should address it.
+
+        **An IPv6 literal keeps its brackets.**  `::1` is a loopback address and
+        a valid host; written bare beside a port it is `http://::1:24000/mcp`,
+        whose port nothing can read.  The brackets are URL syntax, not part of
+        the host, so they are added here and only here.
+        """
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}{self.path}"
+
+
+#: Why a non-loopback host is refused, said once so the refusal at load and the
+#: refusal at the bind cannot drift apart.
+LOOPBACK_BOUNDARY = (
+    "every server here is unauthenticated Streamable HTTP, so a bind beyond "
+    "this machine would let the network call its tools with no credential"
+)
+
+
+def is_loopback_host(host: str) -> bool:
+    """Whether *host* keeps a listener on this machine.
+
+    ``localhost`` by name, or a loopback address literal — the whole
+    ``127.0.0.0/8``, not just its first address.  **Deliberately no resolver:**
+    what a name answers depends on the hosts file and the DNS, and a security
+    boundary must not move with them; the one name allowed is the conventional
+    one, the same choice `slife2.plugins.a2a.broker.LOCAL_HOSTS` makes.
+
+    Every plugin is unauthenticated Streamable HTTP (SDD §3.2), so this is the
+    question "may a server bind here" — asked at load for `servers.<name>.host`
+    and again at the bind for a hand-started `--host`.
+    """
+    if host.strip().lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def prompt_budget(context_window: int, max_tokens: int | None) -> int:
+    """The tokens a request's messages may occupy: the window minus the
+    completion request.
+
+    **One arithmetic, because a second caller reads the two components off a
+    wire.**  `ModelSettings.prompt_window` is the server side and the TUI's
+    model picker computes the same figure from the row it is handed; a change
+    here (a reserve, a different clamp) has to reach both, and a second
+    subtraction would not.
+
+    A model that states no `max_tokens` has the whole window; an entry whose
+    completion request is wider than its window has none (`0`), a config
+    mistake the budgets answer as "nothing fits" rather than by inventing a
+    fraction.
+    """
+    return max(0, int(context_window) - (int(max_tokens) if max_tokens else 0))
 
 
 @dataclass(frozen=True)
 class ModelSettings:
     """One model a provider serves, and how to call it.
 
-    Every numeric field is optional and `None` means *omit it*, which is not the
-    same as passing a sensible-looking default: several gateways reject a
+    Every generation number is optional and `None` means *omit it*, which is not
+    the same as passing a sensible-looking default: several gateways reject a
     `temperature` they did not ask for, and a model that reasons natively may
     refuse a `thinking` field entirely.  Saying nothing is the safe value, so
-    saying nothing is what an absent field means.
+    saying nothing is what an absent field means.  `context_window` is not a
+    generation number: it is the bound the turn is measured against, and the
+    config entry must state it.
     """
 
     #: The API's model name, and the local id — `"deepseek/deepseek-flash"` in
     #: references is built from the provider name plus this.
     model: str
+    #: The model's context window, in tokens.  The config entry states it and
+    #: `_model_settings` carries it over, so a conversation never runs on a
+    #: model without one; zero is the absent default for a `ModelSettings` built
+    #: directly by a test that never asks the window.  **A request also carries
+    #: `max_tokens`, and the provider counts both against this window** —
+    #: `prompt_window` is the space the prompt actually has.
+    context_window: int = 0
     #: What to show a person.  Falls back to `model` when absent.
     name: str = ""
     #: The model thinks natively, so reasoning is worth asking for.
@@ -1229,8 +1154,6 @@ class ModelSettings:
     #: saying the model cannot read it.  The check is `attach_image`'s, in
     #: `slife2.plugins.agent.server`.
     input: tuple[str, ...] = ("text",)
-    #: Token budget, used for the context percentage in the status bar.
-    context_window: int = 0
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -1276,6 +1199,27 @@ class ModelSettings:
     @property
     def accepts_images(self) -> bool:
         return "image" in self.input
+
+    @property
+    def prompt_window(self) -> int:
+        """The tokens a request's messages may occupy: the window minus the
+        completion request.
+
+        **A provider counts the prompt and the requested completion against one
+        window.**  DeepSeek rejects a request whose `messages + max_tokens`
+        exceeds the window — a 798k prompt beside a 384k completion is 1.18M
+        against a 1.05M window — so a context sized against the full window is
+        un-sendable however it was estimated.  Every budget, threshold and
+        percentage that asks "will this request fit?" is measured against this
+        number instead.
+
+        A model that states no `max_tokens` has the whole window; an entry whose
+        completion request is wider than its window has none (`0`), which is a
+        config mistake the budgets answer as "nothing fits" rather than by
+        inventing a fraction.  The arithmetic is `prompt_budget`'s, because the
+        TUI's picker reads the same two fields off its wire row.
+        """
+        return prompt_budget(self.context_window, self.max_tokens)
 
 
 @dataclass(frozen=True)
@@ -1371,8 +1315,9 @@ class EmbeddingsSettings:
 
     #: name -> endpoint.  Never empty in a config that loaded; see `_embeddings`.
     providers: dict[str, EmbeddingProviderSettings] = field(default_factory=dict)
-    #: Which of them is in use.  A provider id, not a `provider/model` ref: there
-    #: is one model per endpoint here, and the endpoint is the choice being made.
+    #: Which of them is in use — the section's `default:` key.  A provider id,
+    #: not a `provider/model` ref: there is one model per endpoint here, and
+    #: the endpoint is the choice being made.
     active: str = ""
 
     def active_provider(self) -> EmbeddingProviderSettings:
@@ -1394,7 +1339,7 @@ class EmbeddingsSettings:
         if self.active not in self.providers:
             known = ", ".join(sorted(self.providers))
             raise ConfigError(
-                f"embeddings.active_model: {self.active!r} is not a configured "
+                f"embeddings.default: {self.active!r} is not a configured "
                 f"provider; it has: {known}"
             )
         return self.providers[self.active]
@@ -1413,6 +1358,16 @@ class AgentSettings:
     #: bound nobody chose.  `AgentLoop` reads the same rule off the number it is
     #: handed, so "is there a cap" is decided in exactly one place.
     max_iterations: int = 0
+    #: The fraction of the **prompt budget** (`ModelSettings.prompt_window` —
+    #: the window minus the completion the request asks for) at which a turn
+    #: compacts its own live context, or **0 for a manual-only
+    #: `_turn_compact`**.  Read by the agent server when the conversation
+    #: starts — the same moment as `max_iterations` — which is why it is here
+    #: rather than in `context:`: the section a key lives in is the plugin that
+    #: reads it, and `context:`'s numbers are the context plugin's.  The budget
+    #: is the conversation's own, resolved when it started, so a `model_switch`
+    #: moves both together.
+    compact_at: float = 0.9
     #: A Jinja2 template for the system prompt — an absolute path by the time
     #: this is built, or "" for the one the distribution ships.  A template
     #: rather than a string because the prompt has a hole in it where the agent
@@ -1425,8 +1380,8 @@ class AgentTaskSettings:
     """The `agent-task:` section, and the one number an agent task costs.
 
     **`agent:`, read by two plugins.**  Everything else a task's turn is made of
-    — the system prompt and `max_iterations` — is the agent's own and comes out
-    of that section, because a task *is* the agent working: a prompt or an
+    — the system prompt and `max_iterations` — is the conversation's own: the
+    agent's, or the subagent's when a subagent started the task.  A prompt or an
     iteration count that meant something different for a task would be two
     agents wearing one name.  So the rule that the section a key lives in is the
     plugin that reads it has exactly one exception, and this is where it is
@@ -1438,11 +1393,14 @@ class AgentTaskSettings:
     #: How many tasks one agent may have running at once.
     #:
     #: A cap rather than a preference, and the only bound this feature has: a
-    #: task may start a task — the tool set is the one catalogue and nothing
-    #: filters it — so without a cap a model can grow loops without limit.  What
-    #: it does not bound is how much work happens over *time*; SDD §14.2
-    #: holds that one open, and `agent_task_list` with `agent_task_cancel` is
-    #: what makes it visible and stoppable in the meantime.
+    #: model can start tasks without limit, and each runs as the conversation
+    #: that started it — its own or one of its subagents'.  A
+    #: task's prompt tells it not to start another — it is one turn — but
+    #: nothing in the harness stops one that does, so the cap is about the
+    #: concurrent work a conversation asks for.  What it does not bound is how
+    #: much work happens over *time*; SDD §14.2 holds that one open, and
+    #: `agent_task_list` with `agent_task_cancel` is what makes it visible and
+    #: stoppable in the meantime.
     #:
     #: **The number lives here and nowhere else**, and `slife2-agent-task` reads
     #: it off the config at the call that enforces it rather than keeping a
@@ -1465,10 +1423,9 @@ class SubagentSettings:
     would be two agents wearing one name.
 
     **What is not here, and not in any config, is anything about *one*
-    subagent.**  The model it runs on, the role it was made for and whether it
-    was made as a fork are in the subagent's own file, inside its own directory,
-    and they are deleted with it
-    (`slife2.plugins.agent.server.subagent_spec`): a subagent is made today and
+    subagent.**  The model it runs on and the role it was made for are in the
+    subagent's own file, inside its own directory, and they are deleted with it
+    (`slife2.libs.host.subagents.subagent_spec`): a subagent is made today and
     removed tomorrow, so its settings go where its directory goes rather than
     into a file an operator has to keep in step with it.  Its *prompt* is not
     `agent.system_prompt` either — it is the shipped `subagent.j2`, because what a
@@ -1479,11 +1436,11 @@ class SubagentSettings:
     """
 
     #: Where a subagent's network is, from the same section — the broker, and an
-    #: `org` to override the default one, parsed by `_a2a` because a section
-    #: holding a network should not spell its keys a second way.  **`configured`
-    #: here is this section's presence**, which is what makes a machine with no
-    #: `subagent:` a machine whose subagents are not reachable — the same shape
-    #: `peer_agent:` has, one section up.
+    #: `org` to override the default one, read through `_MESH_FIELDS` because a
+    #: section holding a network should not spell its keys a second way.
+    #: **`configured` here is this section's presence**, which is what makes a
+    #: machine with no `subagent:` a machine whose subagents are not reachable —
+    #: the same shape `peer_agent:` has, one section up.
     #:
     #: **Its `unit:` is refused and its `org:` defaults to `SUBAGENT_ORG`**, and
     #: both halves follow from one fact: a namespace *is* a mesh (`Net.namespace`),
@@ -1517,12 +1474,13 @@ class ContextSettings:
     section is how a setting comes to mean two things.
     """
 
-    #: The fraction of the model's own context window the live context is topped
-    #: up to, and therefore the **one total budget the keep and the recall
-    #: share**: the kept turns are estimated first, and a recall may spend what
-    #: they leave below it.  Keeping less leaves the recall more; a context at
-    #: the ceiling leaves it nothing.  There is no separate per-recall floor —
-    #: one would give the two halves two budgets for one window.
+    #: The fraction of the model's **prompt budget** (`prompt_window` — the
+    #: window minus the completion request) the live context is topped up to,
+    #: and therefore the **one total budget the keep and the recall share**: the
+    #: kept turns are estimated first, and a recall may spend what they leave
+    #: below it.  Keeping less leaves the recall more; a context at the ceiling
+    #: leaves it nothing.  There is no separate per-recall floor — one would give
+    #: the two halves two budgets for one window.
     ceiling: float = 0.8
     #: How many candidates **each leg of the rebuild's recall** retrieves.  The
     #: fused pool is their union — twice this for one question, more for
@@ -1551,24 +1509,13 @@ class ContextSettings:
     #: in 0–1.  **A filter, not an ordering**: what the ranker returned below it
     #: is dropped; its order is used only by the token budget.  `0.0` keeps
     #: whatever the reranker returned (it still reorders, and the order only
-    #: matters where the token budget cuts); the shipped `0.1` drops the
-    #: incidentals a keyword leg finds — measured at 0.0007–0.006 on this
-    #: project's log — while keeping the real turns (0.69–0.81).  The scale
-    #: belongs to the reranker, so calibrate it like `min_similarity` rather
-    #: than copying a number from another model.  Every candidate in the fused
-    #: recall pool (each leg's `recall_page_limit`, 80 by default) is reranked,
-    #: so a hit RRF put low is still judged.
-    rerank_min_score: float = 0.1
-    #: How long the discriminator call may take before the turn runs on the
-    #: context it already has.  Generous for a remote model, because the answer is
-    #: optional by design: a slow one only makes the turn late.
-    #:
-    #: **The default is the registry's** (`timeouts.work.recall_discriminator`),
-    #: read when a config is built through a factory rather than a def-time
-    #: default, which would capture it at import and ignore a patch.
-    timeout: float = field(
-        default_factory=lambda: _T.timeouts.work.recall_discriminator
-    )
+    #: matters where the token budget cuts); the shipped `0.3` keeps the turns a
+    #: recall needs (0.37–1.0 on this project's log) and drops the incidental
+    #: tail (0.00–0.24).  The scale belongs to the reranker, so calibrate it like
+    #: `min_similarity` rather than copying a number from another model.  Every
+    #: candidate in the fused recall pool (each leg's `recall_page_limit`, 80 by
+    #: default) is reranked, so a hit RRF put low is still judged.
+    rerank_min_score: float = 0.3
 
 
 @dataclass(frozen=True)
@@ -1583,11 +1530,13 @@ class ToolServerSettings:
     resolved by a precedence rule nobody would remember.
 
     `env` and `headers` are where a secret lives, and both go through
-    :func:`defer_secret`: a ``keyring:`` URI resolves at load, while a
-    ``${VAR}`` is kept as written until :meth:`resolved_env` or
-    :meth:`resolved_headers` is called where the connection is made.  Nothing
-    else here is secret: a `command` is a program name and an `args` list is on
-    the command line of a process anyone can inspect.
+    :func:`defer_secret`: a ``${VAR}`` is kept as written until
+    :meth:`resolved_env` or :meth:`resolved_headers` is called where the
+    connection is made.  An entry still holding its reference at that point is
+    **omitted and warned about**, never handed on: each child has its own
+    missing-key policy, and the reference text would read as a key to it.
+    Nothing else here is secret: a `command` is a program name and an `args`
+    list is on the command line of a process anyone can inspect.
 
     Not frozen-by-accident: this is read-only configuration, and the hub keeps
     its *state* — whether it is connected, what it last listed — in its own
@@ -1622,10 +1571,10 @@ class ToolServerSettings:
     command: str = ""
     args: tuple[str, ...] = ()
     #:
-    #: `repr=False` on this and `headers`, because both can hold a secret that
-    #: was resolved eagerly (`keyring:`); a `${VAR}` stays the reference it was
-    #: written as.  Everything that prints a config goes through `__repr__`, so
-    #: this keeps a live key out of a log line, a traceback, and a REPL.
+    #: `repr=False` on this and `headers`, because both can hold a literal
+    #: secret; a `${VAR}` stays the reference it was written as.  Everything
+    #: that prints a config goes through `__repr__`, so this keeps a live key
+    #: out of a log line, a traceback, and a REPL.
     env: dict[str, str] = field(default_factory=dict, repr=False)
     #: http: the endpoint, either transport.  A URL ending in `/sse` is the
     #: older SSE transport; anything else is Streamable HTTP.
@@ -1652,18 +1601,67 @@ class ToolServerSettings:
         """`"http"` or `"stdio"` — read off which field is set."""
         return "http" if self.url else "stdio"
 
+    def _resolved(
+        self, values: dict[str, str], *, where: str, consequence: str
+    ) -> dict[str, str]:
+        """One environment-or-headers mapping with its references resolved.
+
+        **One rule, two fields.**  A value that is still a reference is left
+        out — never sent as itself — and the omission is warned about with the
+        entry and the reference.  The only words that differ between the two
+        callers are the field and what an absent key means to the server, so
+        they are the arguments; the policy is this body.
+        """
+        found: dict[str, str] = {}
+        for key, value in values.items():
+            one = resolve_deferred(value)
+            if reference := unresolved_reference(one):
+                logger.warning(
+                    "%s: %s is still %s — left out of the %s, so %s",
+                    self.name,
+                    key,
+                    reference,
+                    where,
+                    consequence,
+                )
+                continue
+            found[key] = one
+        return found
+
     def resolved_env(self) -> dict[str, str]:
         """The environment to hand the child, ``${VAR}`` resolved now.
 
         Called where the connection is made (`slife2.clients.gateway.mcp_config`),
         never at load: every server in the stack loads this config, and only
         the process that starts this child needs its environment.
+
+        **An entry that is still a reference is left out, not passed on.**  A
+        child decides for itself what a missing key means — `tavily-mcp` runs
+        keyless when `TAVILY_API_KEY` is absent, while `serper` and
+        `deepseek-websearch` refuse to start in their own words.  The literal
+        ``"${TAVILY_API_KEY}"`` is truthy, so passing it silently defeats both:
+        the child believes it has a key and sends the reference as one.  An
+        absent variable is the answer each of them already knows how to read,
+        and the omission is warned about with the name rather than raised.
         """
-        return {key: resolve_deferred(value) for key, value in self.env.items()}
+        return self._resolved(
+            self.env,
+            where="environment",
+            consequence="the server starts without it",
+        )
 
     def resolved_headers(self) -> dict[str, str]:
-        """The headers to send, resolved for :meth:`resolved_env`'s reason."""
-        return {key: resolve_deferred(value) for key, value in self.headers.items()}
+        """The headers to send, resolved for :meth:`resolved_env`'s reason.
+
+        An unresolved header is omitted too: asking the endpoint without the
+        credential is the honest "not configured" request, and the reference
+        text would be sent as the credential if it stayed in.
+        """
+        return self._resolved(
+            self.headers,
+            where="headers",
+            consequence="the server is asked without it",
+        )
 
 
 #: How many function tools the model's list may hold before the least recently
@@ -1707,6 +1705,8 @@ REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "func_tool_load",
     "_func_tool_unload",
     "_check_new_input",
+    "_turn_compact",
+    "_context_rebuild",
     "skill_use",
     "check_async",
     "cancel_async",
@@ -1743,34 +1743,37 @@ class ToolLoadSettings:
     autoload: tuple[str, ...] = REQUIRED_AUTOLOAD
 
 
-#: How much of one tool result a model is handed.  **One number for both
-#: sides**: the harness spends it on the head it carries for a result too large
-#: for the conversation, and the tools that hand text back — the cabinet's
-#: `dump_read` and `dump_grep` — cap themselves with it.  Two numbers would be
-#: two answers to "how much fits", and the failure is a loop with this system's
-#: machinery at both ends.
+#: How much of one tool result a model is handed, **in UTF-8 bytes**.  One
+#: number for both sides: the harness spends it on the head it carries for a
+#: result too large for the conversation, and the tools that hand text back —
+#: the cabinet's readers and `dump_read`/`dump_grep` — cap themselves with it.
+#: Two numbers would be two answers to "how much fits", and the failure is a
+#: loop with this system's machinery at both ends.
 #:
-#: **Measured, and above every ordinary result.**  On the 2026-10 turn log (349
-#: results) the median was 48 tokens, p90 1,587, the largest 5,284: at 8,000 the
-#: mechanism fires on none of them, and still catches the case it exists for — an
-#: output whose length nobody controls (a shell command, a huge file read) riding
-#: in every later request.
+#: **A size bound, not a token accounting.**  The context rebuild's `ceiling` is
+#: the token guard; this is the per-result cap that keeps one output from
+#: carrying a conversation on its own.  Bytes are the unit because they need no
+#: vocabulary, cost one expression to measure, and track text volume across
+#: scripts (a CJK character is three bytes where an ASCII one is one).  The
+#: tools' own addresses stay character-based — `offset`, `limit` and `next` are
+#: what a reader continues from.
 #:
-#: The case it exists for is the tool *bound* to be long (a ten-thousand-word
-#: essay is ~13,000 tokens): 8,000 sits above the ordinary and below the
-#: deliberate, so shortening fires on what nobody controls rather than on what a
-#: model asked for once.  Re-reading the log is the same instrument that would
-#: move it again (SDD §7.4).
-DEFAULT_TOOL_RESULT_TOKENS = 8000
+#: **Above every ordinary result.**  On the 2026-10 turn log (349 results) the
+#: median was 48 tokens, p90 1,587, the largest 5,284 — roughly 20 KB rendered.
+#: At 32 KiB the mechanism fires on none of them, and still catches the case it
+#: exists for: an output whose length nobody controls (a shell command, a huge
+#: file read) riding in every later request.  The log is the instrument that
+#: would move it again (SDD §7.4).
+DEFAULT_TOOL_RESULT_BYTES = 32_768
 
 #: The smallest window that can hold the *address* and still show a head.  The
 #: marker and the sentence that says where the rest is —
 #: `[DUMP:{"call": …, "bytes": …, "file": …}] Too large for the conversation: …`
-#: — cost about 100 tokens for a long provider call id and the home-relative
+#: — cost about 400 bytes for a long provider call id and the home-relative
 #: path.  A budget below that cannot hold the address at all, and one just above
 #: it would show so little of the output that a model could not tell what kind
-#: of file it has; 512 leaves room for a readable head.
-MIN_TOOL_RESULT_TOKENS = 512
+#: of file it has; 2 KiB leaves room for a readable head.
+MIN_TOOL_RESULT_BYTES = 2_048
 
 
 @dataclass(frozen=True)
@@ -1781,17 +1784,18 @@ class ToolResultSettings:
     tool returned.**  Whether an output is the right length is the tool
     designer's business; what the harness owns is the context that has to carry
     it and the whole of what was returned, and the two are answered separately —
-    the whole is kept (a dump, or the file it already came from) and over the
-    bound the model is handed a fixed head of it with the call id that reads the
-    rest.  The head is chosen by a rule, not by a model: the boundary is what
-    this section sets, and the model's route back is `dump_read` and
-    `dump_grep`.
+    the whole is kept where there is a cabinet (a dump) and over the bound the
+    model is handed a fixed head of it with the call id that reads the rest.  An
+    agent task writes no dumps and records no messages, so its over-size result
+    is cut instead, with a marker that promises no file (§5.2.4).  The head is
+    chosen by a rule, not by a model: the boundary is what this section sets,
+    and the model's route back is `dump_read` and `dump_grep`.
 
     There is deliberately no "off".  A window with no bound is the whole output,
     which is the thing this exists to prevent.
     """
 
-    tokens: int = DEFAULT_TOOL_RESULT_TOKENS
+    bytes: int = DEFAULT_TOOL_RESULT_BYTES
 
 
 @dataclass(frozen=True)
@@ -1851,10 +1855,13 @@ class SkillSettings:
     from.
 
     `env` resolves through the same chain as a provider key — shell, then
-    credstore — and that is the whole point of having the section at all.  A
-    daemon started days ago never saw the key somebody exported this morning,
-    and `keyring:…` is not an environment variable in the first place; an entry
-    here is what turns either into what a skill's script is handed.
+    credstore — **in the process that hands the playbook over, not in every
+    process that loads the file**.  `load()` runs in every server of the stack,
+    and a locked keyring raised inside it outside `load`'s own catch: every
+    config load on the machine died, including `slife2 down`, for a skill that
+    process would never use.  So the loader keeps the `${VAR}` reference and
+    `resolved_env()` is what the skills plugin calls where the value is
+    consumed — the same deferral the gateway and a tool server's `env:` use.
 
     A skill with no entry is not misconfigured: the environment alone is a real
     answer, and a playbook that needs nothing is the common case.
@@ -1875,6 +1882,17 @@ class SkillSettings:
     #: `false` keeps the playbook installed and out of the catalogue.  Read by
     #: the plugin that owns the section, which declares the row `disabled`.
     enabled: bool = True
+
+    def resolved_env(self) -> dict[str, str]:
+        """The entry's environment with its `${VAR}` references resolved.
+
+        **Called where the value is consumed**, never by the loader: a config
+        load happens in every server process, and a credential lookup belongs
+        to the one about to hand a playbook over (`defer_secret`).  A reference
+        neither the environment nor the keyring answers stays verbatim, which
+        is what `slife2.plugins.skills.playbooks.readiness` reports as missing.
+        """
+        return {key: resolve_deferred(value) for key, value in self.env.items()}
 
 
 #: The four things a media provider can be asked for.  A closed set: each one
@@ -1960,7 +1978,7 @@ class MediaSettings:
 
         **A `defaults[kind]` that names nothing is refused, not replaced.**  A
         default is a name the operator wrote, and a name that no longer resolves
-        is a typo in the file — the same rule `embeddings.active_model` follows.
+        is a typo in the file — the same rule `embeddings.default` follows.
         Falling through to the first model of the kind would silently spend a
         paid call on a model named in no `defaults:` line; the fourth step is
         for a kind with no default at all, which is a different fact.  The
@@ -2023,6 +2041,19 @@ class MediaSettings:
         return provider, entry
 
 
+#: The provider used when the section, or its `default:`, is absent.  A name this
+#: build does not have is a `ConfigError` instead (`_file_tunnel`).
+#:
+#: **The names live here rather than in the provider module**, because this
+#: module is on the import path of the TUI and of the agent loop, and neither
+#: should pull in a tunnel's SDK or `subprocess`.  The provider module imports
+#: them from here, so the loader and the factory cannot disagree.
+DEFAULT_TUNNEL_PROVIDER = "ngrok"
+
+#: Providers this build can actually construct (see `create_provider`).
+KNOWN_TUNNEL_PROVIDERS = frozenset({"ngrok", "localhost.run", "cloudflare"})
+
+
 @dataclass(frozen=True)
 class FileTunnelSettings:
     """How this machine's port becomes a public HTTPS URL, from `file-tunnel:`.
@@ -2036,7 +2067,7 @@ class FileTunnelSettings:
     ngrok from cloudflared.  A typed field per option would put three vendors'
     vocabulary in this file and change it every time a tunnel learns a flag.
 
-    **An unknown `active:` is a config error and is refused**, like every other
+    **An unknown `default:` is a config error and is refused**, like every other
     section's: a provider this build does not have is a typo or a config copied
     from a build that had one, and a tunnel is the one capability whose provider
     is a *reachability* decision — substituting another one makes that decision
@@ -2045,15 +2076,12 @@ class FileTunnelSettings:
     A malformed *shape* is refused too, by `_mapping`.
     """
 
-    #: Which provider is live.  The others stay configured and inert.
+    #: Which provider is live — the section's `default:` key.  The others stay
+    #: configured and inert.
     #:
-    #: Spelled out rather than read off `slife2.plugins.file_tunnel.providers`, by the
-    #: same rule `AGENT_SERVER_NAME` states above: reading it means importing
-    #: it, and this module is imported by the TUI and the agent loop, neither
-    #: of which should pull in a tunnel's SDK or `subprocess`.  `DEFAULT_PROVIDER`
-    #: is the other end of this fact and `tests/libs/host/test_config.py` pins
-    #: the two together.
-    active: str = "ngrok"
+    #: The default is `DEFAULT_TUNNEL_PROVIDER`, which this module owns; the
+    #: provider module imports the name rather than spelling it a second time.
+    active: str = DEFAULT_TUNNEL_PROVIDER
     #: provider name -> its own options, kept as written; `options_for`
     #: resolves the ``${VAR}`` references when a tunnel is about to start.
     providers: dict[str, dict] = field(default_factory=dict)
@@ -2063,7 +2091,7 @@ class FileTunnelSettings:
 
         Empty rather than an error, because every provider has to work from
         its own defaults: that is what makes ``ngrok: {}`` a complete entry,
-        and an `active:` naming a provider nobody configured a working one.
+        and a `default:` naming a provider nobody configured a working one.
 
         **Resolution happens here** rather than in `_file_tunnel` so that the
         credential-store lookups are paid by the process starting a tunnel, not
@@ -2073,6 +2101,14 @@ class FileTunnelSettings:
         if not isinstance(found, dict):
             return {}
         return {key: resolve_deferred(value) for key, value in found.items()}
+
+
+#: The one broker implementation this build speaks to.  `A2ASettings` defaults
+#: its `provider:` to it and both mesh sections refuse any other written name
+#: (`_MESH_FIELDS`); the plugin's own `MOSQUITTO` is the same word on the
+#: serving side, and neither imports the other — a host module must not pull in
+#: a server.
+_BROKER_PROVIDER = "mosquitto"
 
 
 @dataclass(frozen=True)
@@ -2097,12 +2133,12 @@ class A2ASettings:
     the way past it means the model is offered `peer_agent_*` tools for a mesh
     that was silently switched off.  So the field is a `provider:` naming the broker
     implementation, exactly one value is accepted, and anything else is a
-    `ConfigError` at load.  Adding a provider is adding a branch to
-    `_a2a` and a driver to `slife2/a2a/`; it is not a config value.
+    `ConfigError` at load.  Adding a provider is a second accepted name in
+    `_MESH_FIELDS` and a driver in `slife2/a2a/`; it is not a config value.
     """
 
     #: The broker implementation.  `mosquitto` is the only one this build has.
-    provider: str = "mosquitto"
+    provider: str = _BROKER_PROVIDER
     #: Whether the operator wrote the section.  Not a field in the file — it is
     #: what "the section was there" means, and it is what the plugin reads to
     #: decide whether this machine is on the mesh.  Which *agents* are is the
@@ -2177,6 +2213,14 @@ def broker_address(text: str) -> tuple[str, int]:
     address can be written down.
     """
     host, _, port = text.rpartition(":")
+    # **An IPv6 address may be written with the brackets a URL needs.**  The
+    # host is what the broker is dialled at, so `[::1]` and `::1` are one
+    # machine and one address; keeping the brackets made the loopback address
+    # a "remote" host in `slife2.plugins.a2a.broker` and refused to start the
+    # broker that the bare spelling starts.  `log_url` puts the brackets back
+    # where a URL needs them.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
     if not host or not port:
         raise ConfigError(
             f"--a2a-broker {text!r} is not `host:port` — write it as "
@@ -2259,7 +2303,8 @@ class Config:
     #: which holds the connections: the section is named for what it configures
     #: and the process for the plugin that serves it (`Net`, `PLUGINS`).
     peer_agent: A2ASettings = field(default_factory=A2ASettings)
-    #: `"provider/model"`, the model the agent starts with.
+    #: `"provider/model"`, the model the agent starts with — `providers.default:`
+    #: in the file.
     default: str = ""
     #: How far this instance's ports moved from the configured numbers — 0
     #: unless WSL's mirrored networking was detected.  Kept for the start-up
@@ -2287,7 +2332,9 @@ class Config:
         """
         reference = reference or self.default
         if not reference:
-            raise ConfigError("no model configured; set `default: provider/model`")
+            raise ConfigError(
+                "no model configured; set `providers.default: provider/model`"
+            )
 
         name, _, model_id = reference.partition("/")
         provider = self.provider(name)
@@ -2508,7 +2555,7 @@ def _with_port_offset(config: Config, offset: int) -> Config:
     is for.
     """
     if offset == 0:
-        return replace(config, port_offset=0) if config.port_offset else config
+        return config
     servers = {
         name: replace(
             server, port=_shift_port(server.port, offset, f"servers.{name}.port")
@@ -2594,9 +2641,15 @@ def load(explicit: str | Path | None = None) -> Config:
 
     yaml = YAML(typ="safe")
     try:
-        raw = yaml.load(path) or {}
+        # **Only a null document is an empty one.**  `load(...) or {}` also
+        # turned `[]`, `""`, `false` and `0` into `{}`: a file whose top level
+        # is not a mapping was then refused by the *next* check with
+        # "providers: needs at least one provider", which blames a section for
+        # a file that has none.
+        document = yaml.load(path)
     except (YAMLError, OSError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
+    raw = {} if document is None else document
 
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
@@ -2660,11 +2713,20 @@ def load_cached(explicit: str | Path | None = None) -> Config:
         # (SDD Appendix C).  `load` reports an unreadable file the same way.
         raise ConfigError(f"cannot read {path}: {exc}") from exc
     stamp = (stat.st_mtime_ns, stat.st_size)
-    cached = _latest.get(path)
+    # **The key is the canonical spelling.**  Two clients may reach one home
+    # through a symlink, a junction, a `..` or a different case, and this cache
+    # is read by identity (`config is not self._config` in
+    # `slife2.plugins.llm.server_common.LiveProviders`).  Keyed by the spelling,
+    # one home alternating between two spellings would hand back a different
+    # object on every call, and the caller would rebuild and retire its SDK
+    # client pool for an edit that never happened.  `paths.home_key` is the same
+    # rule the conversation key uses.
+    key = path.resolve()
+    cached = _latest.get(key)
     if cached is not None and cached[0] == stamp:
         return cached[1]
     config = load(path)
-    _latest[path] = (stamp, config)
+    _latest[key] = (stamp, config)
     return config
 
 
@@ -2688,12 +2750,29 @@ def for_the_call(source: Callable[[], Config] | None, injected: Config) -> Confi
     return injected if source is None else source()
 
 
-def _mapping(raw: Any, where: str) -> dict[str, Any]:
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise ConfigError(f"{where}: expected a mapping")
-    return raw
+#: Every top-level key `slife2.yaml` may write.  One set rather than the reader's
+#: own list, because the same rule holds here as inside a section: a key nobody
+#: reads is a switch nobody throws, and a misspelt section name is a refusal at
+#: load rather than a section that is silently absent.
+_TOP_LEVEL_KEYS = (
+    "wsl_port_offset",
+    "servers",
+    "providers",
+    "agent",
+    "agent-task",
+    "subagent",
+    "embeddings",
+    "context",
+    "tool_load",
+    "tool_result",
+    "mcp",
+    "rest-api",
+    "cli",
+    "skills",
+    "media",
+    "file-tunnel",
+    "peer_agent",
+)
 
 
 def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
@@ -2701,11 +2780,23 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
 
     `config_dir` is where a relative `system_prompt` is looked for, so a
     template can sit next to the config that names it.
+
+    **A section's refusal is a `ConfigError`.**  The section readers raise
+    `SectionError` (``slife2.libs.host.section``), and this is the one boundary
+    every section passes through — one conversion rather than one per reader.
     """
+    try:
+        return _assemble(raw, config_dir)
+    except SectionError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
+def _assemble(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     base = default_config()
+    refuse_unknown(raw, DEFAULT_CONFIG_NAME, _TOP_LEVEL_KEYS)
 
     servers = dict(base.servers)
-    for name, spec in _mapping(raw.get("servers"), "servers").items():
+    for name, spec in read_mapping(raw.get("servers"), "servers").items():
         if name not in LOCAL_SERVERS and name not in API_BACKENDS:
             raise ConfigError(
                 f"servers.{name}: not a server this system runs "
@@ -2719,7 +2810,13 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
     # built-in provider: the file is the description, and a file that names no
     # provider describes a machine with no models.  `providers: {}` is refused as
     # well, because an empty section is a statement, and the statement is "none".
-    providers_raw = _mapping(raw.get("providers"), "providers")
+    providers_raw = dict(read_mapping(raw.get("providers"), "providers"))
+    # **The default model is a key of the providers it names.**  `default:`
+    # sits beside the table it chooses from; it is taken out before the entries
+    # are built, because every other key here is a provider name.
+    nested_default = providers_raw.pop("default", None)
+    if nested_default is not None and not isinstance(nested_default, str):
+        raise ConfigError("providers.default: expected a `provider/model` reference")
     if not providers_raw:
         raise ConfigError(
             "providers: needs at least one provider — the file is the machine's "
@@ -2729,28 +2826,14 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         str(name): _provider(spec, str(name)) for name, spec in providers_raw.items()
     }
 
-    agent_raw = _mapping(raw.get("agent"), "agent")
-    max_iterations = _int_or(
-        agent_raw.get("max_iterations"),
-        base.agent.max_iterations,
-        "agent.max_iterations",
-    )
-    if max_iterations < 0:
-        # Refused rather than read, and refused for the reason `port: 0` is: a
-        # negative count is not a number of anything.  Nothing this value could
-        # be read as is the answer to a typo — and the one direction it would be
-        # read in, "no cap", is the setting that never stops, so a config that
-        # missed a keystroke would get the most expensive meaning of the three.
-        raise ConfigError(
-            f"agent.max_iterations: {max_iterations} is not an iteration count; "
-            f"leave the key out or write 0 for no cap"
-        )
-    agent = AgentSettings(
-        server=servers["agent"],
-        max_iterations=max_iterations,
-        system_prompt=_template_path(
-            agent_raw.get("system_prompt"), config_dir, base.agent.system_prompt
-        ),
+    # **`server` is not a key of `agent:`** — it comes from `servers:`, where
+    # every process's address lives — so the base carries the one this config
+    # just read and `_agent_fields` declares the section's own two keys.
+    agent = parse_section(
+        raw.get("agent"),
+        "agent",
+        replace(base.agent, server=servers["agent"]),
+        _agent_fields(config_dir),
     )
 
     # **A name in both sections is refused rather than resolved**, and this is
@@ -2766,6 +2849,24 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
                 f"rest-api.{name}: already configured under `mcp:`; the two "
                 f"would collide as tool names"
             )
+    # **A document source's name is not an entry's either.**  The hub merges a
+    # plugin's rows under these names, and an `mcp:` entry with the same one
+    # would shadow it: the hub drops one of the two declarations, and if the
+    # document plugin happened to fail that refresh the entry's whole-list
+    # merge replaced the playbook or command rows.  The management tools
+    # refuse the name; a hand edit reaches the loader, so the refusal is here.
+    reserved = {
+        SKILLS_SOURCE: "the skills plugin files its rows under it",
+        CLI_SOURCE: "the cli plugin files its rows under it",
+        JOB_SOURCE: "the jobs plugin files the model's code under it",
+    }
+    for section_name, entries in (("mcp", mcp), ("rest-api", rest_apis)):
+        for name in entries:
+            if name in reserved:
+                raise ConfigError(
+                    f"{section_name}.{name}: {reserved[name]}; an entry with this "
+                    f"name would shadow that source — choose another name"
+                )
 
     # **The subagent network is parsed first, because the remote one's broker
     # defaults from it.**  A machine has one broker by default — the local one,
@@ -2795,62 +2896,209 @@ def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
         peer_agent=_a2a(
             raw.get(PEER_AGENT_KEY),
             base.peer_agent,
-            section=PEER_AGENT_KEY,
             override=A2A_BROKER_ENV_VAR,
             default_address=(
                 subagent.network.broker_host,
                 subagent.network.broker_port,
             ),
         ),
-        default=str(raw.get("default") or _first_reference(providers)),
+        default=str(nested_default or first_reference(providers_raw)),
     )
     return _with_port_offset(config, port_offset(raw.get("wsl_port_offset")))
+
+
+def _agent_fields(config_dir: Path | None) -> tuple[Field, ...]:
+    """The `agent:` section's three keys.
+
+    A function rather than a tuple because `system_prompt` is a path resolved
+    against the file that named it.  `server` is not a key here: it comes from
+    `servers:`, where every process's address lives.
+    """
+    return (
+        Field(
+            "max_iterations",
+            read_int,
+            check=bound(
+                lambda count: count >= 0,
+                "{value} is not an iteration count — leave the key out or "
+                "write 0 for no cap",
+            ),
+        ),
+        Field(
+            "compact_at",
+            read_number,
+            check=bound(
+                lambda fraction: 0 <= fraction <= 1,
+                "{value} is not a window fraction (0 <= compact_at <= 1)",
+            ),
+        ),
+        Field(
+            "system_prompt",
+            lambda value, where: _template(value, where, config_dir),
+        ),
+    )
+
+
+def _template(value: Any, where: str, config_dir: Path | None) -> Any:
+    """`agent.system_prompt` as a template file, refused if it is not there.
+
+    A relative path is looked for beside the config that named it — the useful
+    place for a prompt somebody is editing — and a path that is not there is a
+    config mistake refused once at load rather than on every turn.
+    """
+    raw = read_text(value, where)
+    if raw is None:
+        return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = (config_dir / path) if config_dir else path
+    if not path.is_file():
+        raise SectionError(f"{where}: no such template: {path}")
+    return str(path)
+
+
+def _cap(what: str) -> Check:
+    """A cap of at least one — the bound both `max_running:` keys share.
+
+    Zero is refused rather than accepted as "none": a cap of zero is a tool the
+    model can see, can call, and can never be answered by, which is a
+    configuration nobody wants and a failure that would arrive as a refusal
+    rather than as the config mistake it is.
+    """
+    return bound(
+        lambda count: count >= 1,
+        f"{{value}} would refuse every {what} — set at least 1, or leave the "
+        f"section out",
+    )
+
+
+def _read_broker_host(value: Any, where: str) -> Any:
+    """A broker's host, stripped of the brackets a pasted IPv6 address carries.
+
+    The same fold `broker_address` makes for the flag: a broker's host is an
+    address, and `[::1]` and `::1` are one machine.
+    """
+    host = read_text(value, where)
+    if host is not None and host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
+
+
+#: A `broker:` mapping, through the same loader one level down: an unknown key
+#: in a nested mapping is the same mistake, and `broker: localhost:1883` written
+#: as a scalar is refused with the section's name rather than by a `str`
+#: object's `.get` failing somewhere further down.
+_BROKER_FIELDS: tuple[Field, ...] = (
+    Field("host", _read_broker_host),
+    Field(
+        "port",
+        read_int,
+        check=bound(
+            lambda port: 0 < port < 65536,
+            # **The flag refused this and the file did not.**  `broker_address`
+            # refuses `host:0` and `host:70000` for `--a2a-broker`, and the
+            # section that overrides is written in the same shape but was read
+            # straight through, so `broker: {port: 0}` loaded and the mesh
+            # dialled `localhost:0` at every start.  Zero is the value that
+            # costs the most and reads the least like a mistake: nobody binds
+            # this end, so it is a connection to a port no process can hold, and
+            # the dial hangs until its timeout rather than failing on the line
+            # that named it.
+            "{value} is not a port (1-65535); leave it out for the default",
+        ),
+    ),
+)
+
+
+def _read_broker(value: Any, where: str) -> tuple[Any, Any]:
+    """A `broker:` mapping, into `(host, port)`; a half not written is absent."""
+    found = read_section(value, where, _BROKER_FIELDS)
+    return found.get("host"), found.get("port")
+
+
+#: The keys either mesh section reads.  `peer_agent:` and `subagent:` are two
+#: namespaces on one broker (`Net`), so a `provider:`/`broker:`/`org:` means the
+#: same thing in both; `unit:` is the remote one's alone and `max_running:` the
+#: local one's, so each section adds those from its own tuple.
+_MESH_FIELDS: tuple[Field, ...] = (
+    Field(
+        "provider",
+        read_text,
+        # **An unknown `provider:` is refused rather than downgraded.**  The
+        # same rule `file_tunnel.default` states (SDD §12.1): a name in a file a
+        # person edits is either one this build has or a mistake to report.
+        # Falling back would leave `peer_agent_*` tools offered to a model for a
+        # mesh that is not running — the silence-with-tools outcome.
+        check=bound(
+            lambda name: name == _BROKER_PROVIDER,
+            "{value} is not a broker this build speaks to (the only one is "
+            + _BROKER_PROVIDER
+            + "); leave the key out, or leave the section out to stay off the mesh",
+        ),
+    ),
+    Field("broker", _read_broker, attrs=("broker_host", "broker_port")),
+    Field("org", read_text),
+)
+
+#: `unit:` is the remote namespace's second segment.  The local network refuses
+#: it: a subagent mesh is one per agent, so its unit is the agent's own name and
+#: there is nothing a written one could be right about.
+_UNIT_FIELD = Field("unit", read_text)
+
+
+def _refuse_unit(value: Any, where: str) -> Any:
+    """`subagent.unit:` — refused with the reason, not as an unknown key.
+
+    Read as an override it would be a knob that cannot be right, and read as
+    nothing at all it would be a key an operator wrote and nobody told them
+    about, which is the failure this module refuses everywhere.
+    """
+    raise SectionError(
+        f"{where}: {value!r} is not a setting — a subagent network is one mesh "
+        f"per agent, so its unit is the agent's own name (the org is this "
+        f"network's, and may be written to group meshes)"
+    )
+
+
+#: The local network's section: a cap, the mesh it reaches its members over, and
+#: the one key it takes only to say there is nothing it could mean.
+_SUBAGENT_FIELDS: tuple[Field, ...] = (
+    Field("max_running", read_int, check=_cap("subagent the model names")),
+    *_MESH_FIELDS,
+    Field("unit", _refuse_unit),
+)
+
+#: The remote network's: the mesh keys plus the namespace's unit.
+_PEER_AGENT_FIELDS: tuple[Field, ...] = (*_MESH_FIELDS, _UNIT_FIELD)
 
 
 def _a2a(
     raw: Any,
     base: A2ASettings,
     *,
-    section: str = PEER_AGENT_KEY,
     override: str = "",
     default_address: tuple[str, int] | None = None,
 ) -> A2ASettings:
-    """One mesh-shaped section, defaulted — and the one place `configured` is set.
-
-    **`section` because there are two of them** (SDD §3.5): the remote network's
-    `peer_agent:` and the local one's `subagent:`, parsed by the same rules and
-    told apart by the name every refusal is written with — a `provider:` mistake
-    in the local one must not be reported against a key the file does not have.
+    """The `peer_agent:` section, defaulted — and the one place `configured` is set.
 
     **`default_address` is what a broker key left out means**, and it is the
-    caller's rather than this function's: a *subagent* network falls back to the
-    built-in address, and a remote one falls back to the subagent network's
-    (`_build` passes it), because a machine meets its own subagents somewhere and
-    a remote mesh that does not say where it meets meets there — one address, two
-    namespaces, and no second host:port to keep in step.  It is threaded in
-    rather than read here because which section is parsed first is the caller's
-    order, and a fallback that reached for `config.subagent` from inside this
-    function would make the two sections' parse order load-bearing in a place
-    nothing states it.
+    caller's rather than this function's: a machine meets its own subagents
+    somewhere, and a remote mesh that does not say where it meets meets there —
+    one address, two namespaces, and no second host:port to keep in step.  It is
+    threaded in rather than read here because which section is parsed first is
+    the caller's order, and a fallback that reached for `config.subagent` from
+    inside this function would make the two sections' parse order load-bearing
+    in a place nothing states it.
 
-    **`override` names an environment variable only the remote one is given.**
-    The local network's broker is this machine's own and is the file's to say
-    (`--a2a-broker` names somebody else's, and a subagent has no business on
-    one); passing it for the remote network and not for the local one is the
-    whole of that rule.
+    **`override` names an environment variable only the remote section is
+    given.**  The local network's broker is this machine's own and is the file's
+    to say (`--a2a-broker` names somebody else's, and a subagent has no business
+    on one); passing it here and not in `_subagent` is the whole of that rule.
 
     **Absent means off**, so the built-in answer comes back with
     `configured=False` and the plugin opens no mesh.  The shape is `broker:`
     nested with `host` and `port` under it, so a config file that already says
     where the broker is needs no rewriting.
-
-    **An unknown `provider:` is refused rather than downgraded.**  The same rule
-    `file_tunnel.active` states (SDD §12.1): a name in a file a person edits is
-    either one this build has or a mistake to report.  Falling back here would
-    be worse than an error, though, because it would leave `peer_agent_*` tools
-    offered to a model for a mesh that is not running.  Answering that case with a
-    warning and `enabled = False` would be the silence-with-tools outcome, so
-    it is refused here.
 
     **`--a2a-broker` is applied here, after the file**, so the flag wins over the
     section it is an override of and everything downstream sees one answer.  It
@@ -2865,198 +3113,140 @@ def _a2a(
     # somebody else's broker, and its own broker would no longer be started.  A
     # subagent has no business on anybody else's broker.
     override = os.environ.get(override, "").strip() if override else ""
-    if raw is None and override:
-        raise ConfigError(
-            f"--a2a-broker {override!r} names a broker to use, but this machine "
-            f"is not on the peer network: there is no `peer_agent:` section, and "
-            f"that section is what being on one means"
-        )
     if raw is None:
+        # **The override is not a section.**  The env var is process-wide, and a
+        # shared daemon loads every home's config: failing here made one home's
+        # `--a2a-broker` refuse every *other* home's file, which has no
+        # `peer_agent:` section because it is not on the mesh.  The command
+        # that owns the flag refuses it against its own config instead
+        # (`slife2.main`), which is the only file the operator asked about.
         return base
-    found = _mapping(raw, section)
-
-    provider = str(found.get("provider") or base.provider).strip()
-    if provider != base.provider:
-        raise ConfigError(
-            f"{section}.provider: {provider!r} is not a broker this build speaks "
-            f"to (the only one is {base.provider!r}); leave the key out for "
-            f"{base.provider!r}, or leave the section out to stay off the mesh"
+    if default_address is not None:
+        base = replace(
+            base, broker_host=default_address[0], broker_port=default_address[1]
         )
-
-    # `broker:` is a mapping or nothing.  A `broker: localhost:1883` written as a
-    # scalar is the mistake the nesting invites, and it deserves the section's
-    # name rather than a `str` object's `get` failing somewhere further down.
-    broker = found.get("broker")
-    if broker is None:
-        broker = {}
-    broker = _mapping(broker, f"{section}.broker")
-
-    # The address a key left out means — the caller's, or this build's own.  Both
-    # halves are read here rather than at their two use sites so the default a
-    # *refusal* quotes is the same one the value would have taken.
-    default_host, default_port = default_address or (
-        base.broker_host,
-        base.broker_port,
-    )
-    host = str(broker.get("host") or default_host)
-    port = _int_or(broker.get("port"), default_port, f"{section}.broker.port")
-    if not 0 < port < 65536:
-        # **The flag refused this and the file did not.**  `broker_address`
-        # refuses `host:0` and `host:70000` for `--a2a-broker`, and the section
-        # that overrides is written in the same shape but was read straight
-        # through, so `broker: {port: 0}` loaded and the mesh dialled
-        # `localhost:0` at every start.  Zero is the value that costs the most
-        # and reads the least like a mistake: the port is not the kernel's to
-        # choose here (nobody binds this end), so it is a connection to a port
-        # no process can hold — the dial hangs until its timeout rather than
-        # failing on the line that named it.
-        raise ConfigError(
-            f"{section}.broker.port: {port} is not a port (1-65535); leave it "
-            f"out for the default ({default_port})"
-        )
-    if override:
-        host, port = broker_address(override)
-
-    return A2ASettings(
-        provider=provider,
+    settings = replace(
+        parse_section(raw, PEER_AGENT_KEY, base, _PEER_AGENT_FIELDS),
         configured=True,
-        broker_host=host,
-        broker_port=port,
-        org=str(found.get("org") or base.org),
-        unit=str(found.get("unit") or base.unit),
         overridden=bool(override),
     )
+    if override:
+        host, port = broker_address(override)
+        settings = replace(
+            settings, broker_host=host, broker_port=port, overridden=True
+        )
+    return settings
 
 
 def _agent_task(raw: Any, base: AgentTaskSettings) -> AgentTaskSettings:
-    """The `agent-task:` section, defaulted — one number, and it has to be real.
+    """The `agent-task:` section, defaulted — one number, and it has to be real."""
+    return parse_section(raw, "agent-task", base, _AGENT_TASK_FIELDS)
 
-    Zero is refused rather than accepted as "no tasks": a cap of zero is a tool
-    the model can see, can call, and can never be answered by, which is a
-    configuration nobody wants and a failure that would arrive as a refusal
-    rather than as the config mistake it is.
-    """
-    if raw is None:
-        return base
-    section = _mapping(raw, "agent-task")
-    max_running = _int_or(
-        section.get("max_running"), base.max_running, "agent-task.max_running"
-    )
-    if max_running < 1:
-        raise ConfigError(
-            f"agent-task.max_running: {max_running} would refuse every task the "
-            f"model starts — set at least 1, or leave the section out for "
-            f"{base.max_running}"
-        )
-    return AgentTaskSettings(max_running=max_running)
+
+_AGENT_TASK_FIELDS: tuple[Field, ...] = (
+    Field("max_running", read_int, check=_cap("task the model starts")),
+)
 
 
 def _subagent(raw: Any, base: SubagentSettings) -> SubagentSettings:
     """The `subagent:` section, defaulted — a cap and a network.
 
-    Zero is refused, and `_agent_task` says why in the words this borrows: a cap
-    of zero is a tool the model can see, can call, and can never be answered by.
+    **The network comes from the same mapping**, through the fields the remote
+    section reads: a section holding a network parses its `broker`/`org` the one
+    way those keys are parsed anywhere, so a `subagent:` that names a broker
+    means what a `peer_agent:` naming one means.  The cap is this section's own
+    key and lands on the section, and the rest lands on the network.
 
-    **The network comes from the same mapping, through `_a2a`.**  A section
-    holding a network parses its `broker`/`org` the one way those keys are parsed
-    anywhere, so a `subagent:` that names a broker means what a `peer_agent:`
-    naming one means — and the two readers this section has (the agent server for the cap,
-    the local network's plugin for the address) are `AgentTaskSettings`'
-    arrangement one section over, which is where that exception is argued.
-
-    **A `unit:` is refused rather than ignored**, and that is the one key this
-    section takes differently — `SubagentSettings.network` says why there is
-    nothing it could mean: the unit is the agent's own name.  Read as an override
-    it would be a knob that cannot be right, and read as nothing at all it would
-    be a key an operator wrote and nobody told them about, which is the failure
-    `slife2.libs.host.config` refuses everywhere.
+    **A `unit:` is refused rather than ignored** — `_refuse_unit` says why there
+    is nothing it could mean — which is the one key the two sections take
+    differently.
     """
     if raw is None:
         return base
-    section = _mapping(raw, "subagent")
-    if "unit" in section:
-        raise ConfigError(
-            f"subagent.unit: {section['unit']!r} is not a setting — a subagent "
-            f"network is one mesh per agent, so its unit is the agent's own name "
-            f"(the org is this network's, and may be written to group meshes)"
-        )
-    max_running = _int_or(
-        section.get("max_running"), base.max_running, "subagent.max_running"
-    )
-    if max_running < 1:
-        raise ConfigError(
-            f"subagent.max_running: {max_running} would refuse every subagent "
-            f"the model names — set at least 1, or leave the section out for "
-            f"{base.max_running}"
-        )
+    found = read_section(raw, "subagent", _SUBAGENT_FIELDS)
     return SubagentSettings(
-        max_running=max_running,
-        network=_a2a(raw, base.network, section="subagent"),
+        max_running=found.pop("max_running", base.max_running),
+        network=replace(base.network, configured=True, **found),
     )
+
+
+def _autoload_keeps_the_required_set(names: tuple[str, ...], where: str) -> None:
+    """**The autoload list has to keep the names the system works by.**
+
+    `REQUIRED_AUTOLOAD` is the set a request cannot run without — a harness pair
+    naming a tool the request does not declare is a 400 the model could not
+    avoid — so a config that drops one is refused here rather than at that turn.
+    Writing the section without `autoload` keeps the default set; writing it
+    adds to the required set only by being a superset, never by replacing it.
+    """
+    if any(not name.strip() for name in names):
+        raise SectionError(f"{where}: a tool name cannot be blank")
+    missing = [name for name in REQUIRED_AUTOLOAD if name not in names]
+    if missing:
+        raise SectionError(
+            f"{where}: missing {', '.join(missing)} — the system works by "
+            f"these, so they must stay in the list"
+        )
+
+
+_TOOL_LOAD_FIELDS: tuple[Field, ...] = (
+    Field(
+        "threshold",
+        read_int,
+        # A threshold of zero is a tool list that is always empty, which is not
+        # a configuration to accept quietly: the model would have `tool_search`
+        # and no way to keep what it found.
+        check=bound(
+            lambda count: count >= 1,
+            "{value} would evict every tool the model loads, leaving it a "
+            "search it cannot keep",
+        ),
+    ),
+    Field("autoload", read_list, check=_autoload_keeps_the_required_set),
+)
 
 
 def _tool_load(raw: Any, base: ToolLoadSettings) -> ToolLoadSettings:
-    """The `tool_load:` section, defaulted.
+    """The `tool_load:` section, defaulted."""
+    return parse_section(raw, "tool_load", base, _TOOL_LOAD_FIELDS)
 
-    Absent means the default rather than an error, the same rule every other
-    section follows.  A present one has to hold a positive number: a threshold of
-    zero is a tool list that is always empty, which is not a configuration to
-    accept quietly — the model would have `tool_search` and no way to keep what
-    it found.
 
-    **`autoload` is a list of tool names, and it has to keep the required ones.**
-    The required set is what the system works by (`REQUIRED_AUTOLOAD`), and a
-    config that drops one is refused here rather than at the first turn where a
-    harness pair names a tool the request does not declare.  Writing the section
-    without `autoload` keeps the default set; writing it adds to the required
-    set only by being a superset, never by replacing it.
+def _migrated_to_bytes(value: Any, where: str) -> Any:
+    """`tool_result.tokens:` — the key's old name, with the sentence that says so.
+
+    Declared as a field so it is refused with that sentence rather than as an
+    unknown key: the operator's file is one release behind, and the reason is
+    what tells them what to write.
     """
-    if raw is None:
-        return base
-    section = _mapping(raw, "tool_load")
-    threshold = _int_or(section.get("threshold"), base.threshold, "tool_load.threshold")
-    if threshold < 1:
-        raise ConfigError(
-            f"tool_load.threshold: {threshold} would evict every tool the model "
-            f"loads, leaving it a search it cannot keep"
-        )
-    autoload = (
-        _string_list(section.get("autoload"), "tool_load.autoload")
-        if "autoload" in section
-        else base.autoload
+    raise SectionError(
+        f"{where} is now `tool_result.bytes` — the bound is a size, not a token "
+        f"budget; 32 KiB is 32768, or leave the section out"
     )
-    if any(not name.strip() for name in autoload):
-        raise ConfigError("tool_load.autoload: a tool name cannot be blank")
-    missing = [name for name in REQUIRED_AUTOLOAD if name not in autoload]
-    if missing:
-        raise ConfigError(
-            f"tool_load.autoload: missing {', '.join(missing)} — the system "
-            f"works by these, so they must stay in the list"
-        )
-    return ToolLoadSettings(threshold=threshold, autoload=autoload)
+
+
+_TOOL_RESULT_FIELDS: tuple[Field, ...] = (
+    # `tokens` first, so a file that still says it gets the migration sentence
+    # rather than a bound about `bytes`.
+    Field("tokens", _migrated_to_bytes),
+    Field(
+        "bytes",
+        read_int,
+        # A budget below the window's own address is a reader that can return no
+        # line at all and a truncation that can keep no head: the model is left
+        # with a marker naming a file it is not allowed to read.
+        check=bound(
+            lambda size: size >= MIN_TOOL_RESULT_BYTES,
+            "{value} is smaller than the window's own address — set at least "
+            f"{MIN_TOOL_RESULT_BYTES} (the default is "
+            f"{DEFAULT_TOOL_RESULT_BYTES}), or leave the section out",
+        ),
+    ),
+)
 
 
 def _tool_result(raw: Any, base: ToolResultSettings) -> ToolResultSettings:
-    """The `tool_result:` section, defaulted.
-
-    Absent means the default rather than an error, the rule every other section
-    follows.  A present one has to hold a positive number: a budget of zero is a
-    reader that can return no line at all and a truncation that can keep no
-    head, and the model would be left with a marker naming a file it is not
-    allowed to read — a configuration that looks like a working one and answers
-    nothing.
-    """
-    if raw is None:
-        return base
-    section = _mapping(raw, "tool_result")
-    tokens = _int_or(section.get("tokens"), base.tokens, "tool_result.tokens")
-    if tokens < MIN_TOOL_RESULT_TOKENS:
-        raise ConfigError(
-            f"tool_result.tokens: {tokens} is smaller than the window's own "
-            f"address — set at least {MIN_TOOL_RESULT_TOKENS} (the default is "
-            f"{DEFAULT_TOOL_RESULT_TOKENS}), or leave the section out"
-        )
-    return ToolResultSettings(tokens=tokens)
+    """The `tool_result:` section, defaulted."""
+    return parse_section(raw, "tool_result", base, _TOOL_RESULT_FIELDS)
 
 
 def _media(raw: Any, base: MediaSettings) -> MediaSettings:
@@ -3071,37 +3261,47 @@ def _media(raw: Any, base: MediaSettings) -> MediaSettings:
     provider, and the file a person reads is the file that would have to be
     fixed either way.
     """
-    if raw is None:
-        return base
-    section = _mapping(raw, "media")
-    providers = {
-        str(name): _media_provider(spec, str(name))
-        for name, spec in _mapping(section.get("providers"), "media.providers").items()
-    }
-    defaults_raw = _mapping(section.get("defaults"), "media.defaults")
-    defaults = {
-        str(kind): str(reference)
-        for kind, reference in defaults_raw.items()
-        if str(reference)
-    }
-    for kind in defaults:
-        if kind not in MEDIA_KINDS:
-            raise ConfigError(
-                f"media.defaults.{kind}: not a kind of media "
-                f"(known: {', '.join(MEDIA_KINDS)})"
-            )
-    settings = MediaSettings(providers=providers, defaults=defaults)
+    settings = parse_section(raw, "media", base, _MEDIA_FIELDS)
     # **A default is a name, and a name that resolves to nothing is refused.**
     # The loader is the judge (this module's rule), so a stale or wrong-kind
     # `defaults:` entry fails here, naming the section — not at a provider,
     # where it would have been silently replaced by the first model of the kind
     # and paid for.
-    for kind, reference in defaults.items():
+    for kind, reference in settings.defaults.items():
         try:
             settings._named(reference, kind)
         except ConfigError as exc:
             raise ConfigError(f"media.defaults.{kind}: {exc}") from exc
     return settings
+
+
+def _media_providers(value: Any, where: str) -> dict[str, MediaProviderSettings]:
+    """The `media.providers:` table — one endpoint each, keyed by its name."""
+    return {
+        str(name): _media_provider(spec, str(name))
+        for name, spec in read_mapping(value, where).items()
+    }
+
+
+def _media_defaults(value: Any, where: str) -> dict[str, str]:
+    """The `defaults:` table — one `provider/model` per kind of media."""
+    defaults: dict[str, str] = {}
+    for kind, written in read_mapping(value, where).items():
+        kind = str(kind)
+        if kind not in MEDIA_KINDS:
+            raise SectionError(
+                f"{where}.{kind}: not a kind of media (known: {', '.join(MEDIA_KINDS)})"
+            )
+        reference = read_text(written, f"{where}.{kind}")
+        if reference is not None:
+            defaults[kind] = reference
+    return defaults
+
+
+_MEDIA_FIELDS: tuple[Field, ...] = (
+    Field("providers", _media_providers),
+    Field("defaults", _media_defaults),
+)
 
 
 def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
@@ -3110,141 +3310,152 @@ def _file_tunnel(raw: Any, base: FileTunnelSettings) -> FileTunnelSettings:
     **Every name is checked against this build's providers**, and a malformed
     shape is refused the same way: both are mistakes in a file a person edits,
     and the module refuses both at load rather than at the call that finds them.
-    `active:` cannot degrade to another provider — which tunnel a machine
+    `default:` cannot degrade to another provider — which tunnel a machine
     publishes through is the operator's decision, not a default to fall back on.
-
-    Imported inside the function because the providers module reaches
-    `subprocess` and an SDK, and this module is on the import path of the TUI
-    and of the agent loop.
     """
-    from slife2.plugins.file_tunnel.providers import DEFAULT_PROVIDER, KNOWN_PROVIDERS
+    return parse_section(raw, "file-tunnel", base, _FILE_TUNNEL_FIELDS)
 
-    if raw is None:
-        return base
-    section = _mapping(raw, "file-tunnel")
-    known = ", ".join(sorted(KNOWN_PROVIDERS))
+
+def _tunnel_providers(value: Any, where: str) -> dict[str, dict]:
+    """The tunnel providers' own options, kept as written.
+
+    **Its entries are options, not schemas**: a binary name, a host, a protocol
+    — vendor words that belong to the tunnel rather than to this project, and
+    read by the provider that understands them (`slife2.plugins.file_tunnel.providers`).
+    A typed field per option would put three vendors' vocabulary in this module
+    and change it every time a tunnel learns a flag.
+
+    **A reference is kept as written**, and resolved by `options_for` when the
+    provider is about to be started: `${VAR}` here is a token or a binary path,
+    and the process that understands the option is the one that should pay its
+    lookup — not every server that loads this file.
+    """
+    known = ", ".join(sorted(KNOWN_TUNNEL_PROVIDERS))
     providers: dict[str, dict] = {}
-    for name, spec in _mapping(
-        section.get("providers"), "file-tunnel.providers"
-    ).items():
-        if str(name) not in KNOWN_PROVIDERS:
-            raise ConfigError(
-                f"file-tunnel.providers.{name}: not a tunnel provider; known: {known}"
-            )
+    for name, spec in read_mapping(value, where).items():
+        if str(name) not in KNOWN_TUNNEL_PROVIDERS:
+            raise SectionError(f"{where}.{name}: not a tunnel provider; known: {known}")
         if not isinstance(spec, dict):
-            raise ConfigError(
-                f"file-tunnel.providers.{name}: expected a mapping of that "
-                f"provider's own options (`{name}: {{}}` is a complete entry)"
+            raise SectionError(
+                f"{where}.{name}: expected a mapping of that provider's own "
+                f"options (`{name}: {{}}` is a complete entry)"
             )
-        # Kept as written and resolved by `options_for`, when the provider is
-        # about to be started: `${VAR}` here is a token or a binary path, and
-        # the process that understands the option is the one that should pay
-        # its lookup — not every server that loads this file.  An unresolved
-        # reference is left verbatim by `resolve_secret` and reported by that
-        # provider.
         providers[str(name)] = {
-            str(key): defer_secret(value) for key, value in spec.items()
+            str(key): defer_secret(one) for key, one in spec.items()
         }
-
-    active = str(section.get("active") or DEFAULT_PROVIDER).strip()
-    if active not in KNOWN_PROVIDERS:
-        raise ConfigError(
-            f"file-tunnel.active: {active!r} is not a tunnel provider; known: {known}"
-        )
-
-    return FileTunnelSettings(active=active, providers=providers)
+    return providers
 
 
-def _needs_base_url(where: str, *, also: str = "") -> ConfigError:
-    """The refusal for a provider that has a key and nowhere to send it.
+_FILE_TUNNEL_FIELDS: tuple[Field, ...] = (
+    Field(
+        "default",
+        read_text,
+        attrs="active",
+        check=bound(
+            lambda name: name in KNOWN_TUNNEL_PROVIDERS,
+            "{value} is not a tunnel provider; known: "
+            + ", ".join(sorted(KNOWN_TUNNEL_PROVIDERS)),
+        ),
+    ),
+    Field("providers", _tunnel_providers),
+)
 
-    **One sentence, because it is one mistake.**  Every provider here — chat,
-    embedding, media — is a base URL and a key, and a key with no URL makes the
-    SDK fall back to its **own** default host: the key goes to somebody else's
-    server, and for a chat provider the whole conversation goes with it.  The
-    reason is identical in the three places, so the sentence is written once;
-    what varies is only the prefix naming the entry, and whether the
-    conversation travels alongside the key.
 
-    It was three copies, and they had already drifted — two said "client" and
-    one "SDK" for the same fallback, and the third was added *after* a review
-    noticed the check was missing entirely from the chat providers, which is
-    what a sentence in two places that a third caller cannot reach looks like.
-    """
-    extra = f" {also}" if also else ""
-    return ConfigError(
-        f"{where}: needs `base_url` — without one the SDK sends this provider's "
-        f"key{extra} to its own default host"
-    )
+#: The refusal sentence for a provider that has a key and nowhere to send it.
+#:
+#: **One sentence, because it is one mistake.**  Every provider here — chat,
+#: embedding, media — is a base URL and a key, and a key with no URL makes the
+#: SDK fall back to its **own** default host: the key goes to somebody else's
+#: server, and for a chat provider the whole conversation goes with it.  The
+#: reason is identical in the three places, so the sentence is written once;
+#: what varies is only the prefix naming the entry (`Field.required` completes
+#: it) and whether the conversation travels alongside the key.
+#:
+#: It was three copies, and they had already drifted — two said "client" and
+#: one "SDK" for the same fallback, and the third was added *after* a review
+#: noticed the check was missing entirely from the chat providers, which is
+#: what a sentence in two places that a third caller cannot reach looks like.
+_NEEDS_BASE_URL = (
+    "needs `base_url` — without one the SDK sends this provider's key{also} to "
+    "its own default host"
+)
+
+#: The chat family's, where the conversation travels with the key.
+_NEEDS_BASE_URL_CHAT = _NEEDS_BASE_URL.format(also=" and the conversation")
+#: The two families whose request carries the key alone.
+_NEEDS_BASE_URL_ONLY = _NEEDS_BASE_URL.format(also="")
+
+
+def _media_url(value: Any, where: str) -> Any:
+    """An endpoint, with the trailing slash a copy-paste leaves off."""
+    url = read_text(value, where)
+    return url.rstrip("/") if url is not None else None
+
+
+_MEDIA_NEEDS_MODELS = (
+    "needs `models` — a provider with no model is a key and an endpoint "
+    "nobody can ask for anything"
+)
+
+
+def _media_models(value: Any, where: str) -> tuple[MediaModelSettings, ...]:
+    """A provider's `models:` list — what this endpoint can be asked for."""
+    if not isinstance(value, list) or not value:
+        raise SectionError(f"{where}: {_MEDIA_NEEDS_MODELS}")
+    return tuple(_media_model(entry, where) for entry in value)
+
+
+_MEDIA_PROVIDER_FIELDS: tuple[Field, ...] = (
+    Field(
+        "api",
+        read_text,
+        # `api` is a *wire*, not a brand: it selects the adapter that speaks to
+        # this endpoint, and a name with no adapter behind it is refused here
+        # rather than silently falling back to another one at the first call.
+        required="needs `api` — the wire adapter that speaks to this endpoint",
+    ),
+    Field("base_url", _media_url, required=_NEEDS_BASE_URL_ONLY),
+    Field("models", _media_models, required=_MEDIA_NEEDS_MODELS),
+    Field("api_key", read_scalar, attrs="api_key_ref"),
+)
 
 
 def _media_provider(raw: Any, name: str) -> MediaProviderSettings:
-    """One `media.providers:` entry: an endpoint, a key and what it can do.
-
-    `api` is required and is a *wire*, not a brand: it selects the adapter that
-    speaks to this endpoint, and a name with no adapter behind it is refused at
-    the first call rather than silently falling back to another one.  `base_url`
-    is required for the reason `_embedding_provider` gives — an entry carrying a
-    key with nowhere to send it posts that key to somebody else's host.
-    """
-    if not isinstance(raw, dict):
-        raise ConfigError(f"media.providers.{name}: expected a mapping")
-    api = str(raw.get("api") or "")
-    base_url = str(raw.get("base_url") or "").rstrip("/")
-    if not api:
-        raise ConfigError(
-            f"media.providers.{name}: needs `api` — the wire adapter that "
-            f"speaks to this endpoint"
-        )
-    if not base_url:
-        raise _needs_base_url(f"media.providers.{name}")
-    models_raw = raw.get("models")
-    if not isinstance(models_raw, list) or not models_raw:
-        raise ConfigError(
-            f"media.providers.{name}: needs `models` — a provider with no model "
-            f"is a key and an endpoint nobody can ask for anything"
-        )
-    key = str(raw.get("api_key") or "")
+    """One `media.providers:` entry: an endpoint, a key and what it can do."""
     return MediaProviderSettings(
         name=name,
-        api=api,
-        base_url=base_url,
-        models=tuple(
-            _media_model(entry, f"media.providers.{name}.models")
-            for entry in models_raw
-        ),
-        api_key_ref=key,
+        **read_section(raw, f"media.providers.{name}", _MEDIA_PROVIDER_FIELDS),
     )
+
+
+def _media_params(value: Any, where: str) -> dict[str, Any]:
+    """`params:` is the model's own vocabulary — kept as written."""
+    return {str(key): one for key, one in read_mapping(value, where).items()}
+
+
+_MEDIA_MODEL_FIELDS: tuple[Field, ...] = (
+    Field("model", read_text, required="an entry needs `model`"),
+    Field(
+        "kind",
+        read_text,
+        required="an entry needs `kind` — one of " + ", ".join(MEDIA_KINDS),
+        # `kind` is checked here rather than at the call: an entry whose kind
+        # nothing knows is a model no tool can ever ask for, and finding that
+        # out at load is the difference between a typo and a capability that
+        # quietly does not exist.
+        check=bound(
+            lambda kind: kind in MEDIA_KINDS,
+            "`kind` must be one of " + ", ".join(MEDIA_KINDS) + " — not {value!r}",
+        ),
+    ),
+    Field("params", _media_params),
+    Field("voice", read_text),
+)
 
 
 def _media_model(raw: Any, where: str) -> MediaModelSettings:
-    """One entry of a provider's `models:` list.
-
-    `kind` is checked here rather than at the call: an entry whose kind nothing
-    knows is a model no tool can ever ask for, and finding that out at load is
-    the difference between a typo and a capability that quietly does not exist.
-    """
-    if not isinstance(raw, dict):
-        raise ConfigError(f"{where}: expected a mapping")
-    model = str(raw.get("model") or "")
-    kind = str(raw.get("kind") or "")
-    if not model:
-        raise ConfigError(f"{where}: an entry needs `model`")
-    if kind not in MEDIA_KINDS:
-        # `{model}` rather than `{model or '?'}`: the check above has already
-        # refused an entry with no model, so the `or` could never fire — and a
-        # name that cannot be empty reads as a name that might be.
-        raise ConfigError(
-            f"{where}.{model}: `kind` must be one of "
-            f"{', '.join(MEDIA_KINDS)} — not {kind!r}"
-        )
-    params = _mapping(raw.get("params"), f"{where}.{model}.params")
-    return MediaModelSettings(
-        model=model,
-        kind=kind,
-        params={str(key): value for key, value in params.items()},
-        voice=str(raw.get("voice") or ""),
-    )
+    """One entry of a provider's `models:` list."""
+    return MediaModelSettings(**read_section(raw, where, _MEDIA_MODEL_FIELDS))
 
 
 def _context(raw: Any, base: ContextSettings) -> ContextSettings:
@@ -3253,62 +3464,51 @@ def _context(raw: Any, base: ContextSettings) -> ContextSettings:
     **The ceiling is a fraction of the window, within (0, 1].**  A fraction above
     one is a budget larger than the window it is a fraction of.  An absent
     section is the default, as everywhere else; an *explicit* zero is refused
-    rather than read as absent, which is `_int_or`'s rule one type over.
+    rather than read as absent, because `read_number` keeps a written zero.
     """
-    if raw is None:
-        return base
-    section = _mapping(raw, "context")
-    ceiling = _optional_float(section.get("ceiling"), "context.ceiling")
-    ceiling = base.ceiling if ceiling is None else ceiling
-    if not 0 < ceiling <= 1:
-        raise ConfigError(
-            f"context.ceiling: {ceiling} is not a window fraction (0 < ceiling <= 1)"
-        )
-    page = _int_or(
-        section.get("recall_page_limit"),
-        base.recall_page_limit,
-        "context.recall_page_limit",
-    )
-    if page < 1:
-        raise ConfigError(f"context.recall_page_limit: {page} recalls nothing")
-    timeout = _optional_float(section.get("timeout"), "context.timeout")
-    if timeout is not None and timeout <= 0:
-        raise ConfigError(
-            f"context.timeout: {timeout} would abandon every discriminator call "
-            f"before it was made"
-        )
-    similarity = _optional_float(
-        section.get("min_similarity"), "context.min_similarity"
-    )
-    if similarity is not None and not 0 <= similarity <= 1:
-        # Refused for the reason the window above is: a cosine is a similarity
-        # in [0, 1], so `min_similarity: 2` is a gate nothing can pass.  It
-        # would recall nothing from the meaning leg — and recall nothing
-        # *silently*, since a keyword hit is exempt and the turn would simply
-        # run on less context than the operator asked for.
-        raise ConfigError(
-            f"context.min_similarity: {similarity} is not a similarity (0-1)"
-        )
-    weight = _optional_float(section.get("keyword_weight"), "context.keyword_weight")
-    if weight is not None and weight < 0:
-        raise ConfigError(f"context.keyword_weight: {weight} is negative")
-    rerank_floor = _optional_float(
-        section.get("rerank_min_score"), "context.rerank_min_score"
-    )
-    if rerank_floor is not None and not 0 <= rerank_floor <= 1:
-        raise ConfigError(
-            f"context.rerank_min_score: {rerank_floor} is not a score (0-1)"
-        )
-    return ContextSettings(
-        ceiling=ceiling,
-        recall_page_limit=page,
-        min_similarity=base.min_similarity if similarity is None else similarity,
-        keyword_weight=base.keyword_weight if weight is None else weight,
-        rerank_min_score=(
-            base.rerank_min_score if rerank_floor is None else rerank_floor
+    return parse_section(raw, "context", base, _CONTEXT_FIELDS)
+
+
+_CONTEXT_FIELDS: tuple[Field, ...] = (
+    Field(
+        "ceiling",
+        read_number,
+        check=bound(
+            lambda fraction: 0 < fraction <= 1,
+            "{value} is not a window fraction (0 < ceiling <= 1)",
         ),
-        timeout=base.timeout if timeout is None else timeout,
-    )
+    ),
+    Field(
+        "recall_page_limit",
+        read_int,
+        check=bound(lambda page: page >= 1, "{value} recalls nothing"),
+    ),
+    # **A cosine is a similarity in [0, 1]**, so `min_similarity: 2` is a gate
+    # nothing can pass — and it would recall nothing from the meaning leg
+    # *silently*, since a keyword hit is exempt and the turn would simply run
+    # on less context than the operator asked for.
+    Field(
+        "min_similarity",
+        read_number,
+        check=bound(
+            lambda score: 0 <= score <= 1,
+            "{value} is not a similarity (0-1)",
+        ),
+    ),
+    Field(
+        "keyword_weight",
+        read_number,
+        check=bound(lambda weight: weight >= 0, "{value} is negative"),
+    ),
+    Field(
+        "rerank_min_score",
+        read_number,
+        check=bound(
+            lambda score: 0 <= score <= 1,
+            "{value} is not a score (0-1)",
+        ),
+    ),
+)
 
 
 def _embeddings(raw: Any) -> EmbeddingsSettings:
@@ -3322,13 +3522,13 @@ def _embeddings(raw: Any) -> EmbeddingsSettings:
     that *is* there may not be empty, for the same reason: there is no
     configuration in which a store runs without an embedding model.
 
-    **An `active_model` this config does not define is refused, naming the
-    providers that do exist.**  It used to fall back to the first provider, so
-    vectors came from an endpoint nobody chose and the index's recorded
-    identity changed underneath — a name the config does not define is not a
-    vote for the first name that does (SDD Appendix C).  A section that names
-    no `active_model` still takes the first, which is the designed default and
-    not a substitution.
+    **A `default` this config does not define is refused, naming the providers
+    that do exist.**  It used to fall back to the first provider, so vectors
+    came from an endpoint nobody chose and the index's recorded identity
+    changed underneath — a name the config does not define is not a vote for
+    the first name that does (SDD Appendix C).  A section that names no
+    `default` still takes the first, which is the designed default and not a
+    substitution.
     """
     if raw is None:
         raise ConfigError(
@@ -3337,28 +3537,49 @@ def _embeddings(raw: Any) -> EmbeddingsSettings:
             "without one"
         )
 
-    section = _mapping(raw, "embeddings")
-    providers_raw = _mapping(section.get("providers"), "embeddings.providers")
-    if not providers_raw:
-        raise ConfigError(
-            "embeddings.providers: needs at least one provider — there is no "
-            "mode in which slife2 stores turns it cannot search semantically"
-        )
-    providers = {
-        str(name): _embedding_provider(spec, str(name))
-        for name, spec in providers_raw.items()
-    }
-    active = str(section.get("active_model") or "")
-    if active and active not in providers:
-        known = ", ".join(sorted(providers))
-        raise ConfigError(
-            f"embeddings.active_model: {active!r} is not a configured provider; "
-            f"it has: {known}"
-        )
-    return EmbeddingsSettings(
-        providers=providers,
-        active=active or next(iter(providers)),
+    settings = parse_section(
+        raw, "embeddings", EmbeddingsSettings(), _EMBEDDINGS_FIELDS
     )
+    if not settings.active:
+        # Naming none is the designed default: the first provider, not a
+        # substitution for a name that does not exist.
+        settings = replace(settings, active=next(iter(settings.providers)))
+    elif settings.active not in settings.providers:
+        known = ", ".join(sorted(settings.providers))
+        raise SectionError(
+            f"embeddings.default: {settings.active!r} is not a configured "
+            f"provider; it has: {known}"
+        )
+    return settings
+
+
+_EMBEDDINGS_NEEDS_PROVIDERS = (
+    "needs at least one provider — there is no mode in which slife2 stores "
+    "turns it cannot search semantically"
+)
+
+
+def _embedding_providers(
+    value: Any, where: str
+) -> dict[str, EmbeddingProviderSettings]:
+    """The `embeddings.providers:` table — one endpoint each."""
+    entries = read_mapping(value, where)
+    if not entries:
+        raise SectionError(f"{where}: {_EMBEDDINGS_NEEDS_PROVIDERS}")
+    return {
+        str(name): _embedding_provider(spec, str(name))
+        for name, spec in entries.items()
+    }
+
+
+_EMBEDDINGS_FIELDS: tuple[Field, ...] = (
+    Field(
+        "providers",
+        _embedding_providers,
+        required=_EMBEDDINGS_NEEDS_PROVIDERS,
+    ),
+    Field("default", read_text, attrs="active"),
+)
 
 
 def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
@@ -3370,27 +3591,22 @@ def _embedding_provider(raw: Any, name: str) -> EmbeddingProviderSettings:
     default host, which means the key and every document in the history are
     posted to somebody else's server.
     """
-    if not isinstance(raw, dict):
-        raise ConfigError(f"embeddings.providers.{name}: expected a mapping")
-
-    base_url = str(raw.get("base_url") or "")
-    model = str(raw.get("model") or "")
-    if not base_url:
-        raise _needs_base_url(f"embeddings.providers.{name}")
-    if not model:
-        raise ConfigError(
-            f"embeddings.providers.{name}: needs `model` — the id sent as "
-            f"`model` on /embeddings"
-        )
-    key = str(raw.get("api_key") or "")
-    rerank_model = str(raw.get("rerank_model") or "")
     return EmbeddingProviderSettings(
         name=name,
-        base_url=base_url,
-        model=model,
-        api_key_ref=key,
-        rerank_model=rerank_model,
+        **read_section(raw, f"embeddings.providers.{name}", _EMBEDDING_PROVIDER_FIELDS),
     )
+
+
+_EMBEDDING_PROVIDER_FIELDS: tuple[Field, ...] = (
+    Field("base_url", read_text, required=_NEEDS_BASE_URL_ONLY),
+    Field(
+        "model",
+        read_text,
+        required="needs `model` — the id sent as `model` on /embeddings",
+    ),
+    Field("api_key", read_scalar, attrs="api_key_ref"),
+    Field("rerank_model", read_text),
+)
 
 
 #: The proxy a `rest-api:` entry is expanded into when it does not name a command
@@ -3411,7 +3627,7 @@ def _mcp_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
     """The `mcp:` section, as upstreams: an MCP server written out."""
     return {
         str(name): _tool_server(spec, str(name))
-        for name, spec in _mapping(raw.get("mcp"), "mcp").items()
+        for name, spec in read_mapping(raw.get("mcp"), "mcp").items()
     }
 
 
@@ -3430,7 +3646,7 @@ def _rest_servers(raw: dict[str, Any]) -> dict[str, ToolServerSettings]:
     """
     return {
         str(name): _rest_api(spec, str(name))
-        for name, spec in _mapping(raw.get("rest-api"), "rest-api").items()
+        for name, spec in read_mapping(raw.get("rest-api"), "rest-api").items()
     }
 
 
@@ -3459,6 +3675,21 @@ def _tool_server(raw: Any, name: str) -> ToolServerSettings:
     )
 
 
+def _deferred_secrets(raw: Any, where: str) -> dict[str, str]:
+    """A section's mapping, with ``${VAR}`` kept for the process that uses it.
+
+    The entries this reads are loaded by every server process but consumed by
+    one: a tool server's are dialled by the gateway
+    (`slife2.clients.gateway.mcp_config`), a skill's are handed over by the
+    skills plugin (`SkillSettings.resolved_env`).  Resolving at load would make
+    the whole stack pay for credentials only that one uses — and a keyring that
+    refuses would fail every load on the machine, including `slife2 down`.
+    """
+    return {
+        str(key): defer_secret(value) for key, value in read_mapping(raw, where).items()
+    }
+
+
 def _rest_api(raw: Any, name: str) -> ToolServerSettings:
     """One `rest-api:` entry, expanded into the stdio upstream that serves it.
 
@@ -3473,17 +3704,17 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
     once instead of on every turn.
     """
     if not isinstance(raw, dict):
-        raise ConfigError(f"rest-api.{name}: expected a mapping")
+        raise SectionError(f"rest-api.{name}: expected a mapping")
 
-    command = str(raw.get("command") or "")
-    spec = str(raw.get("spec") or "")
-    if not command and not spec:
-        raise ConfigError(
+    command = read_text(raw.get("command"), f"rest-api.{name}.command")
+    spec = read_text(raw.get("spec"), f"rest-api.{name}.spec")
+    if command is None and spec is None:
+        raise SectionError(
             f"rest-api.{name}: needs `spec` (the OpenAPI document's URL or "
             f"path) or an explicit `command`"
         )
 
-    if not command:
+    if command is None:
         # The declarative form goes through the canonical object — the same one
         # `rest_api_get` / `rest_api_set` use.  The `command:` form below is a
         # different spelling, with a proxy of one's own, and keeps its own reader.
@@ -3511,29 +3742,68 @@ def _rest_api(raw: Any, name: str) -> ToolServerSettings:
             enabled=cfg.enabled,
         )
 
-    env = _deferred_secrets(raw.get("env"), f"rest-api.{name}.env")
-    args = _string_list(raw.get("args"), f"rest-api.{name}.args")
-    if spec:
-        env = {OPENAPI_SPEC_URL: spec, **env}
-
+    # **A key this form does not read is refused, not ignored.**  The `command:`
+    # branch builds its environment by hand, so a misspelt `base-url` would load
+    # cleanly and then let the proxy call the host the spec names — a mistake
+    # nothing reports.  The declarative branch gets this from `load_rest_api`'s
+    # own model; the field tuple below is the same judgement for the spelling
+    # that has no model.
+    found = read_section(raw, f"rest-api.{name}", _REST_COMMAND_FIELDS)
+    env = dict(found.get("env") or {})
     # These two are the proxy's, and they are written from the entry rather than
     # into `env:` because they are what the entry is *about*: which API, and
     # where, is not an environment variable a person should have to spell.
-    if base_url := str(raw.get("base_url") or ""):
+    if base_url := found.get("base_url"):
         env[OPENAPI_SERVER_URL] = base_url
-    if raw.get("api_key") is not None:
-        env[OPENAPI_API_KEY] = defer_secret(raw.get("api_key"))
-
+    if (key := found.get("api_key")) is not None:
+        env[OPENAPI_API_KEY] = key
     return ToolServerSettings(
         name=name,
         kind="rest",
-        description=str(raw.get("description") or ""),
-        command=command,
-        args=args,
+        description=found.get("description", ""),
+        command=found["command"],
+        args=found.get("args", ()),
         env=env,
-        cwd=str(raw.get("cwd") or ""),
-        enabled=_enabled(raw, f"rest-api.{name}"),
+        cwd=found.get("cwd", ""),
+        enabled=found.get("enabled", True),
     )
+
+
+def _spec_needs_the_declarative_form(value: Any, where: str) -> Any:
+    """`spec:` on an entry that also names a `command:` — two spellings at once.
+
+    A `command:` entry carries its spec in `args:` or `env:`, and a `spec:`
+    beside it is a key this form does not read: the proxy would call whatever
+    the command says with nothing reporting the spec the operator wrote.
+    """
+    raise SectionError(
+        f"{where}: belongs to the declarative form — a `command:` entry carries "
+        f"its spec in `args:` or `env:`"
+    )
+
+
+def _deferred_secret(value: Any, where: str) -> Any:
+    """One ``${VAR}`` value, kept as written until the process that uses it."""
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        raise SectionError(f"{where}: expected a scalar, got {type(value).__name__}")
+    return defer_secret(value)
+
+
+_REST_COMMAND_FIELDS: tuple[Field, ...] = (
+    Field("command", read_text),
+    Field("args", read_list),
+    Field("env", _deferred_secrets),
+    Field("base_url", read_text),
+    Field("api_key", _deferred_secret),
+    Field("cwd", read_text),
+    Field("description", read_text),
+    Field("enabled", read_switch),
+    # Declared rather than unknown, so an entry that writes both spellings is
+    # told which one owns the spec instead of being handed a list of keys.
+    Field("spec", _spec_needs_the_declarative_form),
+)
 
 
 def _cli_tools(raw: dict[str, Any]) -> dict[str, CliToolSettings]:
@@ -3546,7 +3816,7 @@ def _cli_tools(raw: dict[str, Any]) -> dict[str, CliToolSettings]:
     """
     return {
         str(name): _cli_tool(spec, str(name))
-        for name, spec in _mapping(raw.get("cli"), "cli").items()
+        for name, spec in read_mapping(raw.get("cli"), "cli").items()
     }
 
 
@@ -3588,220 +3858,201 @@ def _skills(raw: dict[str, Any]) -> dict[str, SkillSettings]:
     later ran a playbook that died on the credential this section exists to
     supply (SDD Appendix C).
     """
-    entries = _mapping(raw.get("skills"), "skills")
-    for name, spec in entries.items():
-        if not isinstance(spec, dict):
-            raise ConfigError(f"skills.{name}: expected a mapping")
-    return {
-        str(name): SkillSettings(
-            env=_secrets(spec.get("env"), f"skills.{name}.env"),
-            enabled=_enabled(spec, f"skills.{name}"),
-        )
-        for name, spec in entries.items()
-    }
+    entries = read_mapping(raw.get("skills"), "skills")
+    return {str(name): _skills_entry(spec, str(name)) for name, spec in entries.items()}
 
 
-def _string_list(raw: Any, where: str) -> tuple[str, ...]:
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        raise ConfigError(f"{where}: expected a list")
-    return tuple(str(item) for item in raw)
+def _skills_entry(spec: Any, name: str) -> SkillSettings:
+    """One `skills:` entry — the environment it is handed, and its switch.
 
-
-def _enabled(raw: Mapping[str, Any], where: str) -> bool:
-    """An entry's `enabled:` switch — a real YAML boolean, and absent means on.
-
-    **`bool(raw.get("enabled", True))` read a string as a switch.**  ruamel's
-    loader is YAML 1.2, so `enabled: no` and `enabled: off` are the *strings*
-    `no` and `off` — not the booleans PyYAML would have made of them — and every
-    non-empty string is true to `bool`.  So an entry the operator had switched
-    off came back on, and `family.py` dialled it at every start, because
-    `settings.enabled` is the whole of what decides whether a link is made.  The
-    reading is wrong in the one direction that costs something: the server is
-    started and asked, rather than not.
-
-    **The value is refused rather than guessed at.**  Coercing a string to a
-    boolean is the other half of the same mistake, one spelling over — it
-    replaces "the switch this says is on" with "the switch it did not say"; a
-    quoted `"false"` is a hand-edit that means nothing at all, and a *value that
-    cannot be read is not an absent one*.  Every other field in this module is
-    refused at load with a sentence naming it, and a switch decides whether a
-    process is dialled, so it is refused the same way.  A key that is not there
-    is the one other answer, and it is the documented default: `enabled: true`
-    is what the file never writes and absent is what it means
-    (`slife2.libs.host.configfile.upsert`).
+    **An entry that is not a mapping is refused**, as it is in every other
+    section that holds entries (`_cli_tools`, `_tool_server`).  Read as an empty
+    enabled entry it dropped the operator's key with nothing said, and the model
+    later ran a playbook that died on the credential this section exists to
+    supply (SDD Appendix C).  A `null` entry is that case: `read_section` reads
+    an absent *section* as empty, and an entry written with nothing is a mistake
+    rather than an absent one.
     """
-    value = raw.get("enabled", True)
-    if not isinstance(value, bool):
-        raise ConfigError(
-            f"{where}.enabled: expected `true` or `false`, got {value!r} — YAML "
-            f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
-            f"strings; leave the key out for true"
-        )
-    return value
+    if not isinstance(spec, dict):
+        raise SectionError(f"skills.{name}: expected a mapping")
+    return parse_section(spec, f"skills.{name}", SkillSettings(), _SKILL_FIELDS)
 
 
-def _secrets(raw: Any, where: str) -> dict[str, str]:
-    """A mapping whose values go through the secret chain.
+_SKILL_FIELDS: tuple[Field, ...] = (
+    # Deferred, and resolved by `SkillSettings.resolved_env` in the skills
+    # plugin: the section is loaded by every process and used by one.
+    Field("env", _deferred_secrets),
+    Field("enabled", read_switch),
+)
 
-    Only `env` and `headers`, because those are the two places a tool server is
-    handed a credential; a `command` or an `args` list is a program name and is
-    visible in the process table regardless.
+
+def first_reference(providers: Mapping[str, Any], reference: str = "") -> str:
+    """The `provider/model` *reference* names, read off the raw `providers:` mapping.
+
+    **A provider named alone means its first model**, the reading `Config.resolve`
+    gives `default:` and `--model`; and no reference at all is the fallback
+    `default:` gets when the file names none — the first model of the first
+    provider that has one, or `""`.
+
+    **Raw dicts, because that is what both callers hold.**  The loader defaults
+    `default:` while it still has the file's mapping, and the agent's model tools
+    re-read the section after each edit so the answer reflects the file rather
+    than the config they booted with.  One function over that shape is what keeps
+    those two readings of the rule from drifting.
     """
-    return {
-        str(key): resolve_secret(value) for key, value in _mapping(raw, where).items()
-    }
-
-
-def _deferred_secrets(raw: Any, where: str) -> dict[str, str]:
-    """A tool server's mapping, with ``${VAR}`` kept for the connection.
-
-    The entries this reads are loaded by every server process but dialled by
-    one (`slife2.clients.gateway.mcp_config`), so resolving at load would make
-    the whole stack pay for credentials only that one uses.
-    """
-    return {
-        str(key): defer_secret(value) for key, value in _mapping(raw, where).items()
-    }
-
-
-def _template_path(raw: Any, config_dir: Path | None, default: str) -> str:
-    """Resolve `agent.system_prompt` to a template file, or the shipped default.
-
-    A relative path is looked for beside the config that named it — the useful
-    place for a prompt somebody is editing — and leaving the field out means the
-    template the distribution ships.  A path that is not there is a config
-    mistake, and failing at load says so once rather than on every turn.
-    """
-    if not raw:
-        return default
-    path = Path(str(raw))
-    if not path.is_absolute():
-        path = (config_dir / path) if config_dir else path
-    if not path.is_file():
-        raise ConfigError(f"agent.system_prompt: no such template: {path}")
-    return str(path)
-
-
-def _first_reference(providers: dict[str, ProviderSettings]) -> str:
-    """`provider/model` for the first configured model, as a fallback default."""
-    for name, provider in providers.items():
-        if provider.models:
-            return f"{name}/{next(iter(provider.models))}"
+    if reference:
+        name, slash, model_id = reference.partition("/")
+        if slash and model_id:
+            return reference
+        model_id = _first_model(providers.get(name))
+        return f"{name}/{model_id}" if model_id else reference
+    for name, entry in providers.items():
+        model_id = _first_model(entry)
+        if model_id:
+            return f"{name}/{model_id}"
     return ""
 
 
-def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
-    if raw is None:
-        return default
-    if not isinstance(raw, dict):
-        raise ConfigError(f"{where}: expected a mapping with host/port/path")
-    host = str(raw.get("host") or default.host)
-    if ":" in host or "/" in host:
-        # **The first of the three fields, and the last to be refused.**  `port`
-        # and `path` are refused below and the host was copied through,
-        # so `host: "::1"` — the natural spelling of an IPv6 loopback, and one
-        # `peer_agent.broker.host` accepts — built `http://::1:24010/mcp`.
-        # `ServerSettings.url` writes the address as `host:port` and puts no
-        # brackets on it, so the first thing to *read* that URL
-        # (`runtime.normalize_url`'s `urlsplit(...).port`, inside `start_lock`)
-        # raised `ValueError: Port could not be cast to integer value as
-        # ':1:24010'` — after some servers were already up, in a command that
-        # answers every bad field with one sentence and catches `ConfigError`.
-        # A `/` is the same mistake the other way: `host: 0.0.0.0/x` moves the
-        # path into the address, and the port is then not there at all.
-        raise ConfigError(
-            f"{where}.host: {host!r} is not a host — the endpoint is written as "
-            f"`host:port` with no brackets, so an IPv6 address needs the path "
-            f"spelt out another way, and a `/` belongs in `path:`; leave it out "
-            f"for the default ({default.host})"
+def _first_model(entry: Any) -> str:
+    """The `model:` of a raw `providers:` entry's first model, or `""`."""
+    models = entry.get("models") if isinstance(entry, dict) else None
+    if isinstance(models, list) and models and isinstance(models[0], dict):
+        return str(models[0].get("model") or "")
+    return ""
+
+
+def _server_host(value: Any, where: str) -> Any:
+    """A host, read stripped and refused unless it is a bare address.
+
+    **The padding is not part of the host.**  A quoted `" localhost "` — an
+    easy paste — passed `is_loopback_host`, which strips before judging, and
+    then built `http:// localhost :24000/mcp`, which is not an URL anything can
+    dial; `read_text` strips, so the address and the judgement are about the
+    same string.
+
+    **A `/` is refused**, because it moves the path into the address and the
+    port is then not there at all: `host: 0.0.0.0/x`.
+
+    **An IPv6 literal is allowed**, because a loopback address is exactly what
+    `_loopback` asks for and `::1` is one; `ServerSettings.url` brackets it.
+    Anything else with a colon is still a host that cannot be parsed, and is
+    refused here with the field's own sentence.
+    """
+    host = read_text(value, where)
+    if host is None:
+        return None
+    if "/" in host:
+        raise SectionError(
+            f"{where}: {host!r} is not a host — a `/` belongs in `path:`"
         )
-    port = _int_or(raw.get("port"), default.port, f"{where}.port")
-    if not 0 < port < 65536:
+    if ":" in host:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise SectionError(
+                f"{where}: {host!r} is not a host — an IPv6 address or `localhost`"
+            ) from None
+    return host
+
+
+def _loopback(host: str, where: str) -> None:
+    """**Loopback is the security boundary, not a default.**
+
+    A bind on `0.0.0.0` reads as "make it reachable" and lets the network call
+    `job_set`, `mcp_set`, `model_set` — arbitrary code and configuration edits —
+    with no credential.  The broker refuses wildcards for its own listener
+    (`slife2.plugins.a2a.broker`); this is the same rule for every server.
+    """
+    if not is_loopback_host(host):
+        raise SectionError(
+            f"{where}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
+            f"use `localhost` or a loopback address"
+        )
+
+
+def _server_path(value: Any, where: str) -> Any:
+    """An endpoint path, which has to start with `/`.
+
+    **The third field, and the one that was copied through.**  `path: mcp` was
+    accepted and `ServerSettings.url` concatenates the two halves with nothing
+    between them: the endpoint became `http://127.0.0.1:24005mcp`, whose *port*
+    is the string `24005mcp`.  Nothing raised at load — the typo arrived as a
+    `ValueError` out of the start-up loop, after some servers were already up
+    and running.
+    """
+    path = read_text(value, where)
+    if path is not None and not path.startswith("/"):
+        raise SectionError(
+            f"{where}: {path!r} is not a path — the endpoint is the address and "
+            f"the path together, so it has to start with `/`"
+        )
+    return path
+
+
+_SERVER_FIELDS: tuple[Field, ...] = (
+    Field("host", _server_host, check=_loopback),
+    Field(
+        "port",
+        read_int,
         # Refused rather than defaulted: a port is how the launcher finds this
         # server again — it probes the address it decided before starting
         # anything — so `port: 0` would bind whatever the kernel liked and then
-        # be probed at a port nobody is on.  `_int_or` makes the zero reach this
-        # point; `int(x or default)` read it as "not given".
-        raise ConfigError(
-            f"{where}.port: {port} is not a port (1-65535); leave it out for "
-            f"the default ({default.port})"
-        )
-    path = str(raw.get("path") or default.path)
-    if not path.startswith("/"):
-        # **The third field, and the one that was copied through.**  `host` and
-        # `port` are read one line up and `path` was copied through, so `path: mcp`
-        # was accepted and `ServerSettings.url` concatenates the two halves
-        # with nothing between them: the endpoint became
-        # `http://127.0.0.1:24005mcp`, whose *port* is the string `24005mcp`.
-        # Nothing raised here — the first thing to read the URL does
-        # (`runtime.normalize_url`'s `urlsplit(...).port`, inside
-        # `start_lock`), so the typo arrived as a `ValueError` out of the
-        # start-up loop, after some servers were already up and running, in a
-        # command that catches `ConfigError` and answers every other bad field
-        # with one sentence.  A path is the third of the three fields this
-        # function reads, so it is refused where they are.
-        raise ConfigError(
-            f"{where}.path: {path!r} is not a path — the endpoint is the "
-            f"address and the path together, so it has to start with `/`; "
-            f"leave it out for the default ({default.path})"
-        )
-    return ServerSettings(host=host, port=port, path=path)
+        # be probed at a port nobody is on.
+        check=bound(
+            lambda port: 0 < port < 65536,
+            "{value} is not a port (1-65535); leave it out for this server's default",
+        ),
+    ),
+    Field("path", _server_path),
+)
+
+
+def _server(raw: Any, default: ServerSettings, where: str) -> ServerSettings:
+    """One `servers:` entry — where one process listens, defaulted from its row."""
+    return parse_section(raw, where, default, _SERVER_FIELDS)
+
+
+def _provider_models(value: Any, where: str) -> dict[str, ModelSettings]:
+    """A provider's `models:` list, validated against the canonical object."""
+    if not isinstance(value, list) or not value:
+        raise SectionError(f"{where}: needs a non-empty `models:` list")
+    models: dict[str, ModelSettings] = {}
+    for entry in value:
+        try:
+            cfg = load_model(entry, where=where)
+        except ValueError as exc:
+            raise SectionError(str(exc)) from exc
+        if cfg.model in models:
+            raise SectionError(f"{where}.{cfg.model}: the model is listed twice")
+        models[cfg.model] = _model_settings(cfg)
+    return models
+
+
+_PROVIDER_FIELDS: tuple[Field, ...] = (
+    Field(
+        "api",
+        read_text,
+        required="needs `api` — the wire protocol this provider speaks",
+        check=bound(
+            lambda api: api in API_BACKENDS,
+            "{value} is not an api this build speaks; known: "
+            + ", ".join(API_BACKENDS),
+        ),
+    ),
+    # The entries before the endpoint: a model entry missing its own `model:` is
+    # the more specific mistake, and a file with both that and no endpoint
+    # should name the model.
+    Field("models", _provider_models, required="needs a non-empty `models:` list"),
+    Field("base_url", read_text, required=_NEEDS_BASE_URL_CHAT),
+    Field("api_key", read_scalar, attrs="api_key_ref"),
+)
 
 
 def _provider(raw: Any, name: str) -> ProviderSettings:
-    if not isinstance(raw, dict):
-        raise ConfigError(f"providers.{name}: expected a mapping")
-
-    # **The three named refusals stay here**, above the canonical model, because
-    # each has a sentence the caller acts on and `load_provider` cannot know the
-    # section context.  The model is still what decides the shape: everything
-    # after these is its validation, and `load_provider` rejects a key this
-    # build does not know.
-    api = str(raw.get("api") or "")
-    if api not in API_BACKENDS:
-        raise ConfigError(
-            f"providers.{name}: unknown api {api!r}; known: {', '.join(API_BACKENDS)}"
-        )
-
-    models_raw = raw.get("models")
-    if not isinstance(models_raw, list) or not models_raw:
-        raise ConfigError(f"providers.{name}: needs a non-empty `models:` list")
-
-    # The entries first, in the order the old parser reported them: a model
-    # entry missing its own `model:` is the more specific mistake, and a file
-    # with both that and no endpoint should name the model.
-    models: dict[str, ModelSettings] = {}
-    for entry in models_raw:
-        try:
-            cfg = load_model(entry, where=f"providers.{name}")
-        except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
-        if cfg.model in models:
-            raise ConfigError(
-                f"providers.{name}.{cfg.model}: the model is listed twice"
-            )
-        models[cfg.model] = _model_settings(cfg)
-
-    base_url = str(raw.get("base_url") or "")
-    if not base_url:
-        # The same hole the other two guard, and the same reason — and this is
-        # the one the check was *missing* on for the longest, because the
-        # sentence existed twice and neither copy was in reach of this function.
-        raise _needs_base_url(f"providers.{name}", also="and the conversation")
-
-    try:
-        provider = load_provider(raw, where=f"providers.{name}")
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
-
-    return ProviderSettings(
-        api=provider.api,
-        base_url=provider.base_url,
-        api_key_ref=provider.api_key,
-        models=models,
-    )
+    """One `providers:` entry: a wire protocol, an endpoint and its models."""
+    found = read_section(raw, f"providers.{name}", _PROVIDER_FIELDS)
+    found.setdefault("api_key_ref", "")
+    return ProviderSettings(**found)
 
 
 def _model_settings(cfg: ModelConfig) -> ModelSettings:
@@ -3826,68 +4077,6 @@ def _model_settings(cfg: ModelConfig) -> ModelSettings:
         store=cfg.compat.store,
         cache_control=cfg.compat.cache_control or "",
     )
-
-
-def _int_or(value: Any, default: int, where: str) -> int:
-    """`value` as an int, or `default` when the key is **absent**.
-
-    Absent means absent, and that is the whole of what this adds over
-    `int(value or default)`: the `or` idiom also treats an explicit `0` as "not
-    given", so `tool_load.threshold: 0` — the value the guard below exists to
-    refuse — was silently replaced by the default, and so was `port: 0` (the
-    kernel's "pick one for me", which is not something a server of ours should
-    be handed by accident).  `max_iterations: 0` was the third example and is now
-    the one this reader exists to *keep*: a written zero is the config's "no
-    cap", and it means the same thing as leaving the key out
-    (`slife2.libs.host.config.AgentSettings.max_iterations`).
-
-    `where` names the field, because a value that is not a number is the
-    caller's typo and has to be reported like every other one.  A bare `int()`
-    raises `ValueError`, which nothing above this catches: `max_iterations: many`
-    reached the user as a traceback out of the `slife2` console script rather
-    than as the one line every other bad value produces.
-    """
-    return default if value is None else _as_int(value, where)
-
-
-def _optional_float(value: Any, where: str) -> float | None:
-    return None if value is None else _as_float(value, where)
-
-
-def _as_int(value: Any, where: str) -> int:
-    """A whole number, or the caller's typo — **and a bool is not one**.
-
-    `int(True)` is 1 and `int(2.9)` is 2, so a bare `int()` turned
-    `port: true` into port 1 and a fractional count into a different number
-    nobody wrote.  `inf` is the third: `int(inf)` raises `OverflowError`, which
-    is past every `except ConfigError` and reaches the user as a traceback
-    (`.inf` is just how some people write "no cap").
-    """
-    if isinstance(value, bool):
-        raise ConfigError(f"{where}: expected a whole number, got {value!r}")
-    try:
-        number = int(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ConfigError(f"{where}: expected a whole number, got {value!r}") from exc
-    if isinstance(value, float) and (not math.isfinite(value) or value != number):
-        # A finite, whole float (`2.0`) is still the number it spells; a
-        # fractional one is not the setting's whole number, and truncating it
-        # would apply a value the file did not contain.
-        raise ConfigError(f"{where}: expected a whole number, got {value!r}")
-    return number
-
-
-def _as_float(value: Any, where: str) -> float:
-    """A finite number, or the caller's typo.  A bool is not a number either."""
-    if isinstance(value, bool):
-        raise ConfigError(f"{where}: expected a number, got {value!r}")
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ConfigError(f"{where}: expected a number, got {value!r}") from exc
-    if not math.isfinite(number):
-        raise ConfigError(f"{where}: expected a finite number, got {value!r}")
-    return number
 
 
 __all__ = [

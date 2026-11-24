@@ -14,7 +14,7 @@ here and are **not in the corpus**.
 
 **The file is the document.**  A note, a day, a report and a dump keep their
 text in the file their row points at; the row holds the key, the metadata and
-the address, and **there is no body column**.  Only the agent-written kinds are
+the address, and **no copy of the text**.  Only the agent-written kinds are
 vectorized (their whole file text); a saved file is keyword text, and a dump is
 not searched.  What is kept is the *design* that made those things one
 directory, and what is dropped is the machinery slife2 does without:
@@ -24,9 +24,9 @@ large for the conversation is truncated for the model and kept whole for
 everybody else — and *nothing decides which part of it mattered*, because that
 is the tool designer's judgement and not the harness's.  So the whole of it is
 stored **as one file**, and the conversation carries a fixed head of it within
-the budget.  The row is its address and nothing more: it has no body, because
-the text is already on disk and a second copy in SQLite would be the same bytes
-twice.  What that does not make it is a document: the address a
+the budget.  The row is its address and nothing more: it holds no copy of the
+text, because the text is already on disk and a second copy in SQLite would be
+the same bytes twice.  What that does not make it is a document: the address a
 model has for it is the `[DUMP:{…}]` marker in the transcript, which names the
 call id `dump_read` and `dump_grep` take, and ranking machine output against a
 person's notes is the dilution SDD §8.3 warns about.  So the row is written by
@@ -128,15 +128,15 @@ import threading
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import sqlite_vec
 
 from slife2.helpers.clock import now
-from slife2.helpers.timeutil import normalize_bound
+from slife2.helpers.fs import confined
 from slife2.libs.host.paths import home, work_dir
+from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
@@ -148,12 +148,11 @@ from slife2.libs.store.index import (
     as_similarity,
     checked_vectors,
     clear_vectors,
-    connect_to,
+    connection_to,
     embed_chunks,
     filter_clause,
     fuse_shortlist,
     index_meta,
-    instant_bound,
     meanings_by_cosine,
     page_limit,
     place_vectors,
@@ -162,7 +161,9 @@ from slife2.libs.store.index import (
     set_index_meta,
     storable,
     table_exists,
+    time_window,
     vector_identity,
+    vector_table_gone,
     where_clause,
 )
 
@@ -204,11 +205,19 @@ INDEX_NAME = ".index.db"
 #: — `agents/jack/files/files/images/a.png` — read as nothing at all.
 CABINET_DIR = "cabinet"
 
+#: Where a stored image's bytes live, inside the cabinet.  **The `image` kind's
+#: directory, and not a `Spec.mirror`**: an image's bytes *are* the document, so
+#: it has no markdown mirror (`SPECS[IMAGE].mirror` is empty) — but the directory
+#: is still the cabinet's own, and a saved file filed under it would be
+#: indistinguishable from a picture a turn's `[Image:…]` reference points at.
+#: Spelled once here so the collision guard and `image_save` agree about it.
+PICTURES_DIR = "pictures"
+
 #: Bump when the **vectorized kinds** or what their vectors are built from
 #: change.  It rides in the vector identity, so an index built under the old
 #: rules is dropped and rebuilt rather than ranked against the new one: only the
 #: agent-written documents (note, diary, report) are vectors now, and their
-#: text is their file's whole body.
+#: text is the whole of their file.
 VECTOR_RULES_VERSION = "agent-written-v1"
 
 # `SYNC_BATCH` is `slife2.libs.store.index`'s, imported above.  The bound it puts
@@ -241,7 +250,7 @@ class Spec:
     day: bool
     #: The document file's directory, or `""` for the kind whose bytes *are*
     #: the file.  For every mirrored kind — note, diary, report, dump — the file
-    #: is the text and the row holds no body.  A saved file is not mirrored: the
+    #: is the text and the row holds no copy of it.  A saved file is not mirrored: the
     #: cabinet keeps the bytes, and a second copy of them as text would be a
     #: copy of something that is not text.
     mirror: str
@@ -275,7 +284,7 @@ SPECS: dict[str, Spec] = {
         time="created_at", day=False, mirror="", searchable=True, vectorized=False
     ),
     # A report's axis is when it was first written: an update replaces its
-    # body, and the moment the report arrived is the one that does not move.
+    # text, and the moment the report arrived is the one that does not move.
     REPORT: Spec(
         time="created_at", day=False, mirror="reports", searchable=True, vectorized=True
     ),
@@ -287,7 +296,7 @@ SPECS: dict[str, Spec] = {
     #
     # **The mirror is the document.**  Unlike a note, where the row is what a
     # search reads and the mirror is for a person, a dump's text lives only in
-    # its file: the row holds no body, so a gigabyte of output is not stored
+    # its file: the row holds no copy, so a gigabyte of output is not stored
     # twice.  The mirror is written in the same call as the row and is the
     # address `dump_read`/`dump_grep` stream.
     #
@@ -351,10 +360,10 @@ UPSERT = "upsert"
 def cabinet_dir(agent: str, subagent: str = "") -> Path:
     """One conversation's cabinet: `work_dir(agent, subagent)/cabinet/`.
 
-    **Per conversation, with forks sharing their maker's.**  A non-fork subagent
-    owns its cabinet (`agents/<agent>/subagents/<name>/cabinet/`); a fork is a
-    temporary copy of its maker's conversation and uses the maker's cabinet.  A
-    diary is one person's, and the conversation id is what says whose.
+    **Per conversation.**  A subagent owns its cabinet
+    (`agents/<agent>/subagents/<name>/cabinet/`), and the agent's own
+    conversation has `agents/<agent>/cabinet/`.  A diary is one person's, and
+    the conversation id is what says whose.
 
     The name is sanitised by `safe_agent_name` for the reason that function
     gives: an agent name comes from a command line, and `jack` becoming a
@@ -384,14 +393,17 @@ def index_path(agent: str, subagent: str = "") -> Path:
 # of the view arm it came from.
 
 
-def search_text(row: Mapping[str, Any]) -> str:
+def search_text(row: Mapping[str, Any], text: str) -> str:
     """The text a document is **found** by — what the keyword leg indexes.
 
     Everything the row knows that is words: its title, its key, the paths
-    associated with it, its body, its tags and a model's summary.  The paths are
+    associated with it, its text, its tags and a model's summary.  The paths are
     in because a cabinet is where a *path* is the thing somebody remembers —
-    "that paper I saved under reference" reaches a row whose body is empty
+    "that paper I saved under reference" reaches a row whose text is empty
     (`slife2.libs.store.db.searchable_text` makes the same choice for a turn's tool calls).
+
+    **The text is the caller's**, because the row holds none: a write passes
+    what it was given, and an index pass reads the file first (`_index_text`).
 
     Normalized here rather than at the index, exactly as `searchable_text` is
     and for the reason it states: a query is normalized by the same rule, and
@@ -402,19 +414,19 @@ def search_text(row: Mapping[str, Any]) -> str:
         str(row.get("key") or ""),
         str(row.get("source") or ""),
         str(row.get("file_path") or ""),
-        str(row.get("body") or ""),
+        str(text or ""),
         str(row.get("tags") or ""),
         str(row.get("summary") or ""),
     ]
     return storable(textindex.normalize("\n".join(part for part in parts if part)))
 
 
-def vector_text(row: Mapping[str, Any]) -> str:
+def vector_text(text: str) -> str:
     """The text a document is a vector of: the whole text of an agent-written one.
 
     **Only a note, a day and a report are vectorized.**  Their text is the
     document the agent wrote, and it lives in the file the row points at; the
-    caller loads it before asking (`CabinetStore._with_body`).
+    caller reads the file first (`CabinetStore._index_text`).
 
     **A saved file is not vectorized.**  It is found by its words — title, path
     and a summary — through the keyword leg; its bytes are not a text this
@@ -427,7 +439,7 @@ def vector_text(row: Mapping[str, Any]) -> str:
     to file a document under, and a vector built from one describes the filing
     rather than the document.
     """
-    return storable(str(row.get("body") or ""))
+    return storable(text)
 
 
 # ── Slugs and mirrors ───────────────────────────────────────────────────────
@@ -530,9 +542,10 @@ def mirror_path(spec: Spec, key: str) -> str:
 
 #: One mirror is written at a time.  **Not for the temp name** — that is
 #: unique per write — but for the destination: on Windows two threads replacing
-#: onto one path at the same moment can make the second `os.replace` fail after
-#: its row has already committed, which reports a failed write for a document
-#: that was stored.  The writes are small, and the cabinet is one process.
+#: onto one path at the same moment can make one `os.replace` fail.  A write
+#: that fails there now rolls its row back with it, but a caller that did
+#: nothing wrong would still be reporting a race it could not see.  The writes
+#: are small, and the cabinet is one process.
 _MIRROR_LOCK = threading.Lock()
 
 
@@ -541,7 +554,9 @@ def _write_mirror(root: Path, relative: str, text: str) -> None:
 
     **The mirror is the document**, for every mirrored kind: the row holds the
     metadata and the address, and this file is the one copy of the text.  A
-    temp file and `os.replace`, so a reader never sees half a document.
+    temp file and `os.replace`, so a reader never sees half a document — and
+    the staged temp is what lets `CabinetStore.write` put the file in place
+    before its row's transaction commits.
     """
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -577,8 +592,8 @@ def resolve(root: Path, relative: str) -> Path:
     Raises:
         ValueError: If the path leaves the cabinet.
     """
-    candidate = (root / relative).resolve()
-    if candidate != root.resolve() and root.resolve() not in candidate.parents:
+    candidate = confined(root, relative)
+    if candidate is None:
         raise ValueError(f"{relative!r} is not inside the cabinet")
     return candidate
 
@@ -631,7 +646,7 @@ _SCHEMA = f"""
 -- what the row is, `key` is what a read and a remove tool take, and the columns
 -- the kinds do not use are empty rather than absent.
 --
--- **There is no body column.**  A mirrored kind's text is its file; a saved
+-- **The row holds no copy of the text.**  A mirrored kind's text is its file; a saved
 -- file's bytes are its file; the row is the address and the metadata.  A
 -- document is one copy, not a file plus a database copy.
 --
@@ -744,23 +759,10 @@ class CabinetStore:
 
     @contextlib.contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        """One connection for this call, and **it is closed on the way out**.
-
-        `with sqlite3.connect(...)` is a transaction, not a lifetime: it commits
-        and leaves the connection open.  On Windows an open handle is a file
-        nobody else can delete, and a connection per call with none closed is a
-        descriptor leak on every other platform.  The turn store and the
-        catalogue state the same rule; this is the third store.
-
-        What the caller's `with` gets is the commit (`with connection:`); the
-        `finally` is the close.
-        """
-        connection = connect_to(self.path)
-        try:
-            with connection:
-                yield connection
-        finally:
-            connection.close()
+        """One connection for this call — `connection_to`'s lifetime, the same
+        rule the turn store and the catalogue keep."""
+        with connection_to(self.path) as connection:
+            yield connection
 
     # ── Bringing the index up to date ────────────────────────────────────
 
@@ -887,7 +889,7 @@ class CabinetStore:
         is the identity it was written with.
 
         **A document with nothing to embed is not one of these.**  `vector_text`
-        is empty for a note whose body is empty — a document whose whole text is
+        is empty for a note whose text is empty — a document whose whole text is
         an empty string is one the keyword leg still finds — and no model can be
         asked for a vector of nothing.  Counted here it would be a problem no
         sync could ever clear — and because the plugin refuses to serve an index
@@ -908,7 +910,7 @@ class CabinetStore:
                 VECTOR_KINDS,
             ).fetchall()
         return [
-            int(row["id"]) for row in rows if vector_text(self._with_body(row)).strip()
+            int(row["id"]) for row in rows if vector_text(self._index_text(row)).strip()
         ]
 
     async def embed_missing(
@@ -945,15 +947,14 @@ class CabinetStore:
         if not rows:
             return 0, 0
         done = 0
-        for row in rows:
-            one = dict(row)
-            vectors = await self.vectors(one, embedder)
-            await asyncio.to_thread(self._place_one, int(one["id"]), vectors)
+        for row, text in rows:
+            vectors = await self.vectors(text, embedder)
+            await asyncio.to_thread(self._place_one, int(row["id"]), vectors)
             done += 1
         remaining = await asyncio.to_thread(self._unembedded_count)
         return remaining, done
 
-    def _unembedded(self, limit: int) -> list[dict[str, Any]]:
+    def _unembedded(self, limit: int) -> list[tuple[dict[str, Any], str]]:
         """One batch of vectorized documents the pass has not tried yet.
 
         The selection `embed_missing` walks, blocking and therefore on a worker
@@ -961,7 +962,8 @@ class CabinetStore:
         question that never ends — see that method for why.  The kind filter is
         the vectorized set: a saved file, a dump and an image have no vector, so
         they must not come back for ever as documents this pass still has to
-        try.  Each row carries its text loaded from its file.
+        try.  Each pair is the row and its text, read from its file here on the
+        worker thread rather than on the loop.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -972,7 +974,7 @@ class CabinetStore:
                 " ORDER BY id LIMIT ?",
                 (*VECTOR_KINDS, limit),
             ).fetchall()
-        return [self._with_body(row) for row in rows]
+        return [(dict(row), self._index_text(row)) for row in rows]
 
     def _unembedded_count(self) -> int:
         """How many vectorized documents are still to try, read after the batch.
@@ -1015,15 +1017,18 @@ class CabinetStore:
                 f" WHERE kind IN ({_marks(DOCUMENT_KINDS)})",
                 DOCUMENT_KINDS,
             ).fetchall()
+            entries = []
+            for row in rows:
+                found = dict(row)
+                entries.append(
+                    (int(found["id"]), search_text(found, self._index_text(found)))
+                )
             connection.executemany(
-                "INSERT INTO cabinet_fts (rowid, search) VALUES (?, ?)",
-                [(int(row["id"]), search_text(self._with_body(row))) for row in rows],
+                "INSERT INTO cabinet_fts (rowid, search) VALUES (?, ?)", entries
             )
             set_index_meta(connection, text_version=textindex.RULES_VERSION)
 
-    async def vectors(
-        self, row: Mapping[str, Any], embedder: Embedder
-    ) -> list[list[float]]:
+    async def vectors(self, text: str, embedder: Embedder) -> list[list[float]]:
         """One document's vectors, out of the model — **before anything is written**.
 
         The order is the contract: `write` calls this first, so a save that
@@ -1045,8 +1050,10 @@ class CabinetStore:
         ready.  `checked_vectors` is the check
         and the sentence; the corpus noun and what is lost are this caller's.
         """
-        text = vector_text(row)
-        pieces = embed_chunks(text, limit=embedder.max_chars) if text.strip() else []
+        indexed = vector_text(text)
+        pieces = (
+            embed_chunks(indexed, limit=embedder.max_chars) if indexed.strip() else []
+        )
         if not pieces:
             return []
         return await checked_vectors(
@@ -1136,7 +1143,7 @@ class CabinetStore:
         key: str,
         *,
         mode: str = CREATE,
-        body: str = "",
+        text: str = "",
         title: str = "",
         tags: str = "",
         source: str = "",
@@ -1146,7 +1153,7 @@ class CabinetStore:
         summary: str = "",
         period_start: str = "",
         period_end: str = "",
-        embedder: Embedder,
+        embedder: Embedder | None = None,
     ) -> dict[str, Any] | None:
         """Write one row, its file and — for an agent-written kind — its vector.
 
@@ -1154,7 +1161,7 @@ class CabinetStore:
         document's write: an existing key is refused, and `None` is the answer
         rather than a row, so nothing is overwritten and nothing is embedded.
         `REPLACE` is a document's update: a missing key is `None`, and an
-        existing one is overwritten whole — body, tags and a report's period are
+        existing one is overwritten whole — text, tags and a report's period are
         what the caller passed, including the empty ones, because a replacement
         is not a patch.  `UPSERT` is the harness's: a dump and an image are
         keyed by an identity the turn already carries, so a second write under
@@ -1162,7 +1169,7 @@ class CabinetStore:
 
         **The text lives in the file, not in the row.**  Every mirrored kind —
         note, diary, report, dump — writes the text it was given to `mirror`,
-        exactly; **there is no body column**, so a document is one copy on disk
+        exactly; **the row keeps no copy**, so a document is one copy on disk
         rather than two.  The row is the address and the metadata, and a title
         is the row's: it is never prepended to the file.  (A saved file's bytes
         are already on disk; an image's are too.)
@@ -1170,21 +1177,29 @@ class CabinetStore:
         **An agent-written document embeds before anything is written.**  The
         model is asked first (`vectors`), and only then does one transaction
         write the row, its keyword text and its vectors — so a write that
-        cannot embed raises having stored nothing, which is what the plugin's
-        `file_save` relies on when it takes back the bytes it copied.  A saved
-        file is in the keyword corpus but has no vector; a dump and an image are
-        in neither, because the turn's marker is their address.
+        cannot embed raises having stored nothing, which is what a vectorized
+        kind's caller relies on.  A saved file is in the keyword corpus but has
+        no vector (it passes no embedder, so nothing can fail there); a dump and
+        an image are in neither, because the turn's marker is their address.
+        **The
+        `embedder` is therefore the vectorized kinds' argument**: a caller that
+        writes one of the other three passes none, and this method opens no
+        embedding connection for it.
         """
         if mode not in (CREATE, REPLACE, UPSERT):
             raise ValueError(f"mode must be one of: {CREATE}, {REPLACE}, {UPSERT}")
-        # **The body is normalised before anything is written.**  A lone
+        # **The text is normalised before anything is written.**  A lone
         # surrogate arrives from the same model answer the turn store handles,
-        # and the mirror is written *after* the row's transaction: a body the
-        # file could not encode failed there — a call reporting failure over a
-        # row, index and vector already committed, so every retry answered
-        # "already a note" and an update left the old text beside the new row.
-        # `storable` makes the row's derived text and the file one text.
-        body = storable(body)
+        # and neither copy can hold it: the file refuses to encode it, and the
+        # index's text and the file would not be the one text.  `storable` is
+        # what makes the mirror and the keyword text agree, and what lets a
+        # text the turn store stores be stored here.
+        text = storable(text)
+        # **The key is normalised too.**  A lone surrogate in a subject is the
+        # same input class the text's comment names; binding the raw key raised
+        # `UnicodeEncodeError` out of the SELECT, and the mirror stem's UTF-8
+        # encode raised the same way.
+        key = storable(key)
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
@@ -1199,11 +1214,6 @@ class CabinetStore:
         if mode == REPLACE and existing is None:
             return None
         row: dict[str, Any] = dict(existing) if existing is not None else {}
-        # **There is no body column.**  A mirrored document's text lives only in
-        # its file, a saved file's bytes are already on disk, and the row is the
-        # address and the metadata — so SQLite never holds a second copy of the
-        # text.  The mirror is written from the argument.
-        row.pop("body", None)
         if mode == REPLACE:
             # **A replacement is the document the caller describes**, so the
             # fields it owns are the caller's — an empty tag is a tag cleared,
@@ -1238,28 +1248,34 @@ class CabinetStore:
             row["mirror"] = mirror_path(spec, key)
         # **An agent-written document is embedded before anything is written**,
         # so a write that cannot embed has written nothing — see `vectors`.  The
-        # index views the row as it will be, with the body the row does not
-        # keep: the keyword text and the vector are derived from the file's
-        # text, and they are written in the same transaction as the row.
-        index_row = {**row, "body": body}
-        vectors = await self.vectors(index_row, embedder) if spec.vectorized else []
+        # keyword text and the vector are derived from the same argument the
+        # mirror is written from, and they are written in the same transaction
+        # as the row.
+        vectors: list[list[float]] = []
+        if spec.vectorized:
+            if embedder is None:
+                raise ValueError(f"a {kind} write is vectorized and needs an embedder")
+            vectors = await self.vectors(text, embedder)
         with self._connect() as connection:
             placed = self._store(connection, row, mode)
             if placed is None:
                 return None
             row["id"] = placed
-            index_row["id"] = placed
             if spec.searchable:
-                self._index(connection, index_row)
+                self._index(connection, row, text)
             if spec.vectorized:
                 self.place(connection, placed, vectors)
-        if spec.mirror:
-            # Last, because a file cannot be inside the database's transaction.
-            # The row is written first; a mirror that fails leaves an address
-            # with no text, and the next write of the same key writes it.  (A
-            # file written before the row would leave a document nothing can
-            # find, which is the worse of the two failures.)
-            _write_mirror(self.root, str(row["mirror"]), body)
+            if spec.mirror:
+                # **The file is in place before the row's transaction commits.**
+                # A file cannot be committed with the database, so one of the
+                # two orders is a window; this is the one whose failure can be
+                # undone.  A mirror the filesystem refuses — an editor holding
+                # it open on Windows — raises here and takes the row, its
+                # keyword text and its vectors back with it, so a create can be
+                # retried and an update leaves the old document whole.  The
+                # other order left the row committed over a file that was
+                # absent or the old one, which nothing afterwards could repair.
+                _write_mirror(self.root, str(row["mirror"]), text)
         return self._with_path(row)
 
     def _store(
@@ -1276,6 +1292,14 @@ class CabinetStore:
         resurrected.  The harness's upsert is `INSERT … ON CONFLICT … DO
         UPDATE`, which leaves `created_at` alone: the output of one call may be
         written twice, but it arrived once.
+
+        **A replacement's id is read back from the row it updated**, not taken
+        from the snapshot the caller read before its embedding await.  A
+        remove-and-create of the same key in that window replaces the row with a
+        new rowid, and the old id would then carry the keyword text and the
+        chunks — an updated document invisible to both search legs, because no
+        live row has that id.  The `UPDATE` and the read run in one transaction,
+        so the id is the row this write actually hit.
         """
         columns = (
             "kind",
@@ -1305,7 +1329,13 @@ class CabinetStore:
                 " WHERE kind = ? AND key = ?",
                 (*values, row.get("kind"), row.get("key")),
             )
-            return int(row["id"]) if placed.rowcount else None
+            if not placed.rowcount:
+                return None
+            found = connection.execute(
+                "SELECT id FROM cabinet_doc WHERE kind = ? AND key = ?",
+                (row.get("kind"), row.get("key")),
+            ).fetchone()
+            return int(found["id"])
         insert = (
             f"INSERT INTO cabinet_doc ({', '.join(columns)})"
             f" VALUES ({', '.join('?' * len(columns))})"
@@ -1338,7 +1368,9 @@ class CabinetStore:
             return None
         return _rowid(placed, what=f"the {row.get('kind')} {row.get('key')!r}")
 
-    def _index(self, connection: sqlite3.Connection, row: Mapping[str, Any]) -> None:
+    def _index(
+        self, connection: sqlite3.Connection, row: Mapping[str, Any], text: str
+    ) -> None:
         """Write the row's keyword text, replacing what was there.
 
         In the same transaction as the row, which is what makes the two
@@ -1347,7 +1379,7 @@ class CabinetStore:
         connection.execute("DELETE FROM cabinet_fts WHERE rowid = ?", (int(row["id"]),))
         connection.execute(
             "INSERT INTO cabinet_fts (rowid, search) VALUES (?, ?)",
-            (int(row["id"]), search_text(row)),
+            (int(row["id"]), search_text(row, text)),
         )
 
     async def remove(self, kind: str, key: str) -> dict[str, Any] | None:
@@ -1362,6 +1394,7 @@ class CabinetStore:
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
+        key = storable(key)
         with self._connect() as connection:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
@@ -1376,10 +1409,15 @@ class CabinetStore:
             connection.execute(
                 "DELETE FROM cabinet_doc WHERE id = ?", (int(row["id"]),)
             )
-        if mirror := str(row.get("mirror") or ""):
-            (self.root / mirror).unlink(missing_ok=True)
-        if kind in (FILE, IMAGE) and (saved := str(row.get("file_path") or "")):
-            discard_file(self.root / saved)
+            # **The file goes inside the transaction, before the commit.**  The
+            # stem is a function of the key, so a concurrent re-create of the same
+            # key lands on the same file — unlinking after the commit deleted the
+            # live successor's file, the worse evil.  Here a refused unlink rolls
+            # the whole remove back and the document stays whole (`_unlink_document`).
+            if mirror := str(row.get("mirror") or ""):
+                _unlink_document(self.root / mirror)
+            if kind in (FILE, IMAGE) and (saved := str(row.get("file_path") or "")):
+                _unlink_document(self.root / saved)
         return row
 
     async def annotate(
@@ -1393,7 +1431,7 @@ class CabinetStore:
         """`cabinet_summarize`: a model's description of a corpus document.
 
         **The summary changes the keyword text and no vector.**  A vectorized
-        document's vector is its body (`vector_text`), and a summary is not
+        document's vector is its text (`vector_text`), and a summary is not
         part of it; a saved file has no vector at all, so its summary is found
         by the keyword leg only.  Nothing here re-embeds, which is also why
         there is no `embedder` argument.
@@ -1407,55 +1445,92 @@ class CabinetStore:
             raise ValueError(_KIND_HINT)
         if not spec.searchable:
             raise ValueError(CORPUS_KIND_HINT)
+        key = storable(key)
         with self._connect() as connection:
+            # **The read is inside the write lock, and the write uses what it
+            # read.**  The row and its file were read on one connection and the
+            # summary written on another, so a `note_update` committing a new
+            # text and keyword text in between was overwritten by the older
+            # text, and a `remove` left the UPDATE hitting no row while
+            # `_index` inserted an orphan entry the tool then called success.
+            # `BEGIN IMMEDIATE` takes the lock before the read — a deferred
+            # transaction would open at the UPDATE and leave the same window —
+            # so the row and its text are read as they will be written, and a
+            # document that is gone answers `None` rather than a phantom.
+            connection.execute("BEGIN IMMEDIATE")
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
-        if found is None:
-            return None
-        row = self._with_body(dict(found))
-        row["summary"] = summary or row.get("summary") or ""
-        row["tags"] = tags or row.get("tags") or ""
-        row["updated_at"] = now()
-        with self._connect() as connection:
+            if found is None:
+                return None
+            row = dict(found)
+            row["summary"] = summary or row.get("summary") or ""
+            row["tags"] = tags or row.get("tags") or ""
+            # **`updated_at` is the document's own time, not the annotation's.**
+            # Notes report and sort by it ("when it was last written"), so
+            # describing one re-dated it — a `cabinet_summarize` moved an old note
+            # above a newer one in `note_list` and changed the `time` the model
+            # reads.  The summary and tags are found by the keyword index, which
+            # is rewritten below; the time axis is not theirs.
             connection.execute(
-                "UPDATE cabinet_doc SET summary = ?, tags = ?, updated_at = ? WHERE id = ?",
+                "UPDATE cabinet_doc SET summary = ?, tags = ? WHERE id = ?",
                 (
                     storable(str(row["summary"])),
                     storable(str(row["tags"])),
-                    row["updated_at"],
                     int(row["id"]),
                 ),
             )
-            self._index(connection, row)
+            self._index(connection, row, self._index_text(row))
         return self._with_path(row)
 
     # ── Reading ─────────────────────────────────────────────────────────
 
     def get(self, kind: str, key: str) -> dict[str, Any] | None:
         """One document by its kind and key, or `None`."""
+        key = storable(key)
         with self._connect() as connection:
             found = connection.execute(
                 "SELECT * FROM cabinet_doc WHERE kind = ? AND key = ?", (kind, key)
             ).fetchone()
         return self._with_path(found) if found is not None else None
 
-    def body_of(self, row: Mapping[str, Any]) -> str:
+    def text_of(self, row: Mapping[str, Any]) -> str:
         """One document's text: its file.
 
-        The row has no body column.  A missing file raises: a document whose
-        text is gone is not one with an empty text.
+        The row holds no text.  A missing file raises: a document whose text is
+        gone is not one with an empty text.
         """
         mirror = str(row.get("mirror") or "")
         if not mirror:
             return ""
         return (self.root / mirror).read_bytes().decode("utf-8")
 
-    def _with_body(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A row with `body` filled in, for the index passes."""
+    def _index_text(self, row: Mapping[str, Any] | sqlite3.Row) -> str:
+        """One document's text, read for an index pass.
+
+        **A missing mirror is one damaged document, not a dead cabinet.**
+        `text_of` raises for the readers, which is right — a document whose text
+        is gone is not an empty one.  But this is the *index* path, and it runs
+        over the whole corpus when a cabinet is opened: one file a person
+        deleted or renamed used to raise out of `sync`, so every cabinet tool for
+        that agent failed with a raw `FileNotFoundError`, and the pass stopped
+        before indexing anything after it.  The index reads the document as
+        having no text (its row and metadata are still indexed), the warning
+        names the row, and `document_text` still refuses the file by name where
+        a person can act on it.
+        """
         found = dict(row)
-        found["body"] = self.body_of(found)
-        return found
+        try:
+            return self.text_of(found)
+        except (OSError, UnicodeError) as exc:
+            logger.warning(
+                "cabinet %s: %s %r has no readable file: %s",
+                self.path,
+                found.get("kind"),
+                found.get("key"),
+                exc,
+            )
+            return ""
 
     def _with_path(self, row: Mapping[str, Any] | sqlite3.Row) -> dict[str, Any]:
         """A row with `path` filled in: where the agent's own tools can open it.
@@ -1469,27 +1544,27 @@ class CabinetStore:
         found["path"] = document_path(self.root, found)
         return found
 
-    def _with_excerpt(self, row: Mapping[str, Any]) -> dict[str, Any]:
-        """A row with enough of its text for the line a chooser prints.
+    def _excerpt_text(self, row: Mapping[str, Any] | sqlite3.Row) -> str:
+        """Enough of one document's text for the line a chooser prints.
 
         A listing or a search shows a summary or the first `EXCERPT_CHARS` of
-        the body; reading a whole document for that would be the read tool's
+        the text; reading a whole document for that would be the read tool's
         job, not a picker's.  Four bytes per character is the UTF-8 ceiling, so
-        this head is enough for every script.
+        this head is enough for every script.  A row with a summary needs no
+        head at all, because the summary is what the line shows.
         """
         found = dict(row)
         if found.get("summary"):
-            return found
+            return ""
         mirror = str(found.get("mirror") or "")
         if not mirror:
-            return found
+            return ""
         try:
             with (self.root / mirror).open("rb") as handle:
                 head = handle.read((EXCERPT_CHARS + 1) * 4)
         except OSError:
-            return found
-        found["body"] = head.decode("utf-8", "ignore")
-        return found
+            return ""
+        return head.decode("utf-8", "ignore")
 
     def listing(
         self,
@@ -1517,7 +1592,7 @@ class CabinetStore:
         spec = SPECS.get(kind)
         if spec is None:
             raise ValueError(_KIND_HINT)
-        clauses, values = self._window(spec.time, spec.day, since, until)
+        clauses, values = time_window(since, until, axis=spec.time, day=spec.day)
         if category:
             # **Escaped, or the filter is not the query it says it is.**  A
             # category is a folder name and `LIKE` reads two of the characters a
@@ -1528,7 +1603,12 @@ class CabinetStore:
             clauses.append(r"file_path LIKE ? ESCAPE '\'")
             values.append(f"{_like_literal(category)}/%")
         where = filter_clause(["kind = ?", *clauses])
-        limit = page_limit(limit, MAX_PAGE)
+        # **One window for every listing.**  A page start is bound to SQLite,
+        # and it holds a signed 64-bit integer: a model can write more digits
+        # than that, and the bind raises `OverflowError` out of a call that
+        # means "past the end".  `page_window` floors, caps and states the
+        # rule once; this store had a hand copy of it.
+        limit, start = page_window(limit, offset, unset=1, cap=MAX_PAGE)
         with self._connect() as connection:
             # **One read snapshot for the count and the page**, because two
             # autocommit statements let a write between them put a row on the
@@ -1545,71 +1625,17 @@ class CabinetStore:
             rows = connection.execute(
                 f"SELECT * FROM cabinet_doc {where}"
                 f" ORDER BY {order} DESC, id DESC LIMIT ? OFFSET ?",
-                (kind, *values, limit, max(0, offset)),
+                (kind, *values, limit, start),
             ).fetchall()
         return {
             "total": total,
             "limit": limit,
-            "offset": max(0, offset),
+            "offset": start,
             "entries": [
-                choice_row(self._with_excerpt(self._with_path(row))) for row in rows
+                choice_row(self._with_path(row), self._excerpt_text(row))
+                for row in rows
             ],
         }
-
-    def _window(
-        self, axis: str, day: bool, since: str | None, until: str | None
-    ) -> tuple[list[str], list[Any]]:
-        """A since/until window on **one kind's** time axis.
-
-        `axis` is the column and `day` whether it holds days rather than
-        instants; a browse that names no kind passes the `updated_at` axis the
-        corpus kinds share, so this takes the axis rather than the whole spec —
-        the rest of a spec is not a window's business.
-
-        Not `slife2.libs.store.index.time_window`, which is spelled for a `created_at` column
-        because both of its callers have one; a cabinet's kinds use their own
-        axes.  The bound grammar is
-        the shared one (`slife2.helpers.timeutil`), so a model writes `yesterday` here
-        as it does anywhere else.
-
-        A **day** axis takes the day part of the bound, and its `until` is
-        exclusive because that is the only comparison a column of days has:
-        `2026-10-07` becomes `2026-10-08`, so the day named is the last one in.
-        **A bound that carries a time has to be put past its day here**, because
-        `normalize_bound` only advances a *date-only* `until` — that advance is
-        written for a column holding a moment, where the bound is compared with
-        `<=` and means the instant.  Left unadvanced, `until=2026-10-07T12:00:00`
-        would cut `< '2026-10-07'` and drop the very day it names: the same day
-        written two ways, two different answers, and a window whose two bounds
-        are the same moment returning nothing at all.
-        """
-        clauses: list[str] = []
-        values: list[Any] = []
-        if since:
-            bound = normalize_bound(since, role="since")
-            if day:
-                clauses.append(f"{axis} >= ?")
-                values.append(bound[:10])
-            else:
-                # By instant, not by offset string — see `time_window`.
-                clauses.append(f"julianday({axis}) >= julianday(?)")
-                values.append(instant_bound(bound))
-        if until:
-            bound = normalize_bound(until, role="until")
-            if day:
-                last = date.fromisoformat(bound[:10])
-                bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
-                clauses.append(f"{axis} < ?")
-                values.append(bound)
-            else:
-                # A date-only bound was advanced to the next midnight; like the
-                # day axis above, that instant is the first one *outside* the
-                # day named, so the comparison is exclusive.  A datetime names
-                # an instant and stays inclusive (`time_window` states it too).
-                comparison = "<" if len(bound) == 10 else "<="
-                clauses.append(f"julianday({axis}) {comparison} julianday(?)")
-                values.append(instant_bound(bound))
-        return clauses, values
 
     # ── Searching ───────────────────────────────────────────────────────
 
@@ -1683,36 +1709,62 @@ class CabinetStore:
             axis, day = (
                 (SPECS[kind].time, SPECS[kind].day) if kind else ("updated_at", False)
             )
-            window, bounds = self._window(axis, day, since, until)
+            window, bounds = time_window(since, until, axis=axis, day=day)
             clauses.extend(window)
             values.extend(bounds)
         where = filter_clause(clauses)
 
         if not keywords and not any(sentence.strip() for sentence in sentences):
+            # **The order is the axis the row's `time` reports.**  A kind-
+            # filtered browse ordered by `updated_at` while each row's `time` is
+            # that kind's own axis, so a diary page could show 2020 above 2030
+            # and disagree with `diary_list` about the same documents.  With no
+            # kind there is no shared axis but the document's timestamp, and
+            # that is what the window uses too.
+            if kind:
+                order = (
+                    f"d.{SPECS[kind].time}"
+                    if SPECS[kind].day
+                    else f"julianday(d.{SPECS[kind].time})"
+                )
+            else:
+                order = "julianday(d.updated_at)"
             with self._connect() as connection:
                 rows = connection.execute(
                     f"SELECT d.* FROM cabinet_doc d {where}"
-                    f" ORDER BY julianday(d.updated_at) DESC, d.id DESC LIMIT ?",
+                    f" ORDER BY {order} DESC, d.id DESC LIMIT ?",
                     (*values, limit),
                 ).fetchall()
             return {
                 "results": [
-                    _found(self._with_excerpt(self._with_path(row))) for row in rows
+                    _found(self._with_path(row), self._excerpt_text(row))
+                    for row in rows
                 ],
                 "browsed": True,
             }
 
-        # **The words are a sentence when they are all there is.**  The keyword
-        # leg asks for every word at once, so a word form the text does not
-        # carry finds nothing; the meaning leg reads the same joined words.
-        # `ToolStore.search` measured the difference (23/36 to 34-36).
-        if keywords and not any(sentence.strip() for sentence in sentences):
+        # **The words are a sentence when they are all there is**, but a keyword
+        # list with no term in it is no keyword leg.  The two are different
+        # inputs to the two searches, and reading the first as the second would
+        # make `keywords=[""]` beside a real sentence throw away the sentence
+        # (`textindex.EmptyQuery` out of `match_expression`), which is exactly
+        # what the turn store refuses to do.  With no sentence beside it there
+        # is nothing to search with at all, and the refusal is the answer.
+        expression = ""
+        if keywords:
+            try:
+                expression = textindex.match_expression(list(keywords))
+            except textindex.EmptyQuery:
+                if not any(sentence.strip() for sentence in sentences):
+                    raise
+        if expression and not any(sentence.strip() for sentence in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
         over = limit * _OVERFETCH
-        expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits = (
-            self._keyword_hits(expression, over, clauses, values) if keywords else None
+            self._keyword_hits(expression, over, clauses, values)
+            if expression
+            else None
         )
 
         # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,
@@ -1728,7 +1780,8 @@ class CabinetStore:
         return {
             "results": [
                 _found(
-                    self._with_excerpt(self._with_path(row)),
+                    self._with_path(row),
+                    self._excerpt_text(row),
                     meaning.get(int(row["id"])),
                     matched_in=(
                         None
@@ -1809,6 +1862,16 @@ class CabinetStore:
         # width this build cannot read, a corrupt file all coming back as
         # "nothing matched by meaning", and the page then answering keyword-only
         # without saying so.
+        #
+        # **A recorded index whose table is gone is the same confident negative,
+        # and it is damage.**  The identity and the table are written together,
+        # so the pair disagreeing means the table went outside a rebuild; the
+        # search refuses rather than answering keyword-only.
+        if vector_table_gone(connection, vec_table="cabinet_vec"):
+            raise RuntimeError(
+                f"{self.path}: the cabinet records a vector index but its table "
+                "is gone; restart to rebuild the index"
+            )
         if not table_exists(connection, "cabinet_vec"):
             return []
         rows = connection.execute(
@@ -1849,7 +1912,14 @@ class CabinetStore:
         with self._connect() as connection:
             # The table is absent on a cabinet nobody has written to under this
             # embedder, which is an empty answer rather than a failure — the
-            # same question `_nearest` asks and for the reason it gives.
+            # same question `_nearest` asks and for the reason it gives.  A
+            # recorded index whose table is gone is the damage `_nearest`
+            # refuses, and this read must not smooth it over.
+            if vector_table_gone(connection, vec_table="cabinet_vec"):
+                raise RuntimeError(
+                    f"{self.path}: the cabinet records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
             if not table_exists(connection, "cabinet_vec"):
                 return {}
             rows = connection.execute(
@@ -1934,7 +2004,7 @@ class CabinetStore:
                     (
                         int(row["id"]),
                         textindex.normalize(
-                            line_text(self._with_excerpt(self._with_path(row)))
+                            line_text(self._with_path(row), self._excerpt_text(row))
                         ),
                     )
                     for row in rows
@@ -1948,39 +2018,39 @@ class CabinetStore:
             }
 
 
-#: How much of a body a chooser shows when a row has no summary.  A chooser is a
-#: picker rather than a reader — the whole document is what
+#: How much of a document a chooser shows when a row has no summary.  A chooser
+#: is a picker rather than a reader — the whole document is what
 #: `note_read`/`diary_read`/`file_read` are for — and the one text it slices is
 #: `choice_row`'s `excerpt`, which is the whole of what a listing and a search
 #: print of a row.
 EXCERPT_CHARS = 120
 
 
-def line_excerpt(row: Mapping[str, Any]) -> str:
-    """What a chooser row shows *under* one row's key: its summary, or its body's head.
+def line_excerpt(row: Mapping[str, Any], text: str) -> str:
+    """What a chooser row shows *under* one row's key: its summary, or its text's head.
 
     **One spelling of the rule**, because two readers have to agree about it:
     `choice_row` carries it as the row's `excerpt`, and `_matched_in_line` asks
     whether the caller's words are in it.  Written twice they disagree — a mark
     decided against a longer head than the excerpt shows puts "matched your
-    words" beside an excerpt the words are not in.  The body is
+    words" beside an excerpt the words are not in.  The text is
     whitespace-collapsed first, because that is what is shown: a newline in a
     note is not a line the reader sees.
     """
     summary = str(row.get("summary") or "")
     if summary:
         return summary
-    body = " ".join(str(row.get("body") or "").split())
-    return body[:EXCERPT_CHARS] + ("…" if len(body) > EXCERPT_CHARS else "")
+    collapsed = " ".join(str(text or "").split())
+    return collapsed[:EXCERPT_CHARS] + ("…" if len(collapsed) > EXCERPT_CHARS else "")
 
 
-def line_text(row: Mapping[str, Any]) -> str:
+def line_text(row: Mapping[str, Any], text: str) -> str:
     """The text one row shows a reader, as one string.
 
     **What `_matched_in_line` is allowed to test**, and the whole of it: *the
     haystack is what the answer prints, and nothing else*.  A haystack that
     carried a row's `title` beside a line printing only the key and the excerpt
-    would answer "matched your words" for a file saved with a title and no body,
+    would answer "matched your words" for a file saved with a title and no text,
     with every one of them missing from the page; the row is the answer —
     `choice_row`, in JSON — and the title is printed with it.
 
@@ -1991,7 +2061,7 @@ def line_text(row: Mapping[str, Any]) -> str:
     can check as readily as any other, which is the whole of what the mark is
     for; a mark they cannot is the failure it exists not to be.
     """
-    return "\n".join(str(value) for value in choice_row(row).values())
+    return "\n".join(str(value) for value in choice_row(row, text).values())
 
 
 #: The columns a *kind* has and the others do not: `size`, `mime` and `source`
@@ -2053,21 +2123,23 @@ def facts(row: Mapping[str, Any]) -> dict[str, Any]:
     return found
 
 
-def choice_row(row: Mapping[str, Any]) -> dict[str, Any]:
+def choice_row(row: Mapping[str, Any], text: str = "") -> dict[str, Any]:
     """One document as something to **choose**: `facts`, and the line a chooser shows.
 
-    **A listing and a search answer with this and not with the row.**  A body is
-    the document, and a model picking one out of fifty has asked for a way to
-    tell them apart — the reason the tool catalogue reports a tool's schema as a
-    *size* rather than as text (`slife2.libs.store.catalogue`).  `excerpt` is `line_excerpt`, the
-    one spelling of what such a line shows, so a row marked `matched_in:
-    "line"` has the caller's words in the text printed beside it.
+    **A listing and a search answer with this and not with the row.**  The text
+    is the document, and a model picking one out of fifty has asked for a way
+    to tell them apart — the reason the tool catalogue reports a tool's schema
+    as a *size* rather than as text (`slife2.libs.store.catalogue`).  `excerpt`
+    is `line_excerpt`, the one spelling of what such a line shows, so a row
+    marked `matched_in: "line"` has the caller's words in the text printed
+    beside it.
     """
-    return {**facts(row), "excerpt": line_excerpt(row)}
+    return {**facts(row), "excerpt": line_excerpt(row, text)}
 
 
 def _found(
     row: Mapping[str, Any],
+    text: str,
     similarity: float | None = None,
     *,
     matched_in: str | None = None,
@@ -2079,7 +2151,7 @@ def _found(
     rather than a zero), and `matched_in`, which is not a score but the fact
     that the caller's words are in the text the answer prints.
     """
-    found = choice_row(row)
+    found = choice_row(row, text)
     if similarity is not None:
         found["similarity"] = similarity
     if matched_in is not None:
@@ -2112,6 +2184,24 @@ def discard_file(path: Path) -> None:
         path.unlink()
     except OSError as exc:
         logger.debug("cabinet: %s not removed: %s", path, exc)
+
+
+def _unlink_document(path: Path) -> None:
+    """Unlink a document's file inside its row's transaction, or refuse the remove.
+
+    **The file goes before the row's delete commits, and a refused unlink takes
+    the whole remove back.**  A mirror's stem is a function of the key, so a
+    concurrent re-create of the same key lands on the same file: unlinking after
+    the commit deleted the live successor's file, the worse evil.  Inside the
+    transaction, a filesystem that refuses the unlink (an editor holding the file
+    open on Windows) rolls the remove back and the document stays whole.  A file
+    already gone is not a refusal — a document whose text is missing is damaged,
+    and its remove still succeeds.
+    """
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def parse_tags(value: Any) -> str:

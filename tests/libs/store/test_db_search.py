@@ -115,7 +115,7 @@ def test_a_tool_result_and_its_call_are_not_what_a_turn_is_about() -> None:
 
     Tool results are already out — they are 56–99% of a turn's text.  The
     call's argument head followed them after the chunked index made
-    the cost visible: on this repository's live log, with 30 discriminator-style
+    the cost visible: on this repository's live log, with 30 decision-style
     subject queries, dropping it raised MRR from 0.83 to 0.88, and keeping the
     full arguments cost 2.7x the chunks to recover one query.  A result is still
     in the turn, which is what `turn_read` reads.
@@ -447,6 +447,47 @@ async def test_a_window_narrows_a_search(tmp_path) -> None:
     assert await store.recall(query="工具", embedder=embedder, since="2026-06-01") == []
 
 
+@pytest.mark.asyncio
+async def test_a_narrow_window_reaches_the_turns_inside_it(tmp_path) -> None:
+    """**The window must restrict the semantic page, not filter it after.**
+
+    The KNN used to rank the whole log and the window removed what was left, so
+    a narrow window over a large history answered with almost nothing: every
+    place in the page had been spent on turns outside it.  Here the nearer turn
+    is the old one, so a post-filtered global page of one would come back
+    empty — which is the reported bug — while a window-scoped page is the turn
+    the caller asked for.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    old = await store.save_turn(
+        messages=[
+            {"role": "user", "content": "trump trump"},
+            {"role": "assistant", "content": "old"},
+        ],
+        embedder=embedder,
+        created_at="2020-01-01T10:00:00+08:00",
+    )
+    inside = await store.save_turn(
+        messages=[
+            {"role": "user", "content": "trump 工具"},
+            {"role": "assistant", "content": "new"},
+        ],
+        embedder=embedder,
+        created_at="2026-11-17T10:00:00+08:00",
+    )
+
+    # The premise: the nearer turn is the one outside the window.
+    assert _ids(
+        await store.recall(sentences=["trump"], embedder=embedder, limit=1)
+    ) == [old]
+    assert _ids(
+        await store.recall(
+            sentences=["trump"], embedder=embedder, limit=1, since="2026-11-16"
+        )
+    ) == [inside]
+
+
 # --- the semantic leg ---------------------------------------------------------
 
 
@@ -471,7 +512,7 @@ async def test_the_nearest_turn_comes_first(tmp_path) -> None:
     embedder = StubEmbedder()
     await _corpus(store, embedder)
 
-    nearest = (await store._semantic_lists(["工具"], embedder, 3))[0]
+    nearest = (await store._semantic_lists(["工具"], embedder, 3, [], [], set()))[0]
 
     # Each question's list is nearest-first: the *order* is what the fusion
     # reads and the value is the similarity a recall gates on, so both halves
@@ -546,6 +587,89 @@ async def test_a_recall_leaves_out_the_turns_already_in_hand(tmp_path) -> None:
     )
 
     ranked = await store.recall(query="工具", embedder=embedder, limit=1, exclude=[1])
+
+    assert [turn_id for turn_id, _ in ranked] == [2]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_looks_past_a_chunked_excluded_turn(tmp_path) -> None:
+    """The keep-list is applied *inside* the KNN, so its chunks take no place.
+
+    A kept turn of three chunks would otherwise occupy three of the KNN's
+    places while the keep-list names it once — and a semantic recall whose
+    nearest chunks were all kept turns came back with nothing, although a turn
+    beyond them matched.  Excluding the kept turns in the KNN's rowid
+    restriction spends the page on turns the caller asked for; the two kept
+    turns below hold six chunks between them and the one-place page still
+    reaches the turn past them.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    kept = "\n\n".join(["工具 工具 工具"] * 400)
+    for _ in range(2):
+        await store.save_turn(
+            messages=[
+                {"role": "user", "content": kept},
+                {"role": "assistant", "content": "好"},
+            ],
+            embedder=embedder,
+        )
+    await store.save_turn(
+        messages=[
+            {"role": "user", "content": "trump"},
+            {"role": "assistant", "content": "found"},
+        ],
+        embedder=embedder,
+    )
+
+    ranked = await store.recall(
+        query="", sentences=["工具"], embedder=embedder, limit=1, exclude={1, 2}
+    )
+
+    assert [turn_id for turn_id, _ in ranked] == [3]
+
+
+@pytest.mark.asyncio
+async def test_a_recall_with_a_large_keep_list_stays_under_the_knn_ceiling(
+    tmp_path,
+) -> None:
+    """**`k` is the page, not the page plus everything already in hand.**
+
+    `sqlite-vec` refuses a `k` above 4096.  A live context of a couple of
+    thousand turns holds more chunks than that, so widening the page by the
+    excluded turns and their chunks asked for a `k` past the ceiling and every
+    semantic recall raised — the rebuild failed, the context never shrank, and
+    every later turn failed until `forget`.  The excluded turn below holds more
+    chunks than the ceiling by itself, written directly because the point is
+    the KNN's arithmetic rather than the chunker's.
+    """
+    import sqlite_vec
+
+    store = TurnStore(tmp_path / "jack.turn.db")
+    embedder = StubEmbedder()
+    await store.save_turn(
+        messages=[{"role": "user", "content": "工具"}], embedder=embedder
+    )
+    await store.save_turn(
+        messages=[{"role": "user", "content": "trump"}], embedder=embedder
+    )
+    with store._connect() as connection:
+        for index in range(4097):
+            row = connection.execute(
+                "INSERT INTO turn_chunk (turn_id, chunk_index) VALUES (1, ?)",
+                (1000 + index,),
+            )
+            connection.execute(
+                "INSERT INTO turn_vec (rowid, embedding) VALUES (?, ?)",
+                (
+                    row.lastrowid,
+                    sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0, 0.0]),
+                ),
+            )
+
+    ranked = await store.recall(
+        sentences=["工具"], embedder=embedder, limit=1, exclude={1}
+    )
 
     assert [turn_id for turn_id, _ in ranked] == [2]
 
@@ -841,6 +965,48 @@ async def test_index_status_names_what_is_missing(tmp_path) -> None:
     status = store.index_status(embedder)
     assert not status["ready"]
     assert status["problems"] == ["1 of 3 turns have no vector"]
+
+
+@pytest.mark.asyncio
+async def test_a_recorded_vector_table_that_is_gone_is_not_ready(tmp_path) -> None:
+    """A recorded index whose table vanished cannot run a semantic search.
+
+    `vector_table_gone` is the question the catalogue and the cabinet ask; the
+    turn store used to answer `ready: True` here, so the context plugin's
+    readiness gate let searches through to `no such table: turn_vec` — a plugin
+    reporting itself healthy over a leg it cannot serve.  The table is lost
+    outside a rebuild and there is no migration, so the report has to say so
+    rather than leave the failure to the first search.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    embedder = StubEmbedder()
+    await _corpus(store, embedder)
+    with db.connection_to(path) as connection:
+        connection.execute("DROP TABLE turn_vec")
+
+    status = store.index_status(embedder)
+
+    assert not status["ready"]
+    assert any("turn_vec" in problem for problem in status["problems"])
+
+
+@pytest.mark.asyncio
+async def test_a_restart_rebuilds_a_vector_table_that_went_missing(tmp_path) -> None:
+    """**The advice a damaged index gives has to be true.**  It says "restart
+    to rebuild"; the rebuild returned early because the recorded identity still
+    matched, and the surviving chunks made every row look already placed — so a
+    restart changed nothing and the message repeated for ever."""
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    embedder = StubEmbedder()
+    await _corpus(store, embedder)
+    with db.connection_to(path) as connection:
+        connection.execute("DROP TABLE turn_vec")
+
+    await store.sync_indexes(embedder)
+
+    assert store.index_status(embedder)["ready"] is True
 
 
 # --- and the loop is not held while it happens --------------------------------

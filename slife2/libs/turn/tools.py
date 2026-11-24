@@ -29,8 +29,13 @@ that varies about it, which is who calls it:
   machinery calls it on the model's behalf, at a moment the machinery decides,
   and it would be called whether or not the model ever chose it.  *LLM-visible*
   is why there are so few: the call is written into the conversation as a pair,
-  and a pair has to name a tool the request declares.  **There are two**,
-  `_func_tool_unload` and `_check_new_input`, and that is the whole class.
+  and a pair has to name a tool the request declares.  **There are four**,
+  `_func_tool_unload`, `_check_new_input`, `_turn_compact` and
+  `_context_rebuild`, and that is the whole class.  The last two are the ones
+  whose model call is *wanted* as well as harmless: a turn that sees its own
+  context filling may ask for the same compaction the harness would have asked
+  for at the next threshold, and a turn that sees an unrelated message arrive
+  may ask for the history to be rebuilt around it.
 
 **And the guard has to be there, because there is nowhere else for it to be.**  A
 pair has to name a declared tool, so a harness tool is in the model's list, where
@@ -40,16 +45,25 @@ class is not protected by forbidding the call, and cannot be.
 **A harness tool has to be harmless when the model calls it, or it cannot be
 one.**
 
-That is a condition, not an invitation.  Each of the two is the *machinery's*
-move, made at a moment the machinery knows is the right one, and a call from the
-model is not wanted — the boundary is how a message is meant to arrive.  What the
-design guarantees is only that the unwanted call is not a damaging one:
+That is a condition, not an invitation.  Each of the first two is the
+*machinery's* move, made at a moment the machinery knows is the right one, and a
+call from the model is not wanted — the boundary is how a message is meant to
+arrive.  What the design guarantees is only that the unwanted call is not a
+damaging one:
 `_func_tool_unload` refuses the names in `tool_load.autoload` and can otherwise
 only shorten the model's own list, and `_check_new_input` hands over a message
 the next boundary would have handed over anyway, so a call from the model is
-the same thing sooner rather than something new.  A tool that *would* do damage there is not
-protected from being one; it is simply not one — it stays undeclared, which is
-what the audience gate is for.
+the same thing sooner rather than something new.  `_turn_compact` and
+`_context_rebuild` are the cases where the model's call is the point: there is
+no boundary the harness alone knows better, and each edits a view the record
+keeps.  The compaction hides messages from the rest of the turn; the rebuild
+changes only the historical selection, never the turn running (it has no id
+yet), and a dropped turn is still in the log for a later rebuild to recall.
+The decision model makes the selection when the call carries none, and a model
+that writes its own selection is filling the same schema — which is what keeps
+either call an edit rather than a deletion.  A tool that *would* do damage
+there is not protected from being one; it is simply not one — it stays
+undeclared, which is what the audience gate is for.
 
 A leading `_` is the mark on those two names (:data:`HARNESS_PREFIX`) and, more
 widely, on any name that is the machinery's rather than the model's — it is a
@@ -76,10 +90,20 @@ The middle two do line up with the mark for the tools the harness writes *pairs*
 with — a pair has to name a tool the request declares, so those names are in the
 model's list and are protected from being unloaded — but that is a consequence
 of the pair rule and not the meaning of the mark.  `skill_use` is not a harness
-tool and is protected the same way; `_check_new_input` is one, and it is the
-harness tool a screen *does* draw — as the message somebody sent, live
-(`MessageCutIn`) and rebuilt (`slife2.tui.restore`), because what the pair carries is a
-person's words rather than the machinery's.
+tool and is protected the same way; `_check_new_input` is one, and its answer is
+the message it delivers — from whatever channel: a person's, a peer's, a
+subagent's.  The screen draws it as the same harness note (`MessageCutIn` live,
+`slife2.tui.restore` rebuilt) that every machinery-written pair's answer wears.
+
+**Every pair the machinery writes is visible to the person.**  The answer is a
+note in the transcript — the compaction's count, the trim's names that left, and
+a cut-in's message, the delivered words from whatever channel.  A model's own
+call to any harness tool, `_check_new_input` included, keeps its own call id
+(`HARNESS_CALL_PREFIX`) and is an ordinary tool panel: the call is the model's;
+the note is the machinery's.  The one finish that adds no line is the
+machinery's own `_check_new_input`: its answer is the delivered message, whose
+line is `MessageCutIn`.  A harness tool added later is visible without a drawing
+change: the screen reads the id class, not a case per name.
 
 **And three arguments no tool declares.**  `_timeout`, `_async` and `_approve`
 are read off every call and stripped before dispatch — the one part of this
@@ -155,27 +179,28 @@ def as_tool_text(answer: Any) -> str:
     tool's whole output once vanished from a request with nothing said.
 
     `None` is the empty string rather than the text `"null"`, which is a result
-    that is not there; a `str` passes through byte for byte; everything else is
-    JSON, with `default=str` so that an object the encoder does not know becomes
-    text instead of failing the turn (SDD Appendix C's register, where what
-    that gives up is named).
+    that is not there; everything else is JSON, with `default=str` so that an
+    object the encoder does not know becomes text instead of failing the turn
+    (SDD Appendix C's register, where what that gives up is named).  **The one
+    rewrite is a lone surrogate**, on the string path too: a provider's JSON can
+    hand us one in an argument, it is not encodable as UTF-8, and passing it
+    through made the next request fail on the transport rather than render.
 
     **`ensure_ascii=False`, and then a real UTF-8 encode.**  `True` would escape
     every character outside ASCII — a note written in Chinese would reach the
     model as six characters per word, and be *counted* that way against
-    `tool_result.tokens`, which is a bound this system spends on purpose and not
+    `tool_result.bytes`, which is a bound this system spends on purpose and not
     on escapes.  The `backslashreplace` is the half that keeps the choice safe:
-    a lone surrogate — which a provider's JSON can hand us in an argument, and
-    which `json.dumps(ensure_ascii=False)` will happily put back in the string —
-    cannot be encoded at all, so a turn would fail on the transport rather than
-    render.  It becomes the `\\uXXXX` escape it would have been, which is text
-    the model reads and a request that is still sendable.
+    a lone surrogate becomes the `\\uXXXX` escape it would have been, which is
+    text the model reads and a request that is still sendable.
     """
     if answer is None:
         return ""
-    if isinstance(answer, str):
-        return answer
-    text = json.dumps(answer, ensure_ascii=False, default=str)
+    text = (
+        answer
+        if isinstance(answer, str)
+        else json.dumps(answer, ensure_ascii=False, default=str)
+    )
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
@@ -199,16 +224,77 @@ FUNC_TOOL_UNLOAD = "_func_tool_unload"
 #: **Spelled here for `FUNC_TOOL_UNLOAD`'s reason, and one more reader.**  Three
 #: places hold this string now: the agent server serves it, the loop writes the
 #: pair under it, and the display that rebuilds a transcript recognises it so a
-#: message that cut in is drawn as a person's line rather than as a tool panel.
+#: message that cut in is drawn as the harness note the pair's answer is rather
+#: than as a tool panel.
 #: A second spelling would be a rename that left one of the three behind.
 CHECK_NEW_INPUT = "_check_new_input"
 
-#: The tool an image comes in by, by name.  Here beside `CHECK_NEW_INPUT`
-#: because a second party has to know which tools act on a *live* conversation:
-#: the agent task server withholds both from its model (`LIVE_CONVERSATION_TOOLS`
-#: there), and a rename on one side must not leave the other offering a name
-#: that now reaches a different tool.
+#: The tool an image comes in by, by name.  Here beside `CHECK_NEW_INPUT` so the
+#: names that act on a live conversation are spelled in one place.
 ATTACH_IMAGE = "attach_image"
+
+#: The turn's own compaction, by name.
+#:
+#: **One of the two harness tools whose model call is a second trigger rather
+#: than an accident.**  The agent server calls it when a turn's measured context
+#: crosses `agent.compact_at`, and the model may call it itself: the tool is
+#: declared, a provider can hand us the call, and the call does exactly what the
+#: harness's would have done.  Spelled once for `CHECK_NEW_INPUT`'s reason — the
+#: agent server serves it, the task serves its own body, and the loop writes the
+#: pair under it.
+#:
+#: **And one of the two tools a decision call is made for.**  The harness asks
+#: the context plugin's `select_live` for the selection — the same tool, forced,
+#: over the live view — and calls `_turn_compact` with it; the tool body asks
+#: nothing.  The decision call costs a second model call, logged by the model
+#: server under `kind=compactor` and not added to the turn's own bill;
+#: `_context_rebuild`'s decision is the same arrangement under `kind=decision`.
+TURN_COMPACT = "_turn_compact"
+
+#: The model-facing description of `_turn_compact`, and the decision call's
+#: tool description — **one text for both callers**, for `CONTEXT_REBUILD_TEXT`'s
+#: reason.  **The rules are the schema's** (`slife2.libs.turn.context.LIVE_REPLY`):
+#: the model's own call sees this description and the parameters, never the
+#: template.
+TURN_COMPACT_TEXT = (
+    "Drop messages from the view the turn running's later calls are sent. The "
+    "answer says how many left the view; the record and the live list keep "
+    "every one, and the next turn starts from the full conversation. "
+    "`_context_rebuild` edits the durable context instead."
+)
+
+#: The durable counterpart of `_turn_compact`: the tool that edits the
+#: **historical turns** the conversation is made of.  `_turn_compact` hides
+#: messages from the turn's view — historical or current — and forgets them at
+#: the turn's end; this drops and recalls turns in the live context itself, and
+#: the selection is what the conversation comes back to.  The turn running is
+#: never touched — it has no id yet — so it is carried verbatim while the
+#: history is rebuilt.
+CONTEXT_REBUILD = "_context_rebuild"
+
+#: The model-facing description of `_context_rebuild`, **one text for both
+#: callers**: the model in a turn (which may call it with a selection of its
+#: own) and the decision call (which is forced to fill the same selection).
+#: A call with no selection is refused in both cases; the task, the decision
+#: order and the field rules are the schema's (`slife2.libs.turn.context.RECALL_REPLY`).
+CONTEXT_REBUILD_TEXT = (
+    "Rebuild the conversation's live context — the historical turns this turn "
+    "runs on. The answer reports `kept K/M`, `recalled R/O` and the context's "
+    "`token usage`; a selection that cannot be applied is the tool's error, "
+    "with its reason."
+)
+
+#: **The tools that act on a live turn's own message list.**  They are the four
+#: the agent server serves against its loop: the cut-in takes a queued message,
+#: the attachment injects a part into the turn's last user message, the
+#: compaction hides messages from the view the rest of the turn runs on, and the
+#: rebuild edits the historical turns around the turn.  A server that runs a turn
+#: of its own on the same conversation id — an agent task — must serve them
+#: against *its* list instead, because the id alone cannot tell the two loops
+#: apart (`slife2.plugins.agent_task.server`).
+LIVE_CONVERSATION_TOOLS = frozenset(
+    {CHECK_NEW_INPUT, ATTACH_IMAGE, TURN_COMPACT, CONTEXT_REBUILD}
+)
 
 #: What a tool call that never produced an answer is recorded as.  **One
 #: spelling, two producers**: the loop completes a batch an interruption cut
@@ -228,6 +314,22 @@ def is_harness(name: str) -> bool:
     rebuilt message, and the loop mints one for a pair.
     """
     return name.startswith(HARNESS_PREFIX)
+
+
+#: The prefix of a call id the harness minted.
+#:
+#: **The id is what tells a machinery-written pair from a model's own call to
+#: the same tool**, because the tool name cannot: the model may call any
+#: declared harness tool, and its call carries its own provider id.  One
+#: spelling because two ends read it — the loop mints it (`harness_call`) and
+#: the transcript uses it to decide whether a harness tool's answer is a line
+#: the person sees (`slife2.tui.draw`, `slife2.tui.restore`).
+HARNESS_CALL_PREFIX = "_harness_"
+
+
+def is_harness_call(call_id: str) -> bool:
+    """Whether a tool call is one the harness wrote rather than the model."""
+    return call_id.startswith(HARNESS_CALL_PREFIX)
 
 
 # ── The three per-call meta-parameters ────────────────────────────────────────
@@ -310,6 +412,13 @@ def advertised(spec: ToolSpec) -> ToolSpec:
     what the tool says about itself; this one is what every function tool is
     also offered.
     """
+    # **A harness tool takes none of the three.**  The machinery calls these
+    # (`_check_new_input`, `_func_tool_unload`) and the design says a harness
+    # tool's meta-parameters do nothing; advertising them invited a model to
+    # background `_check_new_input`, which took a message outside any foreground
+    # call and let whichever call happened to be running wear its cut-in.
+    if is_harness(spec.name):
+        return spec
     parameters = dict(spec.parameters)
     properties = dict(parameters.get("properties") or {})
     # The tool's own descriptions win a name collision, and there is no such
@@ -404,14 +513,24 @@ def read_timeout(
     """
     if value is None:
         return None, None
-    seconds: float | None = None
-    if not isinstance(value, bool):
-        # `float(True)` is 1.0; a boolean is not a number of seconds.
-        try:
-            seconds = float(value)
-        except (TypeError, ValueError):
-            seconds = None
-    if seconds is None or not math.isfinite(seconds) or seconds <= 0:
+    # **A number, and nothing that merely spells one.**  `float("5")` is 5.0,
+    # but text is not a duration: SDD §7.7 says a `_timeout` written as text
+    # fails the call, and accepting the numeric strings too would make the
+    # contract's spelling the only thing it rejects.  JSON has one number type,
+    # so anything else reaching here is a caller that wrote the wrong shape.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return (
+            None,
+            f"`{name}` must be a positive, finite number of seconds; got {value!r}",
+        )
+    try:
+        seconds = float(value)
+    except OverflowError:
+        # An int beyond float range is the integer spelling of the `1e999`
+        # above: valid JSON, but not a duration anyone can honour.  Refuse it
+        # through the same gate rather than letting the cast die the turn.
+        seconds = math.inf
+    if not math.isfinite(seconds) or seconds <= 0:
         return (
             None,
             f"`{name}` must be a positive, finite number of seconds; got {value!r}",
@@ -480,6 +599,10 @@ def bind_timeout(
             # this module's guess.
             try:
                 bare = float(arguments["timeout"])
+            except OverflowError:
+                # An int beyond float range keeps its sign; the tool reads the
+                # original argument, this only decides whether to drop it.
+                bare = math.inf if arguments["timeout"] > 0 else -math.inf
             except (TypeError, ValueError):
                 bare = 1.0
             if bare <= 0:

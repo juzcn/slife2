@@ -1,46 +1,12 @@
 # slife2.yaml — the machine's configuration.
 #
-# One file, read by the launcher and every server. It must exist, be readable,
-# and name its providers and embedder; a file that does not stops the start
-# and names the mistake.
-#
-# Keep secrets out. `${VAR}`, `${VAR:-default}` and `keyring:<service>/<key>`
-# are resolved from the shell environment, credstore or the OS keyring.
+# One file, read by the launcher and every server. `${VAR}` resolves from the
+# environment, then credstore. User-level settings come first; ports follow.
 
-# Shift every server port by this much under WSL2 mirrored networking; ignored
-# elsewhere. 0 disables it. The MQTT broker is not shifted.
-wsl_port_offset: 100
-
-servers:
-  # One process per entry, each at 127.0.0.1:<port>/mcp.
-  openai-completions: {port: 24001}
-  anthropic-messages: {port: 24002}
-  openai-responses: {port: 24003}
-  embeddings: {port: 24004}
-  # The agent loop, context store and tool set.
-  agent: {port: 24000}
-  context: {port: 24010}
-  toolhub: {port: 24020}
-  # MCP and REST servers.
-  mcp-tools: {port: 24033}
-  restapi-tools: {port: 24034}
-  # Commands, playbooks and code-defined tools.
-  cli-server: {port: 24032}
-  skills-server: {port: 24031}
-  job-server: {port: 24042}
-  # Capabilities.
-  wechat: {port: 24030}
-  cabinet: {port: 24035}
-  tui: {port: 24005}
-  schedule: {port: 24039}
-  peer-agent: {port: 24040}
-  subagent: {port: 24041}
-  media: {port: 24036}
-  file-tunnel: {port: 24038}
-  agent-task: {port: 24037}
-
+# Chat providers and their models; `default` picks one, every model states
+# `context_window`.
 providers:
-  # `api` selects the wire protocol. Models are referenced as `provider/model`.
+  default: deepseek/deepseek-flash
   deepseek:
     api: openai-completions
     base_url: https://api.deepseek.com
@@ -61,6 +27,14 @@ providers:
     base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic
     api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
     models:
+      - model: qwen4-max
+        name: Qwen4 Max
+        reasoning: true
+        input:
+          - text
+          - image
+        context_window: 1000000
+        max_tokens: 262144
       - model: glm-5.3
         name: GLM 5.3
         reasoning: true
@@ -82,40 +56,10 @@ providers:
           - image
         context_window: 1000000
         max_tokens: 131072
-      - model: qwen3.8-max
-        name: Qwen3.8 Max
-        reasoning: true
-        input:
-          - text
-          - image
-        context_window: 983616
-        max_tokens: 131072
-default: bailian/qwen3.8-flash
 
-agent:
-  # Model calls per turn. 0 or absent means no cap.
-  max_iterations: 0
-  # A Jinja2 template beside this file. `{{ agent_name }}` and `{{ headless }}`
-  # are available; omit to use the shipped template.
-  # system_prompt: prompts/jack.j2
-
-agent-task:
-  # Agent tasks running at once per agent.
-  max_running: 4
-
-subagent:
-  # Subagents per agent. The tree stops at one level.
-  max_running: 32
-  # The local subagent network: `broker`, plus `org` to group meshes. `unit:`
-  # is not a setting; `peer_agent:` uses this broker when it names none.
-  provider: mosquitto
-  broker:
-    host: localhost
-    port: 1883
-
+# Embedding providers; `default` picks the one in use.
 embeddings:
-  # OpenAI-compatible embedding endpoints. The width is discovered; changing
-  # the model re-embeds the index on the next start.
+  default: siliconflow
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
@@ -125,84 +69,64 @@ embeddings:
       base_url: https://api.siliconflow.cn/v1
       model: BAAI/bge-m3
       api_key: ${SILICONFLOW_API_KEY}
-      # The cross-encoder for the recall's rerank stage, on the same endpoint
-      # (`POST /rerank`).  Leave it out on an endpoint that serves none; the
-      # recall then keeps its fused order.
+      # Optional cross-encoder for the recall's rerank stage.
       rerank_model: BAAI/bge-reranker-v2-m3
-  # The provider in use, by id. Omit to use the first.
-  active_model: siliconflow
 
-context:
-  # `ceiling` is the one total the kept turns and the recall share: the kept
-  # turns are estimated first, and the recall spends what they leave below it.
-  ceiling: 0.8
-  # How many candidates each leg of the rebuild's recall retrieves; the fused
-  # union is never cut, and the filters below and the token budget decide what
-  # is kept.  `turn_search` has its own model-supplied page.  The store's page
-  # bound caps each leg at 200.
-  recall_page_limit: 80
-  # Gates measured similarity only; a keyword hit is exempt.  Calibrate it above
-  # the embedding model's noise floor — bge-m3 scores unrelated text near 0.5.
-  min_similarity: 0.52
-  # Weighted RRF's weight on the keyword leg (the meaning leg is 1.0).  Start
-  # equal; lower it only against a labelled set.  0 leaves the leg out.
-  keyword_weight: 1.0
-  # The cross-encoder reranks the configured candidate pool and this is the
-  # score it must reach to stay, 0-1; 0.0 keeps everything it returned.
-  # Calibrated on this log: the turns a recall needs scored 0.37-1.0, the
-  # incidental tail 0.00-0.24, so 0.3 keeps the first and drops the second.
-  rerank_min_score: 0.3
-  # Seconds for the discriminator call; past it the turn uses its current
-  # context.
-  timeout: 20.0
+# Image, video, speech and transcription providers.
+media:
+  defaults:
+    image: bailian_personal/wan2.7-image
+    video: bailian_personal/happyhorse-1.1-t2v
+  providers:
+    bailian_personal:
+      api: dashscope-aigc
+      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
+      api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
+      models:
+        - model: wan2.7-image
+          kind: image
+        - model: wan2.7-image-pro
+          kind: image
+        - model: qwen-image-3.0-pro
+          kind: image
+        - model: happyhorse-1.1-t2v
+          kind: video
+          params:
+            resolution: 720P
+            ratio: 16:9
+            duration: 5
+        - model: happyhorse-1.1-i2v
+          kind: video
+          params:
+            resolution: 720P
+            duration: 5
+        - model: happyhorse-1.1-r2v
+          kind: video
+          params:
+            resolution: 720P
+            duration: 5
+        - model: qwen-audio-3.0-tts-plus
+          kind: tts
+          voice: longanhuan_v3.6
+        - model: qwen-audio-3.0-asr-flash
+          kind: asr
 
-tool_load:
-  # Above this many loaded tools, the least recently used are unloaded at a
-  # turn boundary. Nothing in `autoload` below is ever evicted, and the model
-  # cannot unload it either — only this file changes the list.
-  threshold: 100
-  # The tools that start in the model's list, by the name the model calls them.
-  # Everything else — a plugin's tools included — is found with `tool_search`,
-  # listed with `tool_list`, and loaded with `func_tool_load`. Keep this list to
-  # what a turn almost always needs: it is re-sent with every request and the
-  # model cannot take a name back out. Removing a name does not unload it; it
-  # only stops being protected from eviction. The first eight are what the
-  # system works by; a list without them fails the start.
-  autoload:
-    - tool_search
-    - tool_list
-    - func_tool_load
-    - _func_tool_unload
-    - _check_new_input
-    - skill_use
-    # The two that can use the task id an `_async` call returns.
-    - check_async
-    - cancel_async
-    # Memory: past turns, and the cabinet's search plus its write paths.
-    - turn_search
-    - turn_read
-    - turn_list
-    - cabinet_search
-    - note_write
-    - diary_write
-    - report_write
-    # Images: the only way a picture reaches the model.
-    - attach_image
-    # Web search: Google via Serper, and Baidu for Chinese.
-    - serper__google_search
-    - baidu-search__chatCompletions
+# The public-URL provider for local files; `default` picks the one in use.
+file-tunnel:
+  default: cloudflare
+  providers:
+    ngrok:
+      token: ${NGROK_AUTHTOKEN}
+    localhost.run:
+      host: localhost.run
+      user: nokey
+      remote_port: 80
+    cloudflare:
+      # http2 avoids QUIC failures behind a proxy or TUN adapter.
+      protocol: http2
 
-tool_result:
-  # A result over this is kept whole as a dump; the conversation carries its
-  # head, the dump's size and its path relative to the data directory.
-  # `dump_read` and `dump_grep` obey the same budget. Minimum 512.
-  tokens: 8000
-
+# External MCP servers; tools arrive as `{name}__{tool}`.
 mcp:
-  # External MCP servers. `command` starts a process; `url` connects to one
-  # already running. `enabled: false` keeps the entry configured but not
-  # connected. Tools arrive as `{name}__{tool}`; one that should start loaded
-  # goes in `tool_load.autoload` by that name — per tool, not per server.
   serper:
     command: npx
     args:
@@ -305,8 +229,14 @@ mcp:
       - '@aryanbv/pdf-toolkit-mcp'
     description: 'PDF Toolkit MCP — 22-tool PDF suite: create PDFs from Markdown/structured data, render pages as images (for vision models to read scans), fill forms and extract values, split/merge/rotate/crop pages, add text/watermarks/annotations, extract and re-embed attachments.'
   arxiv:
-    url: https://arxiv.mcp.brunosan.de/mcp
-    description: arXiv paper search, download and reading for AI/ML/NLP/CV/robotics — free, no API key, uses the public arXiv API.
+    command: uvx
+    args:
+      - --python
+      - '3.11'
+      - --from
+      - arxiv-mcp-server[pdf]
+      - arxiv-mcp-server
+    description: arXiv 论文检索与全文阅读 —— blazickjp/arxiv-mcp-server v0.8.2（Apache-2.0），本地 stdio，直接走 arXiv 公开 API，无需任何 key。19 个工具：search_papers / get_abstract / download_paper / read_paper / list_papers、LaTeX 原文分段读取、search_paper_text、export_citations(BibTeX)、watch_topic/check_alerts 主题追踪、semantic_search(需 [pro] extra)、citation_graph(走 Semantic Scholar 匿名配额，易 429；拿到 key 后再把 SEMANTIC_SCHOLAR_API_KEY 加进 env)。论文缓存在 `~/.arxiv-mcp-server/papers`，引文图缓存在其下 citation_graphs/。包只在 PyPI，npm 同名包无关。Python 必须 3.11。
   crossref:
     command: npx
     args:
@@ -326,7 +256,6 @@ mcp:
       - -y
       - '@wonderwhy-er/desktop-commander@latest'
     description: 'Swiss-army-knife for your own machine: run terminal commands with streaming output, drive long-running and interactive processes, and read/write/search/edit files (diff-based surgical edits, ripgrep search, Excel/PDF/DOCX).'
-
   deepseek-search:
     command: npx
     args:
@@ -345,15 +274,9 @@ mcp:
     headers:
       Authorization: Bearer ${GITEE_ACCESS_TOKEN}
     description: Gitee（码云）官方远程 MCP Server（https://api.gitee.com/mcp）— 仓库/Issue/PR/Release/通知/搜索，凭据经 GITEE_ACCESS_TOKEN 以 Bearer 注入。
-  arxiv-apify:
-    url: https://jakub-kopecky--arxiv-mcp-server.apify.actor/sse
-    headers:
-      Authorization: Bearer ${APIFY_TOKEN}
-    description: 'ArXiv MCP server (Apify actor jakub.kopecky/arxiv-mcp-server) — bridge to the public arXiv API: search by query/category/date range, download and read paper content, list locally stored papers. Auth: Apify token via APIFY_TOKEN. Standby actor, pay-per-usage, needs one-time permission approval in Apify console.'
+
+# OpenAPI documents exposed as tools; `spec` expands, `command` proxies.
 rest-api:
-  # `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
-  # `command:` uses a proxy of your own instead. A large spec is worth
-  # `enabled: false`.
   github:
     spec: https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.yaml
     base_url: https://api.github.com
@@ -363,11 +286,9 @@ rest-api:
     spec: https://registry.modelcontextprotocol.io/openapi.json
     base_url: https://registry.modelcontextprotocol.io
     description: A community driven registry service for Model Context Protocol (MCP) servers. Provides APIs to list/search MCP servers, view server details, versions, and server.json metadata.
+
+# Installed command-line tools; each is a catalogue row.
 cli:
-  # Programs already installed. Each entry is a catalogue row (`cli:<name>`),
-  # not a callable tool: run the command through your shell. `install` is shown
-  # when the command is missing — by the catalogue, and by the installer for a
-  # program it cannot install itself.
   yt-dlp:
     command: yt-dlp
     description: 'yt-dlp is a powerful command-line video downloader supporting 1000+ sites including YouTube, Twitter/X, Bilibili, TikTok, etc. Common usage: yt-dlp <URL> to download best quality; yt-dlp -f "bestvideo+bestaudio" --merge-output-format mp4 <URL> for best quality merged MP4; yt-dlp --list-formats <URL> to list available formats; yt-dlp -f <format_id> <URL> for specific format. Supports cookies, subtitles, playlists, and more.'
@@ -381,7 +302,6 @@ cli:
       url: https://pypi.org/project/browser-harness/
       version: 0.1.5
       description: Official browser-harness package
-
   rg:
     command: rg
     description: ripgrep 14.1.0 — 快速递归文本搜索（gitignore 感知，带 PCRE2+JIT）。定字符串/行号首选，一次调用出结果，比"后台搜索会话+分页读"少绕两步。常用：rg -n "关键词" 路径 -g "*.py"（带行号并限定文件类型）；rg -l / rg -c 只列文件 / 计数；rg -uu 忽略 .gitignore 全扫（含 .venv、dist）；rg -U --pcre2 "多行模式" 跨行匹配；rg --json 供脚本消费；rg --stats 出统计；rg "FAILED|error" 某.log 定位失败行；rg -F 当纯字面量（搜 . 和 * 时用）。
@@ -389,83 +309,100 @@ cli:
     source:
       type: choco
       version: 14.1.0
+
+# Environment for playbooks under `skills/`.
 skills:
-  # Playbooks live in skills/<name>/SKILL.md. This section supplies the
-  # environment each playbook declares. Scripts are not run; `skill_use`
-  # refuses a missing key.
   baidu-search:
     env:
       BAIDU_API_KEY: ${BAIDU_API_KEY}
 
-media:
-  # `kind` is what a model is for: image, video, tts, asr. `api` is its adapter
-  # (`dashscope-aigc` or `openai-images`); a kind the adapter cannot serve is
-  # refused. `defaults` applies when a call names no model; `params` and `voice`
-  # are the model's own defaults.
-  defaults:
-    image: bailian_personal/wan2.7-image
-    video: bailian_personal/happyhorse-1.1-t2v
-  providers:
-    bailian_personal:
-      api: dashscope-aigc
-      base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1
-      api_key: ${QWEN_TOKEN_PLAN_PERSONAL}
-      models:
-        - model: wan2.7-image
-          kind: image
-        - model: wan2.7-image-pro
-          kind: image
-        - model: qwen-image-3.0-pro
-          kind: image
-        - model: happyhorse-1.1-t2v
-          kind: video
-          params:
-            resolution: 720P
-            ratio: 16:9
-            duration: 5
-        - model: happyhorse-1.1-i2v
-          kind: video
-          params:
-            resolution: 720P
-            duration: 5
-        - model: happyhorse-1.1-r2v
-          kind: video
-          params:
-            resolution: 720P
-            duration: 5
-        - model: qwen-audio-3.0-tts-plus
-          kind: tts
-          voice: longanhuan_v3.6
-        - model: qwen-audio-3.0-asr-flash
-          kind: asr
+# How a turn runs; 0 iterations means no cap, 0 compact_at disables it.
+agent:
+  max_iterations: 0
+  compact_at: 0.9
+  # A Jinja2 template beside this file; omit for the shipped one.
+  # system_prompt: prompts/jack.j2
 
-file-tunnel:
-  # Exactly one provider is active; the others stay configured and inert.
-  # `expose_local_image` serves a local file through the tunnel. An unknown
-  # provider name is a config error, refused at load; `tunnel_status` reports
-  # the provider in use.
-  active: cloudflare
-  providers:
-    ngrok:
-      token: ${NGROK_AUTHTOKEN}
-    localhost.run:
-      binary: ${SSH_BINARY:-ssh}
-      host: localhost.run
-      user: nokey
-      remote_port: 80
-    cloudflare:
-      binary: ${CLOUDFLARED_BINARY:-cloudflared}
-      # http2 avoids QUIC failures behind a proxy or TUN adapter.
-      protocol: ${CLOUDFLARED_PROTOCOL:-http2}
+# Limits for the context decision.
+context:
+  ceiling: 0.8
+  recall_page_limit: 80
+  min_similarity: 0.52
+  keyword_weight: 1.0
+  rerank_min_score: 0.3
 
+# Background tasks running at once per agent.
+agent-task:
+  max_running: 4
+
+# Subagents and their local broker.
+subagent:
+  max_running: 32
+  provider: mosquitto
+  broker:
+    host: localhost
+    port: 1883
+
+# The peer-agent network; `broker` defaults to the subagent network's.
 peer_agent:
-  # Presence enables the peer network. `broker` names another machine's broker;
-  # left out, the subagent network's address is used. A local broker is started
-  # when absent and stopped with the stack only if slife2 started it.
-  #
-  # `provider: mosquitto` is the only broker; `org` and `unit` are the topic
-  # namespace that separates groups on one broker.
   provider: mosquitto
   # broker: {host: localhost, port: 1883}
   org: default
   unit: default
+
+# The loaded tool set and its cap.
+tool_load:
+  threshold: 100
+  autoload:
+    - tool_search
+    - tool_list
+    - func_tool_load
+    - _func_tool_unload
+    - _check_new_input
+    - _turn_compact
+    - _context_rebuild
+    - skill_use
+    - check_async
+    - cancel_async
+    - turn_search
+    - turn_read
+    - turn_list
+    - cabinet_search
+    - note_write
+    - diary_write
+    - report_write
+    - plan_write
+    - attach_image
+    - serper__google_search
+    - baidu-search__chatCompletions
+
+# Size budget for one tool result, in UTF-8 bytes (minimum 2048).
+tool_result:
+  bytes: 32768
+
+# WSL2 mirrored-networking port shift; 0 disables it.
+wsl_port_offset: 100
+
+# One process per entry, at 127.0.0.1:<port>/mcp.
+servers:
+  openai-completions: {port: 24001}
+  anthropic-messages: {port: 24002}
+  openai-responses: {port: 24003}
+  embeddings: {port: 24004}
+  agent: {port: 24000}
+  context: {port: 24010}
+  toolhub: {port: 24020}
+  mcp-tools: {port: 24033}
+  restapi-tools: {port: 24034}
+  cli-server: {port: 24032}
+  skills-server: {port: 24031}
+  job-server: {port: 24042}
+  wechat: {port: 24030}
+  cabinet: {port: 24035}
+  tui: {port: 24005}
+  schedule: {port: 24039}
+  peer-agent: {port: 24040}
+  subagent: {port: 24041}
+  media: {port: 24036}
+  file-tunnel: {port: 24038}
+  agent-task: {port: 24037}

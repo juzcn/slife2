@@ -29,8 +29,8 @@ and this is a set of rows the servers can be asked again.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
+import json
 import logging
 import re
 import sqlite3
@@ -42,10 +42,11 @@ from typing import Any
 import sqlite_vec
 
 from slife2.helpers.clock import now
+from slife2.helpers.threads import off_loop
+from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
-    MAX_SQL_VARS,
     SYNC_BATCH,
     Embedder,
     _marks,
@@ -57,6 +58,7 @@ from slife2.libs.store.index import (
     chunks,
     clear_vectors,
     connect_to,
+    connection_to,
     embed_rows,
     filter_clause,
     fuse_shortlist,
@@ -68,7 +70,9 @@ from slife2.libs.store.index import (
     rows_in_order,
     set_index_meta,
     storable,
+    table_exists,
     vector_identity,
+    vector_table_gone,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,19 +154,21 @@ NOT_APPLICABLE = "n/a"
 #: name in this set is injected, callable, and evictable only in the sense that
 #: nothing of ours ever is — see `_injectable_sql` for the argument,
 #: `slife2.plugins.toolhub.server.FUNC_TOOL_UNLOAD` for the trim, and
-#: `slife2.plugins.agent.server.CHECK_NEW_INPUT` for the mid-turn delivery.
+#: `slife2.plugins.agent.core.CHECK_NEW_INPUT` for the mid-turn delivery.
 #:
 #: **This set is the intersection of two different questions**, which is why it
 #: is spelled out rather than derived: `slife2.libs.turn.tools` has the vocabulary, and its
 #: point is that the `_` mark answers *who calls it* — the model's list and the
 #: unload rule are asked separately.  Here the two answers happen to line up,
 #: because what makes a tool a harness tool is a pair, and a pair has to name a
-#: tool the request declares.  Both names are here for that one reason.
+#: tool the request declares.  All four are here for that one reason.
 #:
 #: Spelled rather than imported for the reason `PLUGIN` is spelled in two
 #: modules: the hub must not be importable from the catalogue's half, and the db
 #: must not import a server.
-MODEL_VISIBLE_HARNESS_TOOLS = frozenset({"_func_tool_unload", "_check_new_input"})
+MODEL_VISIBLE_HARNESS_TOOLS = frozenset(
+    {"_func_tool_unload", "_check_new_input", "_turn_compact", "_context_rebuild"}
+)
 
 #: The columns the code reads or writes on `tool`, checked at open in both
 #: directions: a missing column cannot answer a query, and an unknown one is a
@@ -438,6 +444,37 @@ def _name_taken(name: str, owner: str) -> ValueError:
     )
 
 
+def _names_collide(name: str, source: str, first: str, second: str) -> ValueError:
+    """The refusal for one source offering two tools under one model name.
+
+    A provider accepts only letters, digits, underscore and hyphen, so a
+    server's `read.file` and its `read_file` both become `read_file`
+    (`slife2.clients.gateway.sanitise`) — two tools, one name the model can
+    call.  Keeping either and warning would make the one advertised name run
+    the other tool, which is the failure `sanitise` says the catalogue refuses.
+    The two remote names are in the sentence because they are the correction.
+    """
+    return ValueError(
+        f"{source} offers two tools whose names both become {name!r} "
+        f"({first!r} and {second!r}); a name is a row's identity and a "
+        f"provider-legal spelling has to be unique — rename one of the tools"
+    )
+
+
+def unknown_category(category: str) -> str:
+    """The refusal for a category that is not one the table knows.
+
+    **One sentence, because the two places that can discover it are the same
+    fact.**  `_plan` sees a merge naming a category the table cannot hold;
+    `tool_list` sees a browse filtering by one.  The known words are in the
+    refusal because they are the correction; the browse adds its own clause
+    about listing all of them, and each caller raises its own kind.
+    """
+    return f"{category!r} is not a tool category; known: " + ", ".join(
+        sorted(CATEGORIES)
+    )
+
+
 def _search_dict(
     row: sqlite3.Row,
     similarity: float | None = None,
@@ -492,6 +529,26 @@ def _listing_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {column: str(row[column]) for column in _SEARCH_COLUMNS}
 
 
+def tool_row(
+    *, name: str, description: str, remote_name: str, schema: Any
+) -> dict[str, Any]:
+    """One tool as the catalogue's row — the one spelling of the merge contract.
+
+    **Two callers build this row**: the hub for its own plugins' tools, and a
+    family plugin for the tools of a server somebody else runs.  They had copies
+    that already disagreed (`ensure_ascii`, the field the schema came off, `if
+    schema` against `if parameters`), and a new column would have to be added to
+    both.  A name is opaque here; `remote_name` is what the far end calls it and
+    the schema is the model's JSON Schema as text — empty when there is none.
+    """
+    return {
+        "name": name,
+        "description": description,
+        "remote_name": remote_name,
+        "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
+    }
+
+
 class ToolStore:
     """The tool catalogue: what the model may call, and what it has loaded.
 
@@ -502,14 +559,12 @@ class ToolStore:
     the hub serves every conversation and cannot tell them apart, so what is
     installed and what has been loaded belongs to the data directory.
 
-    **A row goes in with its search text, and its vector right after.**  The
-    keyword row is written in the same transaction as the row it indexes, so the
-    two cannot disagree; the vector needs a call to a model, which belongs on
-    the event loop and not inside a transaction, so a row can be left without
-    one for as long as that call takes.  It is not a hole: a vector is derived
-    from the row, and `sync_indexes` puts back whatever a crash lost — where a
-    *turn* with no vector would be a turn nothing could ever find, which is why
-    that store embeds before it writes and refuses to store otherwise.
+    **A merge embeds before it writes.**  The vector needs a call to a model,
+    which belongs on the event loop and not inside a transaction — so the call
+    happens first and the row, its keyword text and its vector are written
+    together.  That is what makes a merge that cannot embed write nothing;
+    `sync_indexes` is for vectors a crash lost, not for rows this path left
+    behind.
     """
 
     def __init__(
@@ -592,16 +647,8 @@ class ToolStore:
 
     @contextlib.contextmanager
     def _connect(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
-        """One connection for this call, closed on the way out.
-
-        The same correction `slife2.libs.store.db.TurnStore._connect` carries, and
-        for the same reason: `with sqlite3.connect(...)` commits and *leaves the
-        connection open*, so the close this file's call sites assume was the
-        collector's to make — late, and on Windows late enough that the file
-        cannot be deleted in the meantime.  The catalogue's file is not deleted
-        by slife2 itself, so nothing here met the turns' version of that; the
-        lifetime is stated once for both stores so that "a connection per call"
-        means the same thing in both.
+        """One connection for this call — `connection_to`'s lifetime, the same
+        rule the turn store and the cabinet keep.
 
         **`write=True` queues this process's writers.**  The file has one
         writing *process* by design — the hub — but not one writing *coroutine*:
@@ -615,14 +662,9 @@ class ToolStore:
         *other* processes.
         """
         lock = self._write_lock if write else contextlib.nullcontext()
-        with lock:
-            connection = connect_to(self.path)
-            try:
-                with connection:
-                    self._ensure_file(connection)
-                    yield connection
-            finally:
-                connection.close()
+        with lock, connection_to(self.path) as connection:
+            self._ensure_file(connection)
+            yield connection
 
     # --- the file -------------------------------------------------------------
 
@@ -649,7 +691,12 @@ class ToolStore:
 
         The stat is still the first look, and it catches the one thing the
         marker cannot: a *different* catalogue copied over the path.  Its marker
-        says it is ours, but it is not the file this store opened.
+        says it is ours, but it is not the file this store opened.  **And the
+        shape of its `tool` table catches the copy the stat cannot**: `cp` onto
+        the live path keeps the inode and the copy keeps the marker, so a stale
+        schema presents both while rejecting rows this build writes — and the
+        tool list fails one row at a time instead of the file being rebuilt
+        (`_holds_our_file`, `_tool_table`).
         """
         if self._holds_our_file(connection):
             return
@@ -660,11 +707,24 @@ class ToolStore:
             self._identity = self._file_identity()
 
     def _holds_our_file(self, connection: sqlite3.Connection) -> bool:
-        """Whether this connection is to the file this store opened and built."""
+        """Whether this connection is to the file this store opened and built.
+
+        **Three answers, because each alone can be copied.**  The identity pair
+        catches a *different* file at the path; the marker catches a replacement
+        the filesystem handed the freed inode to; and the schema itself catches
+        both when `cp` writes another build's catalogue *over the live path* —
+        `cp` keeps the inode and the copy keeps the marker, so the first two
+        agree while the `tool` table is the old one, and a row it rejects then
+        fails the tool list.  The DDL is what actually decides whether a write
+        is accepted, so it is the check that cannot be satisfied by a copy.
+        """
         if self._file_identity() != self._identity:
             return False
         marker = connection.execute("PRAGMA application_id").fetchone()[0]
-        return marker == _APPLICATION_ID
+        if marker != _APPLICATION_ID:
+            return False
+        present, reasons = self._tool_table(connection)
+        return present and not reasons
 
     def _file_identity(self) -> tuple[int, int] | None:
         """Which file the path holds now, or `None` when it holds none.
@@ -724,33 +784,15 @@ class ToolStore:
         Both directions are checked — a missing column cannot answer a query and
         an unknown one is a leftover nothing maintains.
         """
-        columns = {
-            str(row["name"]) for row in connection.execute("PRAGMA table_info(tool)")
-        }
-        if not columns:  # no table yet: the schema creates it complete
-            return
-        ddl = str(_table_ddl(connection, "tool") or "")
-        missing = sorted(_TOOL_COLUMNS - columns)
-        unexpected = sorted(columns - _TOOL_COLUMNS)
-        short = [
-            f"no {column} value {'/'.join(sorted(wanted - allowed))}"
-            for column, wanted in _CHECKED_DOMAINS.items()
-            if (allowed := _check_values(ddl, column)) is not None and wanted - allowed
-        ]
-        if not missing and not unexpected and not short:
+        present, reasons = self._tool_table(connection)
+        if not present or not reasons:  # no table yet: the schema creates it
             return
         logger.warning(
             "%s holds a tool catalogue this build does not write (%s); it is "
             "rebuilt from the servers, which costs the model whatever it had "
             "loaded",
             self.path,
-            "/".join(
-                [
-                    *(f"no {name} column" for name in missing),
-                    *(f"unknown {name} column" for name in unexpected),
-                    *short,
-                ]
-            ),
+            "/".join(reasons),
         )
         # **One transaction, because SQLite does not roll DDL back** — a `DROP`
         # issued with no transaction open runs in autocommit, so a rebuild that
@@ -760,6 +802,33 @@ class ToolStore:
         begin_rebuild(connection)
         for table in ("tool_fts", "tool", "tool_chunk", "tool_vec", "meta"):
             connection.execute(f"DROP TABLE IF EXISTS {table}")
+
+    def _tool_table(self, connection: sqlite3.Connection) -> tuple[bool, list[str]]:
+        """Whether a `tool` table is there, and why it is not this build's.
+
+        Shared by the open check (`_rebuild_if_stale`) and the per-connection
+        identity check (`_holds_our_file`), so a copied-over file is judged by
+        the same rule that would rebuild it.
+        """
+        columns = {
+            str(row["name"]) for row in connection.execute("PRAGMA table_info(tool)")
+        }
+        if not columns:
+            return False, []
+        ddl = str(_table_ddl(connection, "tool") or "")
+        missing = sorted(_TOOL_COLUMNS - columns)
+        unexpected = sorted(columns - _TOOL_COLUMNS)
+        short = [
+            f"no {column} value {'/'.join(sorted(wanted - allowed))}"
+            for column, wanted in _CHECKED_DOMAINS.items()
+            if (allowed := _check_values(ddl, column)) is not None and wanted - allowed
+        ]
+        reasons = [
+            *(f"no {name} column" for name in missing),
+            *(f"unknown {name} column" for name in unexpected),
+            *short,
+        ]
+        return True, reasons
 
     # --- what the hub writes --------------------------------------------------
 
@@ -808,13 +877,13 @@ class ToolStore:
                 input, and the second is a naming problem the caller can fix —
                 so it fails this source's list rather than the whole catalogue.
         """
-        plan = await asyncio.to_thread(self._plan, source, category, rows)
+        plan = await off_loop(self._plan, source, category, rows)
         # Before anything is written: a vector needs a table, the table needs a
         # width, and only the embedder knows the width.  One read of `meta` once
         # it is there.
-        await asyncio.to_thread(self.ensure_index, embedder)
+        await off_loop(self.ensure_index, embedder)
         vectors = await embed_rows(plan["documents"], embedder, noun="tool")
-        applied = await asyncio.to_thread(self._apply, plan, vectors)
+        applied = await off_loop(self._apply, plan, vectors)
         # **A merge that changed nothing is a DEBUG fact.**  An INFO line per
         # unchanged source floods the log on a repeated start-up; the counts
         # stay on the INFO line when anything actually moved.
@@ -846,16 +915,16 @@ class ToolStore:
         known, so a refused merge leaves the catalogue exactly as it was.
         """
         if category not in CATEGORIES:
-            raise ValueError(
-                f"{category!r} is not a tool category; known: "
-                + ", ".join(sorted(CATEGORIES))
-            )
+            raise ValueError(unknown_category(category))
         inserts: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         reconnected: list[str] = []
         documents: list[tuple[str, str]] = []
         skipped = 0
-        incoming: set[str] = set()
+        #: The names this listing offers, each with the remote name it came
+        #: from — the second half is what tells a repeated row from two tools a
+        #: provider's alphabet forced onto one name.
+        incoming: dict[str, str] = {}
 
         with self._connect() as connection:
             existing = {
@@ -881,7 +950,15 @@ class ToolStore:
                     continue
                 if name in owned_elsewhere:
                     raise _name_taken(name, owned_elsewhere[name])
-                if name in incoming:  # one list naming one tool twice
+                remote = str(row.get("remote_name") or name)
+                if name in incoming:
+                    if remote != incoming[name]:
+                        # Two remote tools, one provider-legal name.  Only the
+                        # first would be recorded, and a call to that name would
+                        # reach it — the other tool would be unreachable with
+                        # nothing saying it existed (`_names_collide`).
+                        raise _names_collide(name, source, incoming[name], remote)
+                    # One list naming one tool twice, which is not a collision.
                     logger.warning(
                         "%s listed %s twice in one list; keeping the first",
                         source,
@@ -889,7 +966,7 @@ class ToolStore:
                     )
                     skipped += 1
                     continue
-                incoming.add(name)
+                incoming[name] = remote
                 # **The text columns go through `storable`.**  A lone surrogate
                 # in a description is the same answer text the turn store
                 # normalises, and one of them used to fail the whole insert —
@@ -1515,25 +1592,39 @@ class ToolStore:
                 wanted = sorted(self.autoload)
                 protected = f"name IN ({_marks(wanted)})"
                 values.extend(wanted)
-            # `MAX` of the two stamps: the newer event wins, so a call outranks
-            # a later load and a load outranks an earlier one.  Both columns are
-            # `''` for "never", which sorts below every timestamp — so a row
-            # with neither is the first to go, which is the right answer for a
-            # row nothing has ever happened to.
+            # `MAX` of the two **instants**: the newer event wins, so a call outranks
+            # a later load and a load outranks an earlier one.  The strings are
+            # local-offset ISO stamps, so comparing them as text is wrong in the
+            # one case the format exists for — two writers in different offsets,
+            # or the same machine in a fold — and the least-recently-used tool
+            # would be the one the model used most recently (SDD §12.3).  Both
+            # columns are `''` for "never", which `julianday` answers NULL for;
+            # the coalesce makes that the oldest value rather than an
+            # incomparable one.
             victims = [
                 str(row["name"])
                 for row in connection.execute(
                     f"SELECT name FROM tool WHERE {where} AND NOT ({protected})"
-                    " ORDER BY MAX(last_used, last_loaded) ASC, name LIMIT ?",
+                    " ORDER BY MAX("
+                    "COALESCE(julianday(last_used), 0), "
+                    "COALESCE(julianday(last_loaded), 0)"
+                    ") ASC, name LIMIT ?",
                     (*values, excess),
                 )
             ]
             if not victims:
                 return []
-            connection.execute(
-                f"UPDATE tool SET load_status = ? WHERE name IN ({_marks(victims)})",
-                (UNLOADED, *victims),
-            )
+            # **The victim list is caller-sized**, because it is however far
+            # over the budget the loaded set grew — a model loading its way
+            # past a lowered threshold can put more than one statement's worth
+            # of names here, and SQLite's bound parameter limit is not a
+            # property of this query.  `chunks` is the same rule the other
+            # list-binders in this store follow (SDD Appendix A rule 12).
+            for piece in chunks(victims):
+                connection.execute(
+                    f"UPDATE tool SET load_status = ? WHERE name IN ({_marks(piece)})",
+                    (UNLOADED, *piece),
+                )
         logger.info(
             "%d tool(s) unloaded to stay under %d: %s",
             len(victims),
@@ -1709,34 +1800,57 @@ class ToolStore:
                 "listing is `ToolStore.page`"
             )
 
-        # **The words are a sentence when they are all there is.**  A
-        # keywords-only call used to reach the keyword leg alone, which found 23
-        # of the 36 tools callers ask for — the same 23 at 130 and at 253,
-        # because what it misses is word forms, not choice.  Routing the same
-        # words through both legs finds 34 to 36; the cost is one embedding call.
+        # **The words are a sentence when they are all there is**, but a
+        # keyword list with no term in it is no keyword leg.  The cabinet's
+        # search states the same rule: the two are different inputs to the two
+        # legs, and reading `keywords=[""]` beside a real sentence as the
+        # second would throw the sentence away (`EmptyQuery` out of
+        # `match_expression`).  With no sentence beside it there is nothing to
+        # search with at all, and the refusal is the answer.
         #
         # It lives here because it is a fact about the search, not about the
         # tool: a second caller of this method must not have to remember it.
-        if keywords and not any(s.strip() for s in sentences):
+        expression = ""
+        if keywords:
+            try:
+                expression = textindex.match_expression(list(keywords))
+            except textindex.EmptyQuery:
+                if not any(s.strip() for s in sentences):
+                    raise
+        if expression and not any(s.strip() for s in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
-        over = min(limit * _OVERFETCH, MAX_SQL_VARS)
-        expression = textindex.match_expression(list(keywords)) if keywords else ""
+        # **`MAX_SQL_VARS` is not a depth cap.**  It bounds how many values one
+        # statement binds, and both the KNN's `k` and the keyword `LIMIT` are
+        # plain numbers.  Capping the depth starved `unloaded_only` searches: a
+        # machine with ~900 chunks of loaded tools filled the page with rows the
+        # filter then dropped, and the answer was a confident empty page while
+        # matching unloaded tools existed beyond it.
+        # **The page, and no widening.**  The filters are applied inside the
+        # semantic leg's KNN (its rowid restriction, `_nearest`), so a filtered-
+        # out chunk occupies no place and `over` stays a multiple of what the
+        # caller asked for.  Widening by the filtered chunks instead grew with
+        # the corpus without bound and could pass `sqlite-vec`'s 4096-candidate
+        # ceiling, which fails the whole search rather than answering it.
+        over = limit * _OVERFETCH
         keyword_hits: list[int] | None = None
-        if keywords:
-            keyword_hits = await asyncio.to_thread(
+        if expression:
+            keyword_hits = await off_loop(
                 self._keyword_hits, expression, over, clauses, values
             )
 
         # **The shortlist, its numbers and its order are `fuse_shortlist`'s**,
         # so the cabinet puts its page together by the same rule this one does.
-        queries, lists = await self._semantic_lists(sentences, embedder, over)
-        ordered, meaning, worded = fuse_shortlist(
-            lists, keyword_hits, queries, self._meaning_of
+        queries, lists = await self._semantic_lists(
+            sentences, embedder, over, clauses, values
         )
-        rows = await asyncio.to_thread(
-            self._rows_in_order, ordered, clauses, values, limit
+        # `fuse_shortlist` scores the shortlist through `_meaning_of`, which
+        # opens a connection and computes cosines in Python — blocking work that
+        # belongs off the hub's shared loop, like every other DB call here.
+        ordered, meaning, worded = await off_loop(
+            fuse_shortlist, lists, keyword_hits, queries, self._meaning_of
         )
+        rows = await off_loop(self._rows_in_order, ordered, clauses, values, limit)
 
         # **Where the words are, for the rows they matched** — `schema` is the
         # one column of the five a row is indexed by that the line does not
@@ -1746,9 +1860,7 @@ class ToolStore:
         # a mark that cannot be checked, so the answer says which side it is on.
         page = [int(row["rowid"]) for row in rows]
         inline = (
-            await asyncio.to_thread(self._matched_in_line, expression, page)
-            if worded
-            else set()
+            await off_loop(self._matched_in_line, expression, page) if worded else set()
         )
         return {
             "results": [
@@ -1811,8 +1923,9 @@ class ToolStore:
         (`slife2.libs.plugin.family.page_of`), and the reason it is a convention:
         a caller that names no size must not get the smallest legal page.
         """
-        size = DEFAULT_TOOL_PAGE if limit <= 0 else page_limit(limit, MAX_TOOL_PAGE)
-        start = max(0, int(offset))
+        size, start = page_window(
+            limit, offset, unset=DEFAULT_TOOL_PAGE, cap=MAX_TOOL_PAGE
+        )
         clauses, values = _tool_filters(
             category=category,
             source_id=source_id,
@@ -1889,10 +2002,22 @@ class ToolStore:
         is where that is argued.  The query is the store's own: a `tool_vec` row
         is a chunk, so which tool it belongs to is one join away, and the max
         over a tool's chunks is what stands for the tool.
+
+        **A corpus that was never indexed has no table to read, and that is an
+        empty answer.**  This is the second half of the rule `_nearest` states:
+        the meaning leg answers empty and the keyword leg still answers.  A
+        recorded index whose table is gone is damage, not that state, and raises.
         """
         if not rowids or not queries:
             return {}
         with self._connect() as connection:
+            if vector_table_gone(connection, vec_table="tool_vec", meta_table="meta"):
+                raise RuntimeError(
+                    f"{self.path}: the catalogue records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
+            if not table_exists(connection, "tool_vec"):
+                return {}
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, v.embedding AS embedding"
                 " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
@@ -1934,7 +2059,12 @@ class ToolStore:
         return [int(row["rowid"]) for row in rows]
 
     async def _semantic_lists(
-        self, sentences: Sequence[str], embedder: Embedder, k: int
+        self,
+        sentences: Sequence[str],
+        embedder: Embedder,
+        k: int,
+        clauses: list[str],
+        values: list[Any],
     ) -> tuple[list[list[float]], list[list[tuple[int, float]]]]:
         """`(the query vectors, one ranked list each)`, out of **one** `embed`.
 
@@ -1971,18 +2101,39 @@ class ToolStore:
             so="this search cannot say what a tool is about",
         )
         return vectors, [
-            await asyncio.to_thread(
-                self._nearest, sqlite_vec.serialize_float32(vector), k
+            await off_loop(
+                self._nearest,
+                sqlite_vec.serialize_float32(vector),
+                k,
+                clauses,
+                values,
             )
             for vector in vectors
         ]
 
-    def _nearest(self, query_vector: bytes, k: int) -> list[tuple[int, float]]:
-        """The KNN, and the dedup it cannot do itself.
+    def _nearest(
+        self,
+        query_vector: bytes,
+        k: int,
+        clauses: list[str],
+        values: list[Any],
+    ) -> list[tuple[int, float]]:
+        """The KNN, the dedup it cannot do itself, and the filters.
 
         `k` counts *chunks*, and a tool with a long schema has several, so the
         best chunk per tool is what is kept — a KNN in `vec0` refuses the
         `GROUP BY` that would say so.
+
+        **The filters are a `rowid IN (…)` restriction on the KNN**, the form
+        `sqlite-vec` applies before it ranks (a plain `WHERE` on the virtual
+        table is refused).  Filtering its answer afterwards let rejected
+        chunks spend the `k` places and drop out, so a sentences-only search
+        whose nearest chunks all belonged to filtered-out rows answered an
+        empty page while matching rows existed beyond them; widening `k` by
+        the rejected chunks repaid that but grew with the corpus, past the
+        extension's 4096-candidate ceiling.  The name subquery keeps one table
+        in scope, so a clause naming `name` cannot be ambiguous with
+        `tool_chunk`'s.
 
         **Rows from two models cannot be ranked against each other, and this
         does not have to check.**  It used to say it skipped a vector of another
@@ -1993,12 +2144,39 @@ class ToolStore:
         first one cannot reach.
         """
         with self._connect() as connection:
+            # **A store nobody has indexed has no vector table, and that is an
+            # empty meaning leg.**  `_ensure_file` recreates the schema without
+            # one (its width needs the embedder), and a corpus that has never
+            # been embedded has nothing to answer by meaning.
+            #
+            # **A store that *recorded* an index and lost its table is not that
+            # state.**  The identity is written in the same transaction as the
+            # table, so the pair disagreeing means the table went outside a
+            # rebuild — a failed migration, a hand edit, a file swapped under a
+            # live hub.  Answering keyword-only would turn that damage into
+            # "nothing matched by meaning", so it raises and `sync`/`index_status`
+            # can be asked what happened.
+            if vector_table_gone(connection, vec_table="tool_vec", meta_table="meta"):
+                raise RuntimeError(
+                    f"{self.path}: the catalogue records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
+            if not table_exists(connection, "tool_vec"):
+                return []
+            window = (
+                " AND v.rowid IN ("
+                "SELECT c2.id FROM tool_chunk c2"
+                f" WHERE c2.name IN (SELECT name FROM tool {filter_clause(clauses)}))"
+                if clauses
+                else ""
+            )
             rows = connection.execute(
                 "SELECT t.rowid AS rowid, t.name AS name, v.distance AS distance"
                 " FROM tool_vec v JOIN tool_chunk c ON c.id = v.rowid"
                 " JOIN tool t ON t.name = c.name"
-                " WHERE v.embedding MATCH ? AND k = ? ORDER BY v.distance",
-                (query_vector, k),
+                f" WHERE v.embedding MATCH ? AND k = ?{window}"
+                " ORDER BY v.distance",
+                (query_vector, k, *values),
             ).fetchall()
         nearest: dict[str, tuple[int, float]] = {}
         for row in rows:
@@ -2059,8 +2237,8 @@ class ToolStore:
         matches, nothing is missing, and this is one read of `meta` and one
         query that returns no rows.
         """
-        await asyncio.to_thread(self._sync_text_index)
-        await asyncio.to_thread(self.ensure_index, embedder)
+        await off_loop(self._sync_text_index)
+        await off_loop(self.ensure_index, embedder)
         # **A batch at a time, and the loop is what finishes the index.**  A
         # first start over a config with a published server in it is thousands
         # of tools, and one request carrying every one of them is the request
@@ -2077,11 +2255,11 @@ class ToolStore:
         # ends either with every tool placed or with the failure named.
         placed = 0
         while True:
-            missing = await asyncio.to_thread(self.tools_without_vectors, SYNC_BATCH)
+            missing = await off_loop(self.tools_without_vectors, SYNC_BATCH)
             if not missing:
                 break
             vectors = await embed_rows(missing, embedder, noun="tool")
-            await asyncio.to_thread(self._place, vectors)
+            await off_loop(self._place, vectors)
             placed += len(vectors)
         return {
             "vectors": placed,
@@ -2148,6 +2326,12 @@ class ToolStore:
         with self._connect(write=True) as connection:
             if index_meta(connection, "meta").get("text_version", "") == stamp:
                 return
+            # **The DDL goes inside the transaction.**  `sqlite3`'s legacy
+            # control does not open one for a `DROP`/`CREATE`, so a failure
+            # between the drop and the stamp commit left `tool_fts` empty with
+            # the old version recorded — the exact DDL-rollback hazard
+            # `begin_rebuild` exists for, and the other two rebuilds use it.
+            begin_rebuild(connection)
             connection.execute("DROP TABLE IF EXISTS tool_fts")
             connection.execute(_FTS_SCHEMA)
             for row in connection.execute("SELECT rowid AS rowid, * FROM tool"):

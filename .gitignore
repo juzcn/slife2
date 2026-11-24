@@ -131,6 +131,8 @@ activemq-data/
 
 # Environments
 .env
+# The Docker README's key file, named so it cannot be committed by accident.
+slife2.env
 .envrc
 .venv
 env/

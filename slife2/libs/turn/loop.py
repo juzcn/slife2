@@ -17,13 +17,14 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from itertools import count
 from typing import Any
 
 from slife2.libs.harness.async_tasks import Deliver, schedule, started
 from slife2.libs.harness.dumps import Compress
 from slife2.libs.model.base import Chunk, LLMBackend
+from slife2.libs.plugin.audience import ConversationKey
 from slife2.libs.turn.events import (
     NULL_OBSERVER,
     MessageCutIn,
@@ -31,17 +32,22 @@ from slife2.libs.turn.events import (
     ThinkingDelta,
     ToolCallFinished,
     ToolCallStarted,
-    TurnEvent,
     TurnFinished,
     TurnObserver,
+    UsageReported,
+    emit,
     preview,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    HARNESS_CALL_PREFIX,
     HARNESS_PREFIX,
     INTERRUPTED,
+    Meta,
     ToolRegistry,
     bind_timeout,
+    is_harness,
     split_meta,
 )
 
@@ -52,17 +58,6 @@ logger = logging.getLogger(__name__)
 #: the transcript rather than as a result that happens to be discouraging
 #: (`slife2.libs.turn.tools` states the same rule for a tool's own failures).
 DENIED = "Error: Tool execution was denied by user."
-
-#: What the model reads when it asks for a background call in a loop that has
-#: nowhere to hand the result back to — today that is an agent task's own loop
-#: (`slife2.plugins.agent_task.server`), which runs one turn and has no second one for an
-#: answer to arrive in.  **Actionable rather than merely true**: the model can fix
-#: this in one step, and a mode that quietly ran the call here instead would have
-#: taught it that `_async` does nothing.
-BACKGROUND_UNAVAILABLE = (
-    "Error: a background call is not available here. "
-    "Call the tool again without `_async`."
-)
 
 
 def timed_out(name: str, bound: float) -> str:
@@ -80,7 +75,7 @@ def timed_out(name: str, bound: float) -> str:
     return f"Error: Tool '{name}' timed out ({bound}s)."
 
 
-def harness_call(name: str) -> ToolCall:
+def harness_call(name: str, arguments: dict[str, Any] | None = None) -> ToolCall:
     """A call the harness makes on the model's behalf, marked as one.
 
     **One builder, because there are two writers of these pairs and an id is a
@@ -89,9 +84,10 @@ def harness_call(name: str) -> ToolCall:
     boundary; two id formats would be two conventions for one thing, and two
     `time_ns`-suffixed ids built in two places are two chances to collide.
 
-    The `_harness_` prefix with the tool's own mark stripped is what makes the
-    pair recognisable as the machinery's rather than the model's —
-    `slife2/tui/restore.py` reads it, and so does anyone reading a transcript.
+    The `HARNESS_CALL_PREFIX` with the tool's own mark stripped is what makes
+    the pair recognisable as the machinery's rather than the model's — the
+    transcript reads it (`slife2.tui.draw`, `slife2.tui.restore`), and so does
+    anyone reading a record: a model calling the same tool keeps its own id.
 
     **And the shape is a wire constraint rather than only a label.**  A pair is
     written once and every later request carries it, so a provider that refuses
@@ -104,9 +100,9 @@ def harness_call(name: str) -> ToolCall:
     make unnecessary.  `SDD` §5.3 carries the measurement.
     """
     return ToolCall(
-        id=f"_harness_{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
+        id=f"{HARNESS_CALL_PREFIX}{name.removeprefix(HARNESS_PREFIX)}_{time.time_ns():x}",
         name=name,
-        arguments={},
+        arguments=dict(arguments or {}),
     )
 
 
@@ -147,9 +143,13 @@ class AutoCall:
     """A tool the harness wants called at an iteration boundary, and its receipt.
 
     **The one thing `auto` returns**, so that the caller decides *whether*
-    something arrived (cheaply, without a call) and the loop decides how it is
-    written down.  `name` is the tool; the loop runs it out of the registry the
-    last request advertised, so the answer in the pair is the tool's own.
+    something arrived and what the call's arguments are, and the loop decides
+    how it is written down.  `name` is the tool; the loop runs it out of the
+    registry the last request advertised, so the answer in the pair is the
+    tool's own.  **`arguments` is the call's arguments, filled before it runs**:
+    a tool whose body decides (`_context_rebuild`, `_turn_compact`) asks its
+    decision model here, and the tool is executed with the selection the model
+    returned — never with an empty call that is rewritten afterwards.
 
     `channel` and `receipt` describe the *message* the call delivers rather than
     the tool: the loop writes the channel onto the pair's tool message (display
@@ -159,6 +159,7 @@ class AutoCall:
     """
 
     name: str
+    arguments: dict[str, Any] = field(default_factory=dict)
     channel: str = ""
     receipt: str = ""
 
@@ -181,10 +182,6 @@ class TurnResult:
     #: the next request's size: the final batch of tool results was appended
     #: after that call, so those tokens are not in it.
     last_usage: Usage
-
-    @property
-    def hit_iteration_limit(self) -> bool:
-        return self.stop_reason == "max_iterations"
 
 
 def _not_run(call: ToolCall, why: str) -> ToolCall:
@@ -211,6 +208,8 @@ class AgentLoop:
         approve: Callable[[ToolCall], Awaitable[bool]] | None = None,
         deliver: Deliver | None = None,
         compress: Compress | None = None,
+        present: Callable[[list[Message]], list[Message]] | None = None,
+        background_scope: ConversationKey | None = None,
     ) -> None:
         self._backend = backend
         self._tools = tools
@@ -239,6 +238,12 @@ class AgentLoop:
         #: (`slife2.libs.harness.handover`).  A background call that nobody is behind keeps its
         #: result in the registry instead, for `check_async` to hand over.
         self._deliver = deliver
+        #: The conversation a background call belongs to, as its `(home, agent,
+        #: subagent)` key — `check_async`/`cancel_async` answer only inside it.
+        #: The loop is still pure over the message list: this is an opaque key
+        #: the server bound it with, like `deliver`, and the loop never reads
+        #: it except to stamp a task.
+        self._background_scope = background_scope
         #: How a tool result that does not fit is fitted, or None for one that
         #: goes in as it came.  **Handed in for the third time and the same
         #: reason**: the loop does not know which cabinet holds a
@@ -248,6 +253,13 @@ class AgentLoop:
         #: the cost of that answer is a turn that carries whatever the tool
         #: returned, which is a fact about the tool and not about this decision.
         self._compress = compress
+        #: How the list the model is sent is projected from the list the
+        #: conversation holds, or None for the two being one list.  **Handed in
+        #: for the fourth time and the same reason**: the loop is handed a list
+        #: and advances it, and what a *turn* has chosen to hide from its own
+        #: later calls is the server's state (`slife2.libs.turn.compact`).  None
+        #: means nothing was hidden, which is the ordinary turn.
+        self._present = present
         #: Model calls allowed in one turn before it is cut off, or **0 for no
         #: cap at all**.  A cap is something somebody asks for: an absent key is
         #: the same 0 (`config.AgentSettings.max_iterations`), and a turn runs
@@ -258,7 +270,7 @@ class AgentLoop:
         #: Kept on the loop because **a cancellation has no return value to
         #: carry them**: `run_turn` updates these after each model call and
         #: resets them when a turn begins, so the owner of a cancelled turn can
-        #: still say what it spent (`slife2.plugins.agent.server.Outcome.usage`).
+        #: still say what it spent (`slife2.plugins.agent.state.Outcome.usage`).
         #: On the loop rather than in a callback because the loop is the party
         #: that saw the calls, and a second accounting path would be a second
         #: place to forget one.
@@ -277,14 +289,26 @@ class AgentLoop:
         if self._refresh is not None:
             self._tools = await self._refresh()
 
+    def declares(self, name: str) -> bool:
+        """Whether this turn's tool list carries *name*.
+
+        The harness asks before auto-invoking a tool whose body it would
+        otherwise write a pair for: a hub from a build that predates the tool
+        does not advertise it, and the turn runs on what it has rather than
+        writing an error pair at every boundary.  In a current build the name is
+        in `REQUIRED_AUTOLOAD`, so this answers True.
+        """
+        return self._tools.spec_of(name) is not None
+
     async def run_turn(
         self,
         messages: list[Message],
         user: str | list[dict[str, Any]],
         observer: TurnObserver = NULL_OBSERVER,
         *,
-        auto: Callable[[], AutoCall | None] | None = None,
+        auto: Callable[[], Awaitable[AutoCall | None]] | None = None,
         folded: Callable[[], tuple[str, str] | None] | None = None,
+        folded_commit: Callable[[int], None] | None = None,
         injected: Callable[[], int] | None = None,
     ) -> TurnResult:
         """Run one turn, appending to `messages` as it goes.
@@ -300,16 +324,24 @@ class AgentLoop:
         is what owns the shape of a turn, and a caller that appended its own user
         message would be a second place that knows it.
 
-        **The auto-invoke.**  `auto` is asked at the top of every iteration for
-        an `AutoCall` — the name of a tool the *harness* wants called, the
-        cut-in — and the call is then made the way the model's own calls are
-        made: through `self._tools`, the registry whose `specs` went out with the
-        last request.  So the name
+        **The auto-invoke.**  `auto` is awaited at the top of every iteration
+        for an `AutoCall` — the name of a tool the *harness* wants called, its
+        arguments, the cut-in — and the call is then made the way the model's
+        own calls are made: through `self._tools`, the registry whose `specs`
+        went out with the last request.  So the name
         routes the same way, the caller's identity rides the same way, and the
         text written into the pair is **the tool's own answer** rather than
         something written beside it.  `trim_tools` is the other half of this and
         does the same thing at a turn boundary; the two are the same mechanism
         and differ only in when the boundary is.
+
+        **The arguments are built before the call, and the pair is that call.**
+        A tool whose body would otherwise decide — `_context_rebuild`,
+        `_turn_compact` — asks its decision model inside `auto`, and the
+        `AutoCall` carries the selection.  The tool executes on those arguments,
+        and the pair carries the same arguments; there is no empty call to
+        rewrite after the fact.  A model's own call to the same tool is the
+        other parameter provider and writes the same shape.
 
         What lands in the list is a **harness tool pair**, not a user message,
         and that is the whole of why it is safe: the model reads it as something
@@ -317,13 +349,14 @@ class AgentLoop:
         sequence for every provider.  A bare user message in the middle of one is
         a 400 from several of them.
 
-        `auto` returns an `AutoCall` or `None`, and the split is deliberate: the
-        caller decides *whether* something arrived — cheaply, without a call —
-        and this decides nothing about tools at all.  The registry is what knows
-        a name.  The call's channel is written onto the pair as display
-        metadata and both halves are echoed on `MessageCutIn`, so there is one
-        answer to "what arrived, and for whom" whether a reader looks at the
-        live stream or at the turn log.
+        `auto` answers an `AutoCall` or `None`, and the split is deliberate: the
+        caller decides *whether* something is due and assembles the call's
+        arguments — the decision model's selection for a deciding tool — while
+        this decides nothing about tools at all.  The registry is what knows a
+        name.  The call's channel is written onto the pair as display metadata
+        and both halves are echoed on `MessageCutIn`, so there is one answer to
+        "what arrived, and for whom" whether a reader looks at the live stream
+        or at the turn log.
 
         **The model can make the same call itself**, because the tool is
         declared and a provider hands the loop whatever the model asked for.
@@ -336,6 +369,14 @@ class AgentLoop:
         submission's own turn began — one message, two lines, the second below
         the answer.  Both are optional: a loop with no inbox behind it has
         nothing to fold.
+
+        **`folded_commit` marks the first `n` takes delivered**, and takes `n`
+        because a take is a delivery only when its words are in the
+        conversation.  The batch's interruption path completes a call that
+        never answered with `INTERRUPTED`; committing that take would tell its
+        parked sender it had been folded in with no text, and the words would
+        then be in neither the inbox nor the record.  The count is the list's
+        prefix because takes append in arrival order.
 
         **Three arguments the model may add to any call.**  `_timeout`, `_async`
         and `_approve` are read off every call and stripped before dispatch, so
@@ -353,10 +394,10 @@ class AgentLoop:
         * `_async` — the call is handed to the background and the model is
           answered with a task id (`slife2.libs.harness.async_tasks`).  It still passes
           through the approval gate first, and it is still announced as started.
-          **A loop with nowhere to hand the result back is the one that refuses
-          it** (`self._deliver is None`): an agent task's loop is that case
-          today, and it says so in a sentence the model can act on rather than
-          running the call quietly.
+          A loop with nowhere to hand the result back (`self._deliver is None`)
+          keeps the result in the async registry for `check_async`; an agent
+          task's prompt tells its model not to use the mode, and the loop does
+          not refuse it.
         * `_approve` — the harness is asked before the call runs, through
           `self._approve`.  A caller with nobody to ask passes None, and then the
           call simply runs: refusing would be answering a request for a check
@@ -394,8 +435,11 @@ class AgentLoop:
             # never raises), so there is no case where a failure has to be
             # *recorded* with the call it was written for: everything that can
             # come back is an answer.
-            if auto is not None and (wanted := auto()) is not None:
-                call = harness_call(wanted.name)
+            if auto is not None and (wanted := await auto()) is not None:
+                # **The call carries the arguments `auto` assembled** — for a
+                # deciding tool, the decision model's selection.  It is made
+                # with them, not with an empty call rewritten afterwards.
+                call = harness_call(wanted.name, wanted.arguments)
                 # **`auto()` says a message was waiting; the tool decides whether
                 # one was taken.**  A failed call answers with an error, and a
                 # queue that emptied between the two calls (or refused an image)
@@ -406,22 +450,44 @@ class AgentLoop:
                 before = injected() if injected is not None else 0
                 text, _ok = await self._tools.execute(call)
                 took = injected is None or injected() > before
+                # **The cut-in's result is fitted like every other tool
+                # result.**  This is the road a message typed mid-turn travels,
+                # and without the fit a large paste entered the conversation,
+                # its record and every later request whole — while the same
+                # tool called by the model itself went through `_one` and was
+                # bounded (SDD §5.2.4, §7.6).  `text` stays the event's own
+                # copy below, so the live line still shows the person's words.
+                fitted = await self._fit(call, text)
+                # **The channel and the receipt are asked again, after the
+                # call.**  `auto` answers the head it saw *before* the tool ran,
+                # and a caller cancelled in that window takes its entry out of
+                # the inbox: the tool then delivers the next message while this
+                # pair would wear the first one's bubble.  `folded` is the
+                # message that was really taken; it peeks, and the commit is
+                # `folded_commit` after the pair is in the list — a take whose
+                # pair the loop never wrote must stay undelivered.
+                found = folded() if took and folded is not None else None
+                channel, receipt = (
+                    found if found is not None else (wanted.channel, wanted.receipt)
+                )
                 messages.append(
                     Message(role="assistant", content=None, tool_calls=[call])
                 )
                 messages.append(
                     Message(
                         role="tool",
-                        content=text,
+                        content=fitted,
                         tool_call_id=call.id,
                         # Display metadata, persisted with the turn and never
                         # sent to a provider (`Message.to_record`): the line a
                         # rebuilt transcript draws for this pair wears the
                         # bubble of the channel the message came in on.  No
                         # message, no bubble.
-                        channel=wanted.channel if took else "",
+                        channel=channel if took else "",
                     )
                 )
+                if took and folded_commit is not None:
+                    folded_commit(injected() if injected is not None else 0)
                 # **Said after the pair is written**, so a screen is told about
                 # a message the conversation already holds.  It carries the
                 # tool's own answer, and the receipt the submitting window
@@ -431,19 +497,34 @@ class AgentLoop:
                 # drawn on this event, and the message is still queued for its
                 # own turn — marking it drawn would suppress that turn's line.
                 if took:
-                    await self._emit(
+                    await emit(
                         observer,
                         MessageCutIn(
                             text=text,
-                            channel=wanted.channel,
-                            receipt=wanted.receipt,
+                            channel=channel,
+                            receipt=receipt,
                         ),
                     )
+                elif wanted.name != CHECK_NEW_INPUT:
+                    # **A harness auto call that delivers no message still has
+                    # an answer the person should see.**  The compaction's count
+                    # and the rebuild's report are the tool's own words; the
+                    # note is the same line a cut-in's answer wears, with no
+                    # channel and no receipt.  A cut-in that took nothing sends
+                    # none: the window marks the submission drawn on that event.
+                    await emit(observer, MessageCutIn(text=text))
             # The tool list goes with the call, so it is asked for with the
             # call.  `specs` is read after this and never cached across
             # iterations.
             await self._retool()
-            stream = self._backend.stream(messages, self._tools.specs)
+            # **The projection is the model's, the list is the record's.**  A
+            # turn that compacted hides messages here and nowhere else; the
+            # list the loop appends to, the turn's saved row and the store's
+            # `covered` are all the same list they were before.
+            stream = self._backend.stream(
+                messages if self._present is None else self._present(messages),
+                self._tools.specs,
+            )
 
             # Phase A: exhaust the stream before doing anything with it.  A tool
             # must not run inside this loop -- that would hold the provider's
@@ -475,16 +556,41 @@ class AgentLoop:
                 content=result.text or None,
                 # Kept on the message rather than only streamed at the
                 # reader: it is part of what the model said, and the turn
-                # log is where a conversation is read back from.  It does
-                # not go to the model again — `Message.to_wire` leaves it
-                # out, which is the whole of that decision.
+                # log is where a conversation is read back from.  Whether it
+                # goes to the model again is the provider adapter's decision
+                # and not this one: `Message.to_wire` carries it, the openai
+                # server re-sends it as DeepSeek's `reasoning_content`, and
+                # the anthropic and responses servers drop it because they
+                # have nowhere to put it (`Message.thinking`).
                 thinking=result.thinking,
+                reasoning=result.reasoning or None,
                 tool_calls=list(result.tool_calls),
             )
 
             if not result.tool_calls:
+                # **An answer with nothing in it is a failed turn, not a
+                # verdict.**  A provider can legitimately stop without saying
+                # anything, and that result has the same shape as a call that
+                # produced nothing at all.  The turn's product is its answer:
+                # an empty one leaves nothing to show, nothing to record, and
+                # no word in the conversation, so it fails and says so rather
+                # than succeeding silently (SDD §5.1, Appendix C).  Whitespace
+                # alone is nothing too — it renders blank.
+                if not result.text.strip():
+                    raise RuntimeError(
+                        f"{self._backend.name} answered with no text and no "
+                        f"tool call (stop reason {result.stop_reason or 'none'!r}), "
+                        "so the turn has no answer to show or record"
+                    )
                 messages.append(answer)
-                await self._emit(
+                # **The bar's context figure, once per model call.**  It is the
+                # last call's own size, and a turn that takes several calls grows
+                # with each; waiting for `TurnFinished` held the previous turn's
+                # number for the whole turn.  Emitted after the answer is in the
+                # list, so a cancellation in this await cannot lose the answer
+                # the call produced (the batch path below has its own guard).
+                await emit(observer, UsageReported(last_usage=result.usage))
+                await emit(
                     observer,
                     TurnFinished(
                         text=result.text,
@@ -501,6 +607,20 @@ class AgentLoop:
                     iterations=iteration,
                     stop_reason=result.stop_reason or "stop",
                 )
+
+            # **The report goes out before the batch runs**, so the bar moves
+            # when the call ended rather than when its tools have finished — a
+            # tool can take minutes.  This is an await between a completed call
+            # and the batch that writes it down, so a cancellation in it
+            # completes the batch the way the batch loop's own cancellation path
+            # does: none of the calls ran, and `INTERRUPTED` is the sentence that
+            # promises no result is coming.
+            try:
+                await emit(observer, UsageReported(last_usage=result.usage))
+            except asyncio.CancelledError:
+                messages.append(answer)
+                messages.extend(interrupted_results(result.tool_calls))
+                raise
 
             # Phase B: run the whole batch, and write it down only once every
             # call of it has an answer.
@@ -523,6 +643,7 @@ class AgentLoop:
             #
             answers: list[Message] = []
             cutins: list[tuple[str, str, str]] = []
+            took_any = False
             for index, call in enumerate(result.tool_calls):
                 text: str | None = None
                 #: Filled by `_one` *before* it emits its closing event, because
@@ -531,9 +652,7 @@ class AgentLoop:
                 answered: list[tuple[str, bool]] = []
                 before = injected() if injected is not None else 0
                 try:
-                    text, _ok = await self._one(
-                        call, observer, iteration, messages, answered
-                    )
+                    text, _ok = await self._one(call, observer, iteration, answered)
                     fitted = await self._fit(call, text)
                 except asyncio.CancelledError:
                     # **The batch is completed on the way out, not dropped.**
@@ -544,11 +663,44 @@ class AgentLoop:
                     # flight, and the next checkpoint would cancel this cleanup
                     # before it was written.
                     returned = answered[0][0] if answered else text
-                    answers.extend(
-                        interrupted_results(result.tool_calls[index:], returned)
-                    )
+                    # **A take is a delivery only when the batch writes its
+                    # words.**  `returned is not None` means the call answered
+                    # before the interruption, so `interrupted_results` writes
+                    # that text (and its channel) as the call's result — the
+                    # take is in the conversation.  `returned is None` writes
+                    # `INTERRUPTED` instead: committing that take would tell its
+                    # parked sender it was folded in with no text, and the
+                    # words would be in neither the inbox nor the record.  It
+                    # stays undelivered, so its caller runs its own turn.
+                    after = injected() if injected is not None else before
+                    took_now = folded is not None and after > before
+                    wrote_take = took_now and returned is not None
+                    cut_in_channel = ""
+                    if wrote_take and folded is not None:
+                        found = folded()
+                        if found is not None:
+                            cut_in_channel, _receipt = found
+                    if took_now:
+                        took_any = True
+                    tail = interrupted_results(result.tool_calls[index:], returned)
+                    # **The taken message's channel rides its answer here too**,
+                    # the same display metadata the success path writes below:
+                    # a cut-in folded just before the interruption is a message
+                    # the conversation holds, and a rebuilt transcript draws its
+                    # line from this field — without it the line wears the
+                    # window's bubble (`slife2.tui.restore`), as though the
+                    # person had typed it there.
+                    tail[0].channel = cut_in_channel
+                    answers.extend(tail)
                     messages.append(answer)
                     messages.extend(answers)
+                    # **The pair is written, so its written takes are
+                    # deliveries — and only those.**  A take the interrupted
+                    # call answered for is in the batch; one whose call wrote
+                    # `INTERRUPTED` is not, and stays undelivered for its own
+                    # turn.
+                    if took_any and folded_commit is not None:
+                        folded_commit(after if wrote_take else before)
                     raise
                 channel = ""
                 receipt = ""
@@ -567,15 +719,23 @@ class AgentLoop:
                     )
                 )
                 if took:
+                    took_any = True
                     cutins.append((text or "", channel, receipt))
             messages.append(answer)
             messages.extend(answers)
+            # **The commit follows the pair, and the whole batch is the pair.**
+            # Marking delivered inside the per-call loop was before the appends:
+            # a later call's `_fit` raising lost every answer in the batch while
+            # the person's message stayed marked delivered, so its caller was
+            # answered as folded with words the conversation never received.
+            if took_any and folded_commit is not None:
+                folded_commit(injected() if injected is not None else 0)
             # After the batch is in the conversation, as the auto path's event
             # is after its pair: a screen is told about a message the
             # conversation already holds, and a rebuilt transcript can draw the
             # same line from the channel on the tool message.
             for cutin_text, cutin_channel, cutin_receipt in cutins:
-                await self._emit(
+                await emit(
                     observer,
                     MessageCutIn(
                         text=cutin_text,
@@ -587,7 +747,7 @@ class AgentLoop:
         # Only a capped turn ever gets here: with no cap the iterator does not
         # end, so the only way out of the loop is the return above.
         logger.warning("turn hit the %d-iteration limit", self._max_iterations)
-        await self._emit(
+        await emit(
             observer,
             TurnFinished(
                 text=last_text,
@@ -610,7 +770,6 @@ class AgentLoop:
         call: ToolCall,
         observer: TurnObserver,
         iteration: int,
-        messages: Sequence[Message],
         answered: list[tuple[str, bool]],
     ) -> tuple[str, bool]:
         """Run one call the way its own meta-parameters asked, and report it.
@@ -624,13 +783,6 @@ class AgentLoop:
         which iteration of the turn this is (shown as `(3/30)` in the panel),
         and this is the only place that knows both the call and the iteration it
         was made in.
-
-        `messages` travels no further than a background call needs it, and it
-        is passed rather than read off an attribute because the loop does not
-        own the conversation (the module docstring's "pure function over a
-        message list"): it is handed one, and a call that outlives the turn it
-        was made in is the one case where the *later* state of that list is what
-        has to be reachable — see `_background`.
 
         * **Nothing is announced before the gate answers.**  A call the operator
           refused never happened as far as the transcript is concerned, and the
@@ -663,6 +815,15 @@ class AgentLoop:
             return await self._tools.execute(call)
 
         arguments, meta = split_meta(call.arguments)
+        if is_harness(call.name):
+            # **The harness's tools take none of the meta-parameters.**  They
+            # are the machinery's calls, and backgrounding or gating one is not
+            # a model's decision to make.  The schema no longer offers them
+            # (`tools.advertised`); this is the same rule for a model that wrote
+            # them anyway — and it is what keeps a `_check_new_input` from
+            # running in the background, where its take could be credited to
+            # whichever foreground call was running when it landed.
+            meta = Meta(timeout=None, background=False, approve=False)
         if meta.timeout_error is not None:
             return await self._tools.execute(_not_run(call, meta.timeout_error))
         # **A name outside the list is resolved before the timeout is bound**,
@@ -682,25 +843,11 @@ class AgentLoop:
             return await self._tools.execute(_not_run(call, timeout_error))
         dispatch = replace(call, arguments=arguments)
 
-        if meta.background and self._deliver is None:
-            # **A background call needs somewhere for its result to go**, and a
-            # loop with no way back has none: the call would run, the model would
-            # be handed a task id, and the answer would sit in a registry nobody
-            # can ask — `check_async` is not in a registry whose loop has no
-            # `deliver` at all, because the transport that builds one builds both
-            # (`slife2.plugins.agent.server.registry`).
-            #
-            # So the mode is refused, and *before* the approval gate: asking an
-            # operator to confirm a call that is not going to run would be
-            # spending somebody's attention on nothing.
-            logger.info("tool_background_unsupported name=%s", call.name)
-            return BACKGROUND_UNAVAILABLE, False
-
         if meta.approve and self._approve is not None and not await self._approve(call):
             logger.info("tool_denied name=%s", call.name)
             return DENIED, False
 
-        await self._emit(
+        await emit(
             observer,
             ToolCallStarted(
                 call.id,
@@ -726,7 +873,7 @@ class AgentLoop:
         # Recorded before the event, because the event can be cancelled: the
         # call has returned, and the interruption's repair reads this.
         answered.append((text, ok))
-        await self._emit(
+        await emit(
             observer,
             ToolCallFinished(
                 call_id=call.id,
@@ -757,7 +904,7 @@ class AgentLoop:
 
         **The harness's move and not the tool's**, which is why it is a callback
         the caller injects rather than anything this module decides: the bound
-        is `tool_result.tokens`, and the party that writes the dump and knows
+        is `tool_result.bytes`, and the party that writes the dump and knows
         where it went is the agent server.  The loop hands over the call and the
         text and takes back what to append.  A loop with no callback hands the
         result on unchanged: the same None-means-nobody-said rule `approve` and
@@ -846,12 +993,21 @@ class AgentLoop:
             tool=dispatch.name,
             deliver=self._deliver,
             fit=fit,
+            scope=self._background_scope,
         )
         # The sentence goes under the marker the registry wrote
         # (`slife2.libs.harness.async_tasks.started`): the sentence is what the model acts on,
         # and the marker is what a screen and a reader of the transcript pair
         # this call's two halves by.
-        return started(task_id, dispatch.id, dispatch.name), True
+        return (
+            started(
+                task_id,
+                dispatch.id,
+                dispatch.name,
+                delivered=self._deliver is not None,
+            ),
+            True,
+        )
 
     async def _timed(self, dispatch: ToolCall, bound: float | None) -> tuple[str, bool]:
         """One background call's answer, under the model's own bound if it set one.
@@ -896,8 +1052,10 @@ class AgentLoop:
         """Forward a stream's chunks to the observer, closing it either way.
 
         The `finally` matters on cancellation: an abandoned async generator
-        keeps whatever the provider left open.  Closing is best-effort, since a
-        generator that is already finished raises on a second close.
+        keeps whatever the provider left open.  Closing is best-effort — a
+        close can raise for the provider's own reasons, and that must not mask
+        the cancellation that is unwinding this — while closing an already
+        exhausted generator is a no-op.
         """
         try:
             async for chunk in chunks:
@@ -906,9 +1064,9 @@ class AgentLoop:
                 # that mixes the two is unreadable in a way that is hard to
                 # notice and impossible to undo.
                 if chunk.thinking:
-                    await self._emit(observer, ThinkingDelta(chunk.thinking))
+                    await emit(observer, ThinkingDelta(chunk.thinking))
                 if chunk.text:
-                    await self._emit(observer, TextDelta(chunk.text))
+                    await emit(observer, TextDelta(chunk.text))
         finally:
             aclose = getattr(chunks, "aclose", None)
             if aclose is not None:
@@ -916,17 +1074,3 @@ class AgentLoop:
                     await aclose()
                 except Exception:  # noqa: BLE001 - closing must not mask a cancel
                     logger.debug("closing the chunk stream failed", exc_info=True)
-
-    @staticmethod
-    async def _emit(observer: TurnObserver, event: TurnEvent) -> None:
-        """Hand an event to the observer, swallowing its failures.
-
-        A UI that throws must not end a turn — the answer is still correct and
-        still returned.  `CancelledError` is deliberately not caught: it derives
-        from BaseException precisely so that cancellation cannot be swallowed,
-        and the loop depends on that.
-        """
-        try:
-            await observer.on_event(event)
-        except Exception:  # noqa: BLE001
-            logger.warning("observer failed on %s", type(event).__name__, exc_info=True)

@@ -34,7 +34,9 @@ after somebody tidies up.
 
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -42,7 +44,8 @@ from typing import Any
 
 from slife2.helpers.clock import now
 from slife2.libs.host.paths import schedule_db
-from slife2.libs.store.index import connect_to
+from slife2.libs.store.db import StaleSchema
+from slife2.libs.store.index import connection_to, instant_bound
 
 #: Every state a run can be in, in the order they can be reached.
 #:
@@ -106,11 +109,49 @@ CREATE TABLE IF NOT EXISTS scheduled_runs (
     -- started", and the reason this is a column rather than a guess made from
     -- the task's name.
     agent_task_id TEXT NOT NULL DEFAULT '',
+    -- Written just before the peer is asked to start the work, and cleared by
+    -- the attach that records its id or by whatever settles the run.  It marks
+    -- the one window neither of the other two columns can describe: a start
+    -- call was sent, and the process stopped before its answer was written
+    -- down.  A run with this set and no task is resolved by name at the next
+    -- start (`ScheduleStore.dispatching`), never guessed at by the sweep.
+    dispatching   INTEGER NOT NULL DEFAULT 0,
     UNIQUE(task_id, due_at)
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_task ON scheduled_runs(task_id, due_at);
 """
+
+#: Every column this build declares, checked against a file found on disk
+#: before any DDL.  `CREATE TABLE IF NOT EXISTS` cannot add a column to a table
+#: that already exists, so a ledger from another build keeps its own columns and
+#: fails per row at the first lookup of the missing one.
+_TASK_COLUMNS = frozenset(
+    {
+        "id",
+        "name",
+        "description",
+        "cron",
+        "timezone",
+        "enabled",
+        "created_at",
+        "updated_at",
+        "last_due",
+    }
+)
+_RUN_COLUMNS = frozenset(
+    {
+        "id",
+        "task_id",
+        "due_at",
+        "status",
+        "ran_at",
+        "note",
+        "error",
+        "agent_task_id",
+        "dispatching",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -271,10 +312,11 @@ class ScheduleStore:
             ).fetchone()
         return str(row["value"]) if row else ""
 
-    def _connect(self) -> sqlite3.Connection:
-        """A connection to this ledger, opened the way every store opens one.
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        """One connection for this call, opened the way every store opens one.
 
-        **`index.connect_to` and not the four lines it is made of**, which is
+        **`index.connection_to` and not the four lines it is made of**, which is
         what this was.  A ledger is opened per call and written by one process,
         so the pragmas are the same four the turns' store and the cabinet's
         want — and `slife2.libs.store.index` says in as many words that a second
@@ -283,13 +325,52 @@ class ScheduleStore:
         not go through the shared one, so a pragma tuned for the writers that
         contend (the `busy_timeout`, which matters most for a file two processes
         touch) would have had to be tuned twice.
+
+        **And the lifetime is `connection_to`'s, not the raw connection's.**
+        `with sqlite3.connect(...)` commits and leaves the handle *open*; a
+        ledger opened per call with none closed is a descriptor leak, and on
+        Windows an open handle is a file nobody else can delete.  The caller's
+        `with` gets the commit; the close happens on the way out.
         """
-        return connect_to(self.path)
+        with connection_to(self.path) as connection:
+            yield connection
 
     def _ensure_schema(self) -> None:
+        """Make this file one this build can serve, refusing one it cannot.
+
+        **Checked before the DDL, so a file this build will not serve is not
+        touched.**  `executescript` would otherwise write every table the file
+        is missing into a file that is about to be refused, and `CREATE TABLE
+        IF NOT EXISTS` never adds a column to a table that already exists — so a
+        ledger from another build would serve reads that fail per row with
+        SQLite's `No item with that key`, naming neither the file nor the
+        remedy.  There is no migration (SDD §8.1): the ledger is history, and
+        an upgrade path is a second way to build the tables.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as connection:
+            self._refuse_old_schema(connection)
             connection.executescript(_SCHEMA)
+
+    def _refuse_old_schema(self, connection: sqlite3.Connection) -> None:
+        """Refuse a ledger whose tables predate this build's columns."""
+        for table, declared in (
+            ("scheduled_tasks", _TASK_COLUMNS),
+            ("scheduled_runs", _RUN_COLUMNS),
+        ):
+            columns = {
+                str(row["name"])
+                for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            if not columns:  # no table yet: the schema creates it complete
+                continue
+            missing = sorted(declared - columns)
+            if missing:
+                raise StaleSchema(
+                    f"{self.path} predates this build's `{table}` columns (no "
+                    f"{', '.join(missing)}); there is no migration — delete the "
+                    f"file and write the schedule afresh"
+                )
 
     # ── tasks ────────────────────────────────────────────────────────────
 
@@ -432,8 +513,6 @@ class ScheduleStore:
         """
         if not due_at:
             return
-        if task.last_due and moment_of(due_at) <= moment_of(task.last_due):
-            return
         with self._connect() as connection:
             connection.execute(
                 "UPDATE scheduled_tasks SET last_due = ? WHERE id = ?"
@@ -474,6 +553,34 @@ class ScheduleStore:
                 (task.id, due_at),
             ).fetchone()
         return _run(row, name) if row else None
+
+    def key_at(self, name: str, stamp: str) -> str | None:
+        """The stored key of the run due at this instant, whatever its spelling.
+
+        **The instant is the run's identity; the string is only its key.**  A
+        run written before a daylight-saving fall-back carries the old offset,
+        and a model handing the same instant back in another spelling has it
+        normalized to *today's* local offset (`normalize_bound`) — a string
+        that equals no stored key, so the string lookups answer "no such run"
+        about a run that is there.  `julianday` reads the offset and compares
+        the moments, the same question `_by_instant` asks for ordering.
+
+        `stamp` is a normalized bound; a date-only one is given its local
+        midnight (`instant_bound`), the reckoning every instant comparison here
+        uses.  Stored keys always carry an offset (`slife2.helpers.clock.at`),
+        so the comparison is between two readings of one instant.
+        """
+        task = self.task(name)
+        if task is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT due_at FROM scheduled_runs"
+                " WHERE task_id = ? AND julianday(due_at) = julianday(?)"
+                " LIMIT 1",
+                (task.id, instant_bound(stamp)),
+            ).fetchone()
+        return str(row["due_at"]) if row else None
 
     def runs(
         self,
@@ -615,7 +722,8 @@ class ScheduleStore:
         with self._connect() as connection:
             connection.execute(
                 "UPDATE scheduled_runs SET status = ?, ran_at = ?, note = ?, "
-                f"error = ? WHERE id = ? AND status IN ({','.join('?' * len(UNSETTLED))})"
+                "error = ?, dispatching = 0 "
+                f"WHERE id = ? AND status IN ({','.join('?' * len(UNSETTLED))})"
                 f"{guard}",
                 params,
             )
@@ -646,6 +754,10 @@ class ScheduleStore:
         `schedule_run_now` for the same due time dispatch a second task, which is
         the repeat the guard exists to prevent.  So the id is kept for `pending`
         and dropped for the states that are genuinely over.
+
+        **The dispatching marker goes too.**  A reopened run is one nobody is
+        doing yet and one no start call is in flight for — the caller is asking
+        for a fresh dispatch, and the next one writes its own marker.
         """
         found = self.run(name, due_at)
         if found is None or found.status not in UNSETTLED:
@@ -658,11 +770,41 @@ class ScheduleStore:
             # caller's decision (see `settle`, which states the same rule).
             connection.execute(
                 "UPDATE scheduled_runs SET status = ?, ran_at = '', note = ?, "
-                "error = '', agent_task_id = ? WHERE id = ?"
+                "error = '', agent_task_id = ?, dispatching = 0 WHERE id = ?"
                 f" AND status IN ({','.join('?' * len(UNSETTLED))})",
                 (PENDING, note, task_id, found.id, *UNSETTLED),
             )
         return self.run(name, due_at)
+
+    def begin_dispatch(self, name: str, due_at: str) -> bool:
+        """Mark a run as being dispatched, before the peer is called.
+
+        **This is the marker that tells a crash in the dispatch from a crash
+        before it.**  The row is written `pending` with no task; the start call
+        is a peer round trip whose answer is written down only afterwards, so a
+        process that stops inside it leaves neither "never started" nor "in
+        flight" behind.  This flag says the call was reached, which is the one
+        fact the sweep cannot infer from the other columns; it resolves such a
+        run by its name instead of calling it `missed` (`dispatching`).
+
+        **Compare-and-set, like every other write on a run.**  A skip can
+        settle the row between the record and this call; an unconditional
+        update would then mark a run that is over as being dispatched.  **The
+        answer is whether this call won that comparison** — the caller must not
+        start work for a row it did not claim, which is what a settled row or a
+        dispatch already in flight leaves it with.
+        """
+        task = self.task(name)
+        if task is None:
+            return False
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE scheduled_runs SET dispatching = 1 "
+                "WHERE task_id = ? AND due_at = ? AND status = ?"
+                " AND agent_task_id = '' AND dispatching = 0",
+                (task.id, due_at, PENDING),
+            )
+        return cursor.rowcount == 1
 
     def attach(self, name: str, due_at: str, agent_task_id: str) -> Run | None:
         """Say which background task is doing this run's work.
@@ -676,19 +818,43 @@ class ScheduleStore:
         if task is None:
             return None
         with self._connect() as connection:
-            # **Only a run still waiting for its task takes one.**  `status`
-            # and the empty column are the state this write is *claiming*, and
-            # reading them first would be a check with a hand-over inside it:
-            # a skip can settle the run while the peer is starting the work,
-            # and an unconditional attach then made a `skipped` row name a
-            # background task that was really running.
+            # **Only a run still in dispatch takes one.**  `status`,
+            # `dispatching` and the empty column are the state this write is
+            # *claiming*, and reading them first would be a check with a
+            # hand-over inside it: a skip can settle the run while the peer is
+            # starting the work, and an unconditional attach then made a
+            # `skipped` row name a background task that was really running.
+            # The same guard is what makes the startup sweep's adoption
+            # (`dispatching` → running task) one write rather than two.
             connection.execute(
-                "UPDATE scheduled_runs SET agent_task_id = ? "
+                "UPDATE scheduled_runs SET agent_task_id = ?, dispatching = 0 "
                 "WHERE task_id = ? AND due_at = ? AND status = ?"
-                " AND agent_task_id = ''",
+                " AND agent_task_id = '' AND dispatching = 1",
                 (agent_task_id, task.id, due_at, PENDING),
             )
         return self.run(name, due_at)
+
+    def dispatching(self) -> list[Run]:
+        """Runs whose start call was reached and whose answer was never written.
+
+        What the startup sweep resolves, and the poll does not: a marker can be
+        one that a live dispatch in *this* process is about to clear, so asking
+        an agent-task peer about it mid-flight is a question with no safe
+        answer.  At startup the process that wrote the marker is gone, so the
+        marker is stale by construction and the peer's answer is final.
+
+        Ordered by due time, like every other listing, so a log line and a test
+        read them the way the clock considered them.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT r.*, t.name AS task_name FROM scheduled_runs r "
+                "JOIN scheduled_tasks t ON t.id = r.task_id "
+                "WHERE r.status = ? AND r.dispatching = 1 "
+                f"{_by_instant('r.due_at', newest_first=False)}",
+                (PENDING,),
+            ).fetchall()
+        return [_run(row, row["task_name"]) for row in rows]
 
     def in_flight(self) -> list[Run]:
         """Runs whose work is being done right now: `pending`, with a task.
@@ -710,14 +876,20 @@ class ScheduleStore:
     def sweep(self) -> int:
         """Close every `pending` run a stopped process left behind.
 
-        **Two endings, and the column the scheduler already wrote decides
-        which.**  A run with no `agent_task_id` never got as far as starting the
-        work — the process stopped between the record and the dispatch — so it
-        is `missed`: the fire came due and nothing ran.  A run that names a task
-        did start, and its ending was never observed, so it is `failed`: the work
-        may have happened and the ledger cannot say.  Both are re-openable
-        (`schedule_run_now` with the due time), which is how an instance that
-        comes up decides whether to run it again.
+        **Two endings, and the columns the scheduler already wrote decide
+        which.**  A run with no `agent_task_id` and no dispatching marker never
+        got as far as starting the work — the process stopped between the record
+        and the dispatch — so it is `missed`: the fire came due and nothing ran.
+        A run that names a task did start, and its ending was never observed, so
+        it is `failed`: the work may have happened and the ledger cannot say.
+        Both are re-openable (`schedule_run_now` with the due time), which is how
+        an instance that comes up decides whether to run it again.
+
+        **A run still dispatching is not swept.**  A marker means a start call
+        was reached, so neither ending is this method's to write: the answer may
+        be a live task, and only the caller — which can ask the agent-task plugin
+        by the run's name — can say what became of it (`dispatching`).  The row
+        stays `pending` with the marker for that resolution.
 
         Returns how many it moved, so the caller can say.
         """
@@ -725,7 +897,7 @@ class ScheduleStore:
         with self._connect() as connection:
             missed = connection.execute(
                 "UPDATE scheduled_runs SET status = ?, error = ? "
-                "WHERE status = ? AND agent_task_id = ''",
+                "WHERE status = ? AND agent_task_id = '' AND dispatching = 0",
                 (
                     MISSED,
                     f"the instance stopped before this run started ({moment})",

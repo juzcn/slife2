@@ -15,7 +15,7 @@ is (`slife2.tui.app`), and it is drawn either as its own turn or — when it
 arrives while a turn is running — as a line inside that turn.  The second is a
 *note*: a line the harness has to say and nobody has to answer — a peer came
 online, a turn was cancelled — so it is drawn where every such line is drawn
-(`ChatView.add_note`, `slife2.tui.notes`) and the conversation never learns of
+(`ChatView.add_note`, `slife2.libs.harness.notes`) and the conversation never learns of
 it.  Same stream, same acknowledgement, one branch at the far end.
 
 **This is a plugin, and the window is a client of it.**  It used to be the one
@@ -40,7 +40,10 @@ which cancels the handler behind it, which is the detach.
 
 **Four tools, and none of them is the model's.**  `submit` is a channel's,
 `note` is the harness's, `attach` is a window's, and `attached` answers whether
-one is there; all four are addressed by an agent name.  Nothing here carries
+one is there; all four are addressed by an agent name, **taken stripped at the
+wire**: a name with stray whitespace is the same session as the clean one, so
+the window `attach` registers and the `attached` that asks about it cannot come
+to two keys (`conversation_key` does not normalise).  Nothing here carries
 `slife2.libs.plugin.audience.FOR_THE_MODEL`, so the hub leaves all of it out of
 the tool set, and the plugin serves no `list_sources` — it declares no rows, and
 is therefore asked for none (`slife2.libs.plugin.protocol`).
@@ -62,9 +65,7 @@ turn is the failure the acknowledgement exists to prevent.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -74,56 +75,28 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
 from slife2.libs.plugin.audience import conversation_key
 from slife2.libs.plugin.protocol import house_server, serve_plugin
+from slife2.libs.plugin.vocabulary import (
+    ATTACH,
+    ATTACHED,
+    NO_WINDOW,
+    NOTE,
+    SUBMIT,
+    TURN,
+    WINDOW_CHANNEL,
+    Handover,
+    encode,
+)
 
 logger = logging.getLogger(__name__)
 
 SERVER_NAME = TUI_SERVER_NAME
 #: The `servers:` key this plugin's address is filed under, like every other one
 #: that owns no section: an address is the whole of what is written down about it.
-CONFIG_KEY = "tui"
+CONFIG_KEY = WINDOW_CHANNEL
 
-#: The tool names, spelled once because each crosses a process boundary: the
-#: window's client calls `attach` (`slife2.tui.client`), and a channel calls
-#: `submit` — or `note`, when it has a line for the person rather than a message
-#: for the conversation.
-ATTACH = "attach"
-SUBMIT = "submit"
-NOTE = "note"
-#: The one read-only question here: whether a window is showing an agent.  A
-#: scheduler asks it before starting work whose answer would have nowhere to go.
-ATTACHED = "attached"
-
-#: What a hand-over asks the window to do with the words, and the one branch
-#: between them: `TURN` is run as a turn of the conversation, `NOTE` is drawn as
-#: a harness line and nothing else.  `NOTE` is its own tool name because the two
-#: coincide; `TURN` is not `SUBMIT` because what the window does with a submitted
-#: message is *run it*, which is the fact the window branches on.
-TURN = "turn"
-KINDS: tuple[str, ...] = (TURN, NOTE)
-
-#: What `submit` says when there is nothing to hand a message to.  A constant
-#: because a *caller* has to be able to recognise it: see `refused`.
-NO_WINDOW = "no window is showing"
-
-
-def refused(error: Exception) -> bool:
-    """Whether a `submit` failed because no window is showing that agent.
-
-    **The one failure a caller may safely repeat**, and the reason this is a
-    function rather than a `ToolError` check at the call site.  Everything a tool
-    handler raises arrives at the far end as a `ToolError` (`serve` pins
-    `mask_error_details=False`, which is what keeps the text) — so the *type*
-    cannot tell a refusal from a stream that dropped, and a caller that read it
-    as one would hand over words that had already been written.
-
-    What makes this one decidable is that `submit` looks the session up **before
-    it posts anything**: nothing was written, so trying somewhere else cannot
-    duplicate anything.  The module that writes the message is the one that
-    answers what it looks like — the same arrangement `MARKER_PREFIX` makes for a
-    marker, and `tests/plugins/agent_task/test_agent_task.py` holds the pair
-    together.
-    """
-    return isinstance(error, ToolError) and NO_WINDOW in str(error)
+# The four tools, the hand-over codec and the refusal's sentence are
+# `slife2.libs.plugin.vocabulary`'s: each crosses a process boundary, so the
+# window's client and the harness import the names without loading this server.
 
 
 INSTRUCTIONS = (
@@ -132,100 +105,6 @@ INSTRUCTIONS = (
     "channel that is not the person at that terminal; `attached` answers "
     "whether a window is showing it."
 )
-
-
-@dataclass(frozen=True)
-class Handover:
-    """One hand-over on its way to a window: the words, and where they came in.
-
-    `ticket` exists so that a caller and the push that carries it can agree on
-    *which* hand-over is being acknowledged — a number rather than the words,
-    because the same words twice is an ordinary thing for somebody to send.
-
-    `kind` is what the window does with it, and there are two: a **turn** is put
-    in the queue the person's own typing goes into and run as one (`submit`), and
-    a **note** is drawn as a line and nothing else (`note`).  A note needs no
-    channel — it is not on any channel, it is the harness talking — and carries
-    `""` in its place so that one dataclass and one wire shape serve both.
-    """
-
-    ticket: int
-    text: str
-    channel: str
-    kind: str = TURN
-
-
-def encode(handover: Handover) -> str:
-    """Encode a hand-over for an MCP progress notification's `message` field.
-
-    Same convention as a turn's events (`slife2.libs.turn.events.encode`), and the same
-    reasons: the field is a plain string, so the payload crosses as compact JSON,
-    and `ensure_ascii=True` keeps it representable on a console whose codepage is
-    not UTF-8.  The encode and the decode live beside each other so one
-    round-trip test covers the contract.
-
-    It is deliberately **not** one of `slife2.libs.turn.events`' variants: those are the
-    events a *turn* produces, and this is a control message that causes one — or
-    a line drawn without one.
-    """
-    return json.dumps(
-        {
-            "t": "handover",
-            "id": handover.ticket,
-            "d": handover.text,
-            "c": handover.channel,
-            "k": handover.kind,
-        },
-        ensure_ascii=True,
-        separators=(",", ":"),
-    )
-
-
-def decode(message: str) -> Handover | None:
-    """Decode a progress notification's `message`, or None if it is not ours.
-
-    None rather than an exception for `slife2.libs.turn.events.decode`'s reason: a
-    notification this build has no word for is a line not read, and the caller
-    is a display that should stay up rather than a turn that should die.
-
-    **And a `k` that is not one of `KINDS` is such a line.**  An absent or
-    unknown kind used to read as `TURN`, argued from the older-plugin direction
-    — a hand-over before there were two kinds was always a turn.  But the
-    direction that costs something is the other one: a *newer* plugin's third
-    kind would be executed as a conversation turn rather than drawn as a line,
-    and a line run as a turn is a model call nobody asked for.  So the safer
-    branch is the refusal (SDD Appendix C: a weaker path is not a substitute
-    for a missing capability).
-    """
-    try:
-        payload = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-    if not isinstance(payload, dict) or payload.get("t") != "handover":
-        return None
-    text = payload.get("d")
-    channel = payload.get("c")
-    if not isinstance(text, str) or not isinstance(channel, str):
-        return None
-    kind = payload.get("k")
-    if kind not in KINDS:
-        return None
-    # **Checked like the two fields above it**, because this is the reader for
-    # the stream a window holds open: `int("x")` and `int([1])` raise, and a
-    # raise here ends the progress callback that delivers every hand-over for
-    # that window — one malformed push from a peer on another build, or a torn
-    # write, and the delivery path is gone for the life of the attachment.  A
-    # `bool` is not a ticket either.
-    ticket = payload.get("id")
-    if not isinstance(ticket, int) or isinstance(ticket, bool):
-        return None
-    return Handover(
-        ticket=ticket,
-        text=text,
-        channel=channel,
-        kind=kind,
-    )
 
 
 class WindowSession:
@@ -473,6 +352,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
                 one agent replaces the first, which is how a stale session from a
                 killed window is cleared.
         """
+        agent = agent.strip()
         session = windows.attach(agent)
         try:
             await _push(ctx, session)
@@ -524,14 +404,14 @@ def build_server(_config: Config | None = None) -> FastMCP:
                 thing this system says for any missing peer, arriving here as
                 "nobody is looking at that conversation".
         """
-        await _hand_over(agent, text, channel, TURN)
+        await _hand_over(agent.strip(), text, channel, TURN)
 
     @mcp.tool(name=NOTE)
     async def note(agent: str, text: str) -> None:
         """Hand an agent's window a line to draw — no turn, no model, no record.
 
         **A note is the harness talking, not a channel.**  It reaches the window
-        as `add_note` does (`slife2.tui.notes`), in the same bracket every other
+        as `add_note` does (`slife2.libs.harness.notes`), in the same bracket every other
         harness line wears, and the conversation never learns of it: nothing is
         queued, nothing runs, and nothing is stored — so a peer coming online
         costs no model call and leaves no trace in the turn log, which is exactly
@@ -552,7 +432,7 @@ def build_server(_config: Config | None = None) -> FastMCP:
         Raises:
             ToolError: If no window is showing that agent.
         """
-        await _hand_over(agent, text, "", NOTE)
+        await _hand_over(agent.strip(), text, "", NOTE)
 
     return mcp
 

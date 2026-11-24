@@ -18,15 +18,17 @@ scripted streamer makes no network call.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import pytest
 from anthropic.types import (
     RawContentBlockDeltaEvent,
     RawContentBlockStartEvent,
+    RawContentBlockStopEvent,
     RawMessageDeltaEvent,
     RawMessageStartEvent,
 )
@@ -40,6 +42,10 @@ from openai.types.responses import (
     ResponseIncompleteEvent,
     ResponseOutputItemAddedEvent,
     ResponseReasoningSummaryTextDeltaEvent,
+    ResponseReasoningSummaryTextDoneEvent,
+    ResponseReasoningTextDoneEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseRefusalDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
@@ -51,6 +57,7 @@ from slife2.libs.turn.messages import Message, ToolCall, ToolSpec, Usage
 from slife2.plugins.llm import openai_server
 from slife2.plugins.llm.anthropic_server import (
     DEFAULT_MAX_TOKENS,
+    ThinkingBlocks,
     as_delta,
     normalised_stop,
     to_anthropic_blocks,
@@ -80,7 +87,13 @@ from slife2.plugins.llm.openai_server import (
 from slife2.plugins.llm.openai_server import (
     translate as openai_translate,
 )
-from slife2.plugins.llm.server_common import ToolCallAccumulator, build_llm_server
+from slife2.plugins.llm.server_common import (
+    ToolCallAccumulator,
+    build_llm_server,
+    sdk_client_factory,
+    sdk_streamer,
+    stream_chat_impl,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -105,6 +118,23 @@ def test_openai_text_delta() -> None:
         choices=[{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]
     )
     assert openai_translate(event) == [Chunk(text="hi")]
+
+
+def test_openai_a_refusal_is_the_answer() -> None:
+    """**The protocol's refusal channel is output, not an absence.**  Reading
+    only `content` made a refusal `text=""`, and the loop then failed the turn
+    saying the provider answered with nothing — the model's only words
+    discarded, on the one path where it did answer."""
+    event = _oa(
+        choices=[
+            {
+                "index": 0,
+                "delta": {"refusal": "I cannot help with that."},
+                "finish_reason": None,
+            }
+        ]
+    )
+    assert openai_translate(event) == [Chunk(text="I cannot help with that.")]
 
 
 def test_openai_tool_call_fragments_carry_index_id_and_name() -> None:
@@ -497,6 +527,100 @@ def test_anthropic_forwards_thinking_as_its_own_kind() -> None:
     assert anthropic_translate(event) == [Chunk(thinking="hmm")]
 
 
+def test_anthropic_assembles_a_signed_thinking_block_across_events() -> None:
+    """**The block, not just its text, is what the API requires back.**
+
+    With thinking on, the second call of a tool loop is a 400 unless the
+    previous assistant turn returns its thinking blocks unmodified beside the
+    tool results.  The text streams as deltas and the signature arrives in an
+    event of its own afterwards, so the block is assembled across the stream —
+    which is why the translation carries per-stream state.
+    """
+    state = ThinkingBlocks()
+    start = RawContentBlockStartEvent.model_validate(
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+        }
+    )
+    assert anthropic_translate(start, state) == []
+
+    text = RawContentBlockDeltaEvent.model_validate(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "hmm"},
+        }
+    )
+    assert anthropic_translate(text, state) == [Chunk(thinking="hmm")]
+
+    signature = RawContentBlockDeltaEvent.model_validate(
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "sig-1"},
+        }
+    )
+    assert anthropic_translate(signature, state) == []
+
+    stop = RawContentBlockStopEvent.model_validate(
+        {"type": "content_block_stop", "index": 0}
+    )
+    (block,) = anthropic_translate(stop, state)
+    assert block.reasoning == (
+        {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
+    )
+
+
+def test_anthropic_does_not_replay_an_unsigned_thinking_block() -> None:
+    """A gateway that signs nothing has no block this build could replay.
+
+    The readable text still streams; the opaque payload is simply absent, which
+    is the behaviour before the payload existed — and a block invented without
+    its signature would be the 400 this fix exists to prevent.  A redacted
+    block needs no text and is complete when it starts.
+    """
+    state = ThinkingBlocks()
+    anthropic_translate(
+        RawContentBlockStartEvent.model_validate(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+            }
+        ),
+        state,
+    )
+    anthropic_translate(
+        RawContentBlockDeltaEvent.model_validate(
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": "hmm"},
+            }
+        ),
+        state,
+    )
+    stop = RawContentBlockStopEvent.model_validate(
+        {"type": "content_block_stop", "index": 0}
+    )
+    assert anthropic_translate(stop, state) == []
+
+    redacted = anthropic_translate(
+        RawContentBlockStartEvent.model_validate(
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "redacted_thinking", "data": "zzz"},
+            }
+        )
+    )
+    assert redacted == [
+        Chunk(reasoning=({"type": "redacted_thinking", "data": "zzz"},))
+    ]
+
+
 def test_openai_forwards_reasoning_content() -> None:
     event = _oa(
         choices=[
@@ -699,6 +823,55 @@ def test_responses_text_delta() -> None:
     assert responses_translate(_text_delta("hi")) == [Chunk(text="hi")]
 
 
+def _refusal_delta(text: str) -> ResponseRefusalDeltaEvent:
+    return ResponseRefusalDeltaEvent.model_validate(
+        {
+            "type": "response.refusal.delta",
+            "content_index": 0,
+            "delta": text,
+            "item_id": "i",
+            "output_index": 0,
+            "sequence_number": 1,
+        }
+    )
+
+
+def _refusal_done(text: str) -> ResponseRefusalDoneEvent:
+    return ResponseRefusalDoneEvent.model_validate(
+        {
+            "type": "response.refusal.done",
+            "content_index": 0,
+            "item_id": "i",
+            "output_index": 0,
+            "refusal": text,
+            "sequence_number": 2,
+        }
+    )
+
+
+def test_responses_a_refusal_is_the_answer() -> None:
+    assert responses_translate(_refusal_delta("I cannot.")) == [Chunk(text="I cannot.")]
+    assert responses_translate(_refusal_done("I cannot.")) == [Chunk(text="I cannot.")]
+    assert responses_translate(_refusal_done("I cannot."), streamed={0}) == []
+
+
+def test_responses_fills_in_a_refusal_that_never_streamed() -> None:
+    """The assembled message may carry a `refusal` part where a normal answer
+    has `output_text`; reading only the text half recorded an empty answer."""
+    item = {
+        "type": "message",
+        "id": "m1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "refusal", "refusal": "I cannot."}],
+    }
+    event = _completed(output=[item])
+    assert responses_translate(event) == [
+        Chunk(text="I cannot."),
+        Finish(stop_reason="stop"),
+    ]
+
+
 def test_responses_reasoning_summary_is_its_own_kind() -> None:
     """A reasoning summary must arrive as `thinking`, never as the answer.
 
@@ -824,7 +997,14 @@ def test_responses_fills_in_arguments_that_never_streamed() -> None:
 
     assert responses_translate(event) == [
         Chunk(
-            tool_call_deltas=(ToolCallDelta(index=0, arguments_delta='{"e": "6*7"}'),)
+            tool_call_deltas=(
+                ToolCallDelta(
+                    index=0,
+                    id="c1",
+                    name="calc",
+                    arguments_delta='{"e": "6*7"}',
+                ),
+            )
         ),
         Finish(stop_reason="tool_calls"),
     ]
@@ -909,6 +1089,132 @@ def test_responses_a_stream_that_delivered_its_text_is_not_answered_twice() -> N
     assert responses_translate(
         _completed(output=[_message_item("forty-two")]), streamed=streamed
     ) == [Finish(stop_reason="stop")]
+
+
+def _reasoning_summary_done(text: str) -> ResponseReasoningSummaryTextDoneEvent:
+    return ResponseReasoningSummaryTextDoneEvent.model_validate(
+        {
+            "type": "response.reasoning_summary_text.done",
+            "item_id": "r1",
+            "output_index": 0,
+            "summary_index": 0,
+            "sequence_number": 2,
+            "text": text,
+        }
+    )
+
+
+def _reasoning_item(summary: str) -> dict[str, Any]:
+    """The assembled reasoning, as `response.output` carries it."""
+    return {
+        "type": "reasoning",
+        "id": "r1",
+        "summary": [{"type": "summary_text", "text": summary}],
+    }
+
+
+def test_responses_reads_the_reasoning_a_gateway_sends_whole() -> None:
+    """**The reasoning half of the text back-fill, and it was missing.**
+
+    The thinking parts were assembled from the reasoning *deltas* and from
+    nothing else, so an endpoint that assembles the summary and sends it whole
+    — the same partial gateway the text back-fill exists for — left them empty
+    while the `Finish` arrived anyway: the answer was right and the model's
+    working was simply absent, with nothing anywhere saying a thing was lost.
+    """
+    assert responses_translate(_reasoning_summary_done("six sevens")) == [
+        Chunk(thinking="six sevens")
+    ]
+    # An index that *did* stream is left alone: the whole summary appended
+    # after its own deltas would be the same thinking twice.
+    assert (
+        responses_translate(_reasoning_summary_done("six sevens"), streamed={0}) == []
+    )
+
+
+def test_responses_fills_in_the_reasoning_that_never_streamed() -> None:
+    """The terminal response carries the reasoning item, so an index whose
+    reasoning never streamed — delta or `.done` — is read from there, beside
+    the text back-fill it mirrors."""
+    event = _completed(output=[_reasoning_item("six sevens"), _message_item("42")])
+
+    assert responses_translate(event) == [
+        Chunk(text="42"),
+        Chunk(thinking="six sevens"),
+        # The replayable item goes back whether or not its summary streamed:
+        # the display channel is not what the next call needs.
+        Chunk(reasoning=(_reasoning_item("six sevens"),)),
+        Finish(stop_reason="stop"),
+    ]
+    assert responses_translate(event, streamed={0}) == [
+        Chunk(text="42"),
+        Chunk(reasoning=(_reasoning_item("six sevens"),)),
+        Finish(stop_reason="stop"),
+    ]
+
+
+def test_responses_reasoning_that_streamed_is_not_answered_twice() -> None:
+    """The memory is per stream, on the text's rule: a gateway that sends the
+    deltas *and* the assembled summary must reach the transcript once."""
+    streamed: set[int] = set()
+    delta = ResponseReasoningSummaryTextDeltaEvent.model_validate(
+        {
+            "type": "response.reasoning_summary_text.delta",
+            "delta": "six sevens",
+            "item_id": "r1",
+            "output_index": 0,
+            "summary_index": 0,
+            "sequence_number": 1,
+        }
+    )
+
+    assert responses_translate(delta, streamed=streamed) == [
+        Chunk(thinking="six sevens")
+    ]
+    assert (
+        responses_translate(_reasoning_summary_done("six sevens"), streamed=streamed)
+        == []
+    )
+    assert responses_translate(
+        _completed(output=[_reasoning_item("six sevens")]), streamed=streamed
+    ) == [
+        Chunk(reasoning=(_reasoning_item("six sevens"),)),
+        Finish(stop_reason="stop"),
+    ]
+
+
+def test_responses_the_full_reasoning_text_is_read_on_the_same_terms() -> None:
+    """`reasoning_text` is the other kind the deltas arrive as, so its whole
+    form is read the same way — the `.done` event, and the item's `content`
+    parts in the terminal response."""
+    done = ResponseReasoningTextDoneEvent.model_validate(
+        {
+            "type": "response.reasoning_text.done",
+            "item_id": "r1",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 2,
+            "text": "the working",
+        }
+    )
+    assert responses_translate(done) == [Chunk(thinking="the working")]
+
+    item = _reasoning_item("")
+    item["content"] = [{"type": "reasoning_text", "text": "the working"}]
+    assert responses_translate(_completed(output=[item])) == [
+        Chunk(thinking="the working"),
+        Chunk(
+            reasoning=(
+                {
+                    "type": "reasoning",
+                    "id": "r1",
+                    "summary": [{"type": "summary_text", "text": ""}],
+                    "content": [{"type": "reasoning_text", "text": "the working"}],
+                },
+            )
+        ),
+        Finish(stop_reason="stop"),
+    ]
 
 
 def test_responses_a_truncated_response_says_length() -> None:
@@ -1276,6 +1582,29 @@ def test_responses_an_assistant_turn_is_its_text_then_its_calls() -> None:
     ]
 
 
+def test_responses_a_damaged_call_replays_its_own_arguments() -> None:
+    """**A call the wire could not read goes back as the wire carried it.**
+
+    `ToolCall.to_wire` preserves `raw_arguments` for the chat wire, and this
+    adapter used to re-serialise the empty dict instead: a replayed history
+    then held a call the model never made, and the decision tools' one repair
+    round — which sends the refused answer as the model's own call — showed the
+    model `{}` where its text should be.  The chat and Responses wires carry one
+    conversation now; the Anthropic wire's `input` is an object by protocol and
+    cannot carry damaged text at all.
+    """
+    damaged = ToolCall(
+        id="c1",
+        name="_context_rebuild",
+        arguments={},
+        error='the arguments are not JSON: "Expecting value"',
+        raw_arguments='{"context": "keep"',
+    )
+    _, items = to_responses_input([Message(role="assistant", tool_calls=[damaged])])
+
+    assert items[0]["arguments"] == '{"context": "keep"'
+
+
 def test_responses_an_assistant_turn_with_only_calls_has_no_message_item() -> None:
     _, items = to_responses_input(
         [Message(role="assistant", tool_calls=[ToolCall(id="c1", name="calc")])]
@@ -1428,7 +1757,7 @@ def scripted(*events) -> Streamer:
 
     async def stream(
         provider: str, messages: list[Message], tools: list[ToolSpec], model: str
-    ) -> AsyncIterator[Chunk | Finish]:
+    ) -> AsyncGenerator[Chunk | Finish]:
         for event in events:
             yield event
 
@@ -1466,6 +1795,52 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
     assert result.data["text"] == "hello"
     assert result.data["stop_reason"] == "stop"
     assert [c.text for c in chunks] == ["he", "llo"]
+
+
+@pytest.mark.asyncio
+async def test_the_decision_options_reach_the_streamer() -> None:
+    """The two per-call options cross the MCP hop, and only when set.
+
+    The decision calls are the only caller that sets them; a turn's own call
+    sends neither and a scripted four-argument streamer still works.
+    """
+    seen: dict[str, str] = {}
+
+    async def stream(
+        provider: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        model: str,
+        *,
+        tool_choice: str = "",
+        thinking: str = "",
+    ) -> AsyncGenerator[Chunk | Finish]:
+        seen["tool_choice"] = tool_choice
+        seen["thinking"] = thinking
+        yield Chunk(text="ok")
+        yield Finish("stop")
+
+    server = build_llm_server(name="t", streamer=stream)
+    result, _chunks = await call_stream_chat(
+        server,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "_context_rebuild",
+                    "description": "d",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        model="m",
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+
+    assert seen == {"tool_choice": "_context_rebuild", "thinking": "disabled"}
+    assert result.data["text"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -1550,6 +1925,33 @@ async def test_stream_chat_returns_the_assembled_reasoning() -> None:
     assert result.data["text"] == "42"
     # ...and the reader saw it as it arrived, on its own kind of chunk.
     assert [c.thinking for c in chunks] == ["six sevens ", "are forty-two", ""]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_binds_reasoning_blocks_to_the_model_that_made_them() -> None:
+    """The opaque payload reaches the result, stamped with its model.
+
+    The stamp is what lets an adapter decide whether a signed block may be
+    replayed after a `model_switch`.  The block is not display: it does not
+    cross the progress wire, and a dropped chunk therefore cannot cost the
+    conversation what it needs for the next call.
+    """
+    block = {"type": "thinking", "thinking": "hmm", "signature": "sig-1"}
+    server = build_llm_server(
+        name="t",
+        streamer=scripted(
+            Chunk(thinking="hmm"),
+            Chunk(reasoning=(block,)),
+            Chunk(text="42"),
+            Finish("stop"),
+        ),
+    )
+    result, chunks = await call_stream_chat(
+        server, messages=[{"role": "user", "content": "hi"}], tools=[], model="qwen"
+    )
+
+    assert result.data["reasoning"] == {"model": "qwen", "blocks": [block]}
+    assert [chunk.reasoning for chunk in chunks] == [(), (), ()]
 
 
 @pytest.mark.asyncio
@@ -1700,41 +2102,59 @@ def test_openai_stream_usage_is_asked_for_unless_a_gateway_refuses_it() -> None:
     own default in place and that is the right one.  `omit` is the escape hatch
     for a gateway that rejects the extension with a 400, which is the whole
     reason the knob exists: without it such a gateway is unusable with no
-    workaround at all.
+    workaround at all.  The knob is per model — whether the field is accepted
+    is a fact about the endpoint — and it is the only switch there is.
     """
     plain = ModelSettings(model="m")
-    request = openai_build_request([], [], plain, stream_usage=True)
+    request = openai_build_request([], [], plain)
     assert request["stream_options"] == {"include_usage": True}
 
     omitted = ModelSettings(model="m", stream_usage="omit")
-    assert "stream_options" not in openai_build_request(
-        [], [], omitted, stream_usage=True
-    )
-
-    # The knob is per model, and the parameter is the server's own switch: a
-    # call that asked for nothing is not given a field back by a model setting.
-    assert "stream_options" not in openai_build_request(
-        [], [], plain, stream_usage=False
-    )
+    assert "stream_options" not in openai_build_request([], [], omitted)
 
 
 def test_openai_sends_only_what_was_configured() -> None:
     bare = ModelSettings(model="m")
-    request = openai_build_request(
-        [Message(role="user", content="hi")], [], bare, stream_usage=False
-    )
+    request = openai_build_request([Message(role="user", content="hi")], [], bare)
     assert "temperature" not in request
     assert "top_p" not in request
     assert "max_tokens" not in request
     assert "thinking" not in request
 
     tuned = ModelSettings(model="m", temperature=0.3, top_p=0.9, max_tokens=100)
-    request = openai_build_request(
-        [Message(role="user", content="hi")], [], tuned, stream_usage=True
-    )
+    request = openai_build_request([Message(role="user", content="hi")], [], tuned)
     assert request["temperature"] == 0.3
     assert request["top_p"] == 0.9
     assert request["max_tokens"] == 100
+
+
+def test_a_call_can_override_the_configured_temperature() -> None:
+    """The decision calls send 0; the turn's own calls keep the config.
+
+    A decision is a selection, not prose, so sampling only adds variance to the
+    same answer.  The override is per call, so the model's configured
+    temperature still governs every ordinary turn.
+    """
+    tuned = ModelSettings(model="m", temperature=0.7)
+    assert openai_build_request([], [], tuned, temperature=0.0)["temperature"] == 0.0
+    assert (
+        anthropic_build_request([], [], tuned, temperature=0.0)["extra_body"][
+            "temperature"
+        ]
+        == 0.0
+    )
+    assert responses_build_request([], [], tuned, temperature=0.0)["temperature"] == 0.0
+
+    # No override: the configured value stands on every wire.
+    assert openai_build_request([], [], tuned)["temperature"] == 0.7
+    assert anthropic_build_request([], [], tuned)["extra_body"]["temperature"] == 0.7
+    assert responses_build_request([], [], tuned)["temperature"] == 0.7
+
+    # A model with no configured temperature gets the override, and nothing
+    # when no override is named.
+    bare = ModelSettings(model="m")
+    assert openai_build_request([], [], bare, temperature=0.0)["temperature"] == 0.0
+    assert "temperature" not in openai_build_request([], [], bare)
 
 
 def test_openai_thinking_is_opt_in() -> None:
@@ -1747,24 +2167,127 @@ def test_openai_thinking_is_opt_in() -> None:
     `thinking` parameter to pass it as — the guard test below is what holds that.
     """
     native = ModelSettings(model="m", reasoning=True)
-    assert "thinking" not in openai_build_request([], [], native, stream_usage=True)
+    assert "thinking" not in openai_build_request([], [], native)
 
     asked = ModelSettings(
         model="m", reasoning=True, thinking="enabled", max_tokens=1000
     )
-    request = openai_build_request([], [], asked, stream_usage=True)
+    request = openai_build_request([], [], asked)
     assert request["extra_body"]["thinking"]["type"] == "enabled"
     # Half the budget, because the other half is what the answer is made of.
     assert request["extra_body"]["thinking"]["budget_tokens"] == 500
 
     refused = ModelSettings(model="m", reasoning=True, thinking="disabled")
-    refused_request = openai_build_request([], [], refused, stream_usage=True)
+    refused_request = openai_build_request([], [], refused)
     assert refused_request["extra_body"]["thinking"]["type"] == "disabled"
 
     omitted = ModelSettings(model="m", thinking="omit")
-    omitted_request = openai_build_request([], [], omitted, stream_usage=True)
+    omitted_request = openai_build_request([], [], omitted)
     assert "thinking" not in omitted_request
     assert "extra_body" not in omitted_request, "nothing to carry, no hatch opened"
+
+
+def test_the_decision_options_are_per_call() -> None:
+    """A forced tool and thinking off are the call's, not the model's config.
+
+    The decision calls force one tool and disable thinking; the turn's own
+    calls keep the configured value, so neither field may leak into a request
+    that did not ask for it.
+    """
+    tool = ToolSpec(
+        name="_context_rebuild", description="d", parameters={"type": "object"}
+    )
+    request = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True),
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+    assert request["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "_context_rebuild"},
+    }
+    assert request["extra_body"]["thinking"]["type"] == "disabled"
+
+    plain = openai_build_request([], [tool], ModelSettings(model="m", reasoning=True))
+    assert "tool_choice" not in plain
+    assert "extra_body" not in plain, "the override is not a config edit"
+
+    with pytest.raises(ValueError, match="sends no tools"):
+        openai_build_request(
+            [], [], ModelSettings(model="m"), tool_choice="_context_rebuild"
+        )
+
+
+def test_the_thinking_override_covers_an_explicit_compat_thinking() -> None:
+    """**The override reads the field, not only the reasoning flag.**
+
+    `compat.thinking: enabled` asks for a thinking block whatever `reasoning`
+    says (`thinking_parameter` reads the field), so keying the override on
+    `reasoning` alone sent `thinking` **and** a forced `tool_choice` — a
+    thinking endpoint answers that with a 400, and both decision calls would
+    fail on such a model.  A model that names neither is sent no field: the
+    override must not open a hatch the operator left closed.
+    """
+    tool = ToolSpec(
+        name="_context_rebuild", description="d", parameters={"type": "object"}
+    )
+    declared = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=False, thinking="enabled", max_tokens=8000),
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+    assert declared["extra_body"] == {"thinking": {"type": "disabled"}}
+
+    silent = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m"),
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+    assert "extra_body" not in silent, "an endpoint that was not asked to think"
+
+    omitted = openai_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True, thinking="omit"),
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+    assert "extra_body" not in omitted, "the operator's `omit` is respected"
+
+
+def test_anthropic_and_responses_map_the_forced_choice() -> None:
+    """The same two options, in each wire's own spelling."""
+    tool = ToolSpec(
+        name="_context_rebuild", description="d", parameters={"type": "object"}
+    )
+    anthropic = anthropic_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True, max_tokens=8000),
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+    assert anthropic["tool_choice"] == {"type": "tool", "name": "_context_rebuild"}
+    assert "thinking" not in anthropic, "the override suppresses the configured block"
+
+    responses = responses_build_request(
+        [],
+        [tool],
+        ModelSettings(model="m", reasoning=True),
+        tool_choice="_context_rebuild",
+        thinking="disabled",
+    )
+    assert responses["tool_choice"] == {
+        "type": "function",
+        "name": "_context_rebuild",
+    }
+    assert "reasoning" not in responses
 
 
 def test_thinking_enabled_without_a_cap_is_refused() -> None:
@@ -1779,7 +2302,7 @@ def test_thinking_enabled_without_a_cap_is_refused() -> None:
     asked = ModelSettings(model="m", reasoning=True, thinking="enabled")
 
     with pytest.raises(ValueError) as raised:
-        openai_build_request([], [], asked, stream_usage=True)
+        openai_build_request([], [], asked)
 
     assert "max_tokens" in str(raised.value)
 
@@ -1795,7 +2318,7 @@ def test_an_unrecognised_thinking_value_is_refused_not_ignored() -> None:
     """
     settings = ModelSettings(model="m", reasoning=True, thinking="enabledd")
     with pytest.raises(ValueError) as raised:
-        openai_build_request([], [], settings, stream_usage=True)
+        openai_build_request([], [], settings)
 
     message = str(raised.value)
     assert "enabledd" in message, "the value is named"
@@ -1834,7 +2357,6 @@ def test_the_openai_request_only_names_arguments_the_sdk_has() -> None:
         ],
         [ToolSpec(name="t", description="d", parameters={"type": "object"})],
         settings,
-        stream_usage=True,
     )
 
     assert set(request) - accepted == set(), "a key the SDK would refuse"
@@ -2079,6 +2601,68 @@ def test_the_anthropic_request_only_names_arguments_the_sdk_has() -> None:
     )
 
 
+def test_anthropic_replays_thinking_blocks_before_the_answer() -> None:
+    """The blocks go back unmodified, in front of the text and the calls.
+
+    That is the order the API emitted them in and the order it requires them
+    back in.  A block signed by another model is not replayed — a conversation
+    moved with `model_switch` must not send model A's signature to model B —
+    and neither is one whose shape this build cannot put on the wire.
+    """
+    payload = {
+        "model": "m",
+        "blocks": [
+            {"type": "thinking", "thinking": "hmm", "signature": "sig-1"},
+            {"type": "redacted_thinking", "data": "zzz"},
+        ],
+    }
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        reasoning=payload,
+        tool_calls=[ToolCall(id="c1", name="t", arguments={})],
+    )
+
+    _, same = to_anthropic_messages([assistant], model="m")
+    assert [block["type"] for block in same[0]["content"]] == [
+        "thinking",
+        "redacted_thinking",
+        "text",
+        "tool_use",
+    ]
+    assert same[0]["content"][0] == payload["blocks"][0]
+
+    _, other = to_anthropic_messages([assistant], model="another")
+    assert [block["type"] for block in other[0]["content"]] == ["text", "tool_use"]
+
+
+def test_anthropic_replays_reasoning_only_when_thinking_was_asked_for() -> None:
+    """A model not asked to think is not sent another model's signed blocks.
+
+    `compat.thinking: omit` is the operator saying this endpoint takes no
+    thinking block while reasoning anyway; replaying blocks there would be a
+    request the operator's own configuration excluded.
+    """
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        reasoning={
+            "model": "m",
+            "blocks": [{"type": "thinking", "thinking": "hmm", "signature": "sig-1"}],
+        },
+    )
+    asked = ModelSettings(model="m", reasoning=True, max_tokens=2000)
+    request = anthropic_build_request([assistant], [], asked)
+    assert [block["type"] for block in request["messages"][0]["content"]] == [
+        "thinking",
+        "text",
+    ]
+
+    omitted = ModelSettings(model="m", reasoning=True, thinking="omit", max_tokens=2000)
+    request = anthropic_build_request([assistant], [], omitted)
+    assert [block["type"] for block in request["messages"][0]["content"]] == ["text"]
+
+
 def test_anthropic_thinking_budget_leaves_room_to_answer() -> None:
     """A model that spends everything thinking returns nothing.
 
@@ -2131,6 +2715,56 @@ def test_responses_sends_only_what_was_configured() -> None:
     # This API calls the output cap something else, and does not require it —
     # unlike Anthropic, where an absent one has to become a real number.
     assert request["max_output_tokens"] == 100
+
+
+def test_responses_replays_reasoning_items_before_the_answer() -> None:
+    """A reasoning item goes back exactly as it arrived, before what it reasoned about.
+
+    That is the API's own instruction for a tool loop, and with `store: false`
+    it is the only copy the next call can be given.  An item belonging to
+    another model is not replayed, on `Message.reasoning`'s rule.
+    """
+    item = {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [{"type": "summary_text", "text": "why"}],
+        "encrypted_content": "enc",
+    }
+    assistant = Message(
+        role="assistant",
+        content="answer",
+        reasoning={"model": "m", "blocks": [item]},
+        tool_calls=[ToolCall(id="c1", name="t", arguments={})],
+    )
+
+    _, same = to_responses_input([assistant], model="m")
+    assert same[0] == item
+    assert same[1]["role"] == "assistant"
+    assert same[2]["type"] == "function_call"
+
+    _, other = to_responses_input([assistant], model="another")
+    assert all(entry.get("type") != "reasoning" for entry in other)
+
+
+def test_responses_stateless_reasoning_asks_for_its_encrypted_content() -> None:
+    """**`store: false` must be asked for the content it will have to replay.**
+
+    A stateless server keeps nothing, so a reasoning item comes back without
+    `encrypted_content` unless the request includes `reasoning.encrypted_content`
+    — and the next call of a tool loop cannot send back what it never received.
+    Asked for only when reasoning was asked for, so an endpoint with no
+    reasoning is not sent a field it may not implement.
+    """
+    stateless = ModelSettings(model="m", reasoning=True, store=False)
+    assert responses_build_request([], [], stateless)["include"] == [
+        "reasoning.encrypted_content"
+    ]
+
+    stored = ModelSettings(model="m", reasoning=True, store=True)
+    assert "include" not in responses_build_request([], [], stored)
+
+    no_reasoning = ModelSettings(model="m", store=False)
+    assert "include" not in responses_build_request([], [], no_reasoning)
 
 
 def test_the_responses_request_only_names_arguments_the_sdk_has() -> None:
@@ -2517,24 +3151,146 @@ async def test_a_client_is_not_closed_under_a_stream_that_is_reading_it(
     assert built[0].closed is True, "and the client is let go the moment it ends"
 
 
+@pytest.mark.asyncio
+async def test_an_interrupted_turn_closes_the_stream_it_was_reading() -> None:
+    """**An abandoned stream must not keep the provider generating.**
+
+    A turn interrupted while the consumer is suspended at `report_progress`
+    raises out of `stream_chat_impl` with the adapter still suspended at its
+    `yield`, holding the SDK's open response and the pool's lease.  An
+    `async for` left that way closes nothing: the cleanup would run only when
+    the collector happened to reach the generator, and until then the
+    provider keeps generating — and billing — on a connection nobody reads.
+    The adapter's own cleanup runs on the way out instead, deterministically.
+    """
+    closed: list[bool] = []
+
+    async def streamer(provider, messages, tools, model):
+        try:
+            yield Chunk(text="one")
+            yield Chunk(text="two")
+            yield Finish("stop")
+        finally:
+            closed.append(True)
+
+    class _Ctx:
+        async def report_progress(self, progress, total, message):
+            if progress == 2:
+                raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stream_chat_impl(streamer, "p", [], [], "m", _Ctx())
+
+    assert closed == [True], "the cleanup ran on the way out, not at collection"
+
+
+class _FakeStreamResponse:
+    """Enough of an SDK stream: async iteration, and a close that is recorded."""
+
+    def __init__(self, events: list[Any]) -> None:
+        self._events = iter(events)
+        self.closed = False
+
+    def __aiter__(self) -> _FakeStreamResponse:
+        return self
+
+    async def __anext__(self) -> Any:
+        try:
+            return next(self._events)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_closing_a_stream_closes_the_sdk_response_and_releases_the_pool(
+    monkeypatch,
+) -> None:
+    """The frame's half of the same rule: `aclose` on the streamer — what an
+    interrupted turn triggers — must close the SDK response the loop was
+    reading and release the pool's lease.  An `async for` left by a thrown
+    GeneratorExit does not close its iterator, so the response is closed in a
+    `finally`; and a lease still held would keep a retired pool from closing
+    its clients for ever.
+    """
+    from slife2.plugins.llm import server_common
+
+    built: list[_FakeSDKClient] = []
+    current = [_config("https://first.test/v1")]
+    responses: list[_FakeStreamResponse] = []
+
+    def make_client(_provider: Any, _key: str) -> Any:
+        built.append(_FakeSDKClient())
+        return built[-1]
+
+    async def start(_client: Any, _request: dict[str, Any]) -> Any:
+        responses.append(_FakeStreamResponse([Chunk(text="hi"), Finish("stop")]))
+        return responses[-1]
+
+    monkeypatch.setattr(server_common, "load_cached", lambda: current[0])
+    streamer = sdk_streamer(
+        api="openai-completions",
+        server_name="t",
+        sdk_client=make_client,
+        build_request=lambda messages, tools, settings: {},
+        start=start,
+        translator=lambda: lambda event: [event],
+    )
+
+    events = streamer("p", [], [], "m")
+    assert await events.__anext__() == Chunk(text="hi")
+    await events.aclose()  # the turn is interrupted mid-answer
+    assert responses[0].closed is True, "the provider's connection is let go"
+
+    # The lease went with it: a config edit now closes the replaced client at
+    # once, which a pool still held by the abandoned stream could never do.
+    current[0] = _config("https://second.test/v1")
+    fresh = streamer("p", [], [], "m")
+    assert [event async for event in fresh] == [Chunk(text="hi"), Finish("stop")]
+    assert responses[1].closed is True, "a stream read to the end closes it too"
+    assert built[0].closed is True
+    assert built[1].closed is False
+
+
+def test_the_sdk_clients_never_retry_a_call_behind_the_callers_back() -> None:
+    """Both SDKs default to two retries, and a retried request may already
+    have reached the provider — a second generation billed for one answer.
+    The factory states the policy once for every chat backend: a failed call
+    fails the turn, and the caller retries deliberately (SDD §2.7)."""
+    provider = ProviderSettings(
+        api="openai-completions",
+        base_url="https://example.test/v1",
+        api_key_ref="k",
+    )
+    openai_client = sdk_client_factory("openai", "AsyncOpenAI")(provider, "sk-test")
+    anthropic_client = sdk_client_factory("anthropic", "AsyncAnthropic")(
+        provider, "sk-test"
+    )
+    assert openai_client.max_retries == 0
+    assert anthropic_client.max_retries == 0
+
+
 # --- the `main` every model server shares ------------------------------------
 
 #: One OpenAI-compatible provider and nothing else, so every *other* protocol
 #: has no provider to serve.
 ONLY_OPENAI = """
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
+        context_window: 1000
 embeddings:
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -2592,18 +3348,19 @@ def test_the_matching_protocol_serves_every_provider_of_it(
 
 ONLY_RESPONSES = """
 providers:
+  default: oai/big
   oai:
     api: openai-responses
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
+        context_window: 1000
 embeddings:
   providers:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: oai/big
 """
 
 

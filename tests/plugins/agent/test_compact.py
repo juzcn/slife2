@@ -19,6 +19,7 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
+from slife2.libs.harness.dumps import text_size
 from slife2.libs.host.config import (
     DEFAULT_AGENT,
     ToolResultSettings,
@@ -28,7 +29,6 @@ from slife2.libs.host.config import (
 from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
 from slife2.libs.model.base import StreamChatResult
 from slife2.libs.turn.messages import ToolCall
-from slife2.libs.turn.tokens import estimate_text_tokens
 from slife2.plugins.agent.server import build_server
 from slife2.plugins.context.server import build_server as build_context
 from slife2.plugins.toolhub.server import build_server as build_hub
@@ -46,7 +46,7 @@ from tests.fakes import (
 pytestmark = pytest.mark.unit
 
 #: A window small enough that a test can overflow it with a body it also reads.
-WINDOW = 512
+WINDOW = 2_048
 
 #: The output a tool answers with.  Long enough to be over `WINDOW` many times.
 HUGE = "\n".join(f"line {number} of a tool output" for number in range(1, 3001))
@@ -82,11 +82,11 @@ def cabinet_stub(
     return server
 
 
-def config_over(tokens: int):
+def config_over(size: int):
     base = default_config()
     return replace(
         base,
-        tool_result=ToolResultSettings(tokens=tokens),
+        tool_result=ToolResultSettings(bytes=size),
         # The fake server's tool is on the load list, so the model may call it
         # without a `func_tool_load` first: this test is about what happens to
         # the result, and a scripted load would be three lines of somebody
@@ -172,7 +172,7 @@ async def test_a_result_past_the_window_becomes_a_head_and_a_file(
 ) -> None:
     """**The whole mechanism, in one turn.**
 
-    A tool answers with more than `tool_result.tokens`; the harness keeps the
+    A tool answers with more than `tool_result.bytes`; the harness keeps the
     whole of it in the cabinet and the conversation carries a fixed head of it,
     the file's size, and the path the rest can be read from.  No model is asked
     what to keep: the turn's two calls are its own, and the head is the tool's
@@ -198,7 +198,7 @@ async def test_a_result_past_the_window_becomes_a_head_and_a_file(
     assert "line 1 of a tool output" in window, "the head is the tool's own words"
     assert where in window, "the file is named"
     assert "dump_read" in window and "dump_grep" in window
-    assert estimate_text_tokens(window) <= WINDOW
+    assert text_size(window) <= WINDOW
 
     started = window.index("[DUMP:") + len("[DUMP:")
     ended = window.index("]", started)
@@ -356,7 +356,8 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
         CONTEXT_SERVER_NAME,
         TOOLHUB_SERVER_NAME,
     )
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
+    from slife2.plugins.agent import core as core_module
 
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(WINDOW)
@@ -366,7 +367,7 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
     kept: dict[str, str] = {}
     cabinets: list[Client] = []
     closed: list[Client] = []
-    real_close = server_module.close_server
+    real_close = core_module.close_server
 
     async def open_ours(_url, **kwargs):
         """The server's own lazily-opened peers, in memory and by name."""
@@ -397,8 +398,12 @@ async def test_the_cabinet_is_closed_and_forgotten_with_the_session(
         closed.append(client)
         await real_close(client)
 
-    monkeypatch.setattr(server_module, "open_server", open_ours)
-    monkeypatch.setattr(server_module, "close_server", close_ours)
+    # The cabinet is still this server's direct peer; the context and hub
+    # connections are the turn runtime's, so both modules get the same fakes.
+    monkeypatch.setattr(core_module, "open_server", open_ours)
+    monkeypatch.setattr(core_module, "close_server", close_ours)
+    monkeypatch.setattr(runtime_module, "open_server", open_ours)
+    monkeypatch.setattr(runtime_module, "close_server", close_ours)
     server = build_server(cfg, backend=backend)
 
     # **A session each**, which is what makes the second one a fresh start: the

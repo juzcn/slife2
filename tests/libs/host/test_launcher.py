@@ -407,14 +407,14 @@ def _config_with_every_protocol(tmp_path) -> Path:
     path.write_text(
         """
 providers:
-  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}
-  b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n}]}
-  c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o}]}
-  d: {api: openai-responses, base_url: 'https://example.test/v1', models: [{model: p}]}
+  default: a/m
+  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m, context_window: 1000}]}
+  b: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: n, context_window: 1000}]}
+  c: {api: anthropic-messages, base_url: 'https://example.test/v1', models: [{model: o, context_window: 1000}]}
+  d: {api: openai-responses, base_url: 'https://example.test/v1', models: [{model: p, context_window: 1000}]}
 embeddings:
   providers:
     local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}
-default: a/m
 """,
         encoding="utf-8",
     )
@@ -437,7 +437,7 @@ def test_a_protocol_no_provider_uses_is_not_started(tmp_path) -> None:
     """A server for a protocol nobody uses holds nobody's key."""
     path = tmp_path / "one.yaml"
     path.write_text(
-        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m}]}\n"
+        "providers:\n  a: {api: openai-completions, base_url: 'https://example.test/v1', models: [{model: m, context_window: 1000}]}\n"
         "embeddings:\n  providers:\n    local: {base_url: 'http://127.0.0.1:17347/v1', model: big-emb}\n",
         encoding="utf-8",
     )
@@ -554,11 +554,15 @@ SPEC = ServerSpec(
 )
 
 
-def _register(spec: ServerSpec, *, config: str = "") -> None:
+def _register(spec: ServerSpec, *, config: str = "", version: str = "") -> None:
     """Stand in for a server that has registered itself."""
     runtime.write_record(
         runtime.ServerRecord(
-            name=spec.name, url=spec.url, pid=os.getpid(), config=config
+            name=spec.name,
+            url=spec.url,
+            pid=os.getpid(),
+            config=config,
+            version=version,
         )
     )
 
@@ -876,6 +880,31 @@ def test_a_held_port_that_is_not_ours_is_a_conflict(
     assert "24001" in outcome.detail
 
 
+def test_a_daemon_from_another_build_is_named_with_its_remedy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The conflict is ours, from an earlier build, and the line has to say so.
+
+    The probe refuses it — the handshake's build is not this one — but the port
+    is held, so the ordinary conflict detail calls it "something that is not
+    {name}" and sends the reader hunting for a stranger.  The record proves the
+    daemon's pid is still live and says which build it is; `slife2 down` is the
+    one command that replaces it, so the line names it.
+    """
+    _register(SPEC, version="0.3.0")
+    monkeypatch.setattr(launcher, "probe", lambda *a, **k: False)
+    monkeypatch.setattr(launcher, "tcp_listening", lambda *a, **k: True)
+
+    def explode(*a, **k):
+        raise AssertionError("should not have spawned onto a held port")
+
+    monkeypatch.setattr(launcher, "spawn", explode)
+    outcome = launcher.ensure(SPEC)
+    assert outcome.status is Status.CONFLICT
+    assert "0.3.0" in outcome.detail
+    assert "slife2 down" in outcome.detail
+
+
 def test_a_missing_server_is_spawned_and_recorded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -912,6 +941,47 @@ def test_a_missing_server_is_spawned_and_recorded(
     assert again.status is Status.RUNNING
 
 
+def test_a_start_wave_reaps_a_dead_child_without_racing_on_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Several threads reaping one exited child is not a `ValueError`.
+
+    `ensure_all` puts a whole wave through `ensure` at once, so the reap at the
+    top of it runs on every thread.  Two threads that both saw an exited child
+    in their snapshot then both removed it, and the loser's `list.remove(x): x
+    not in list` came out of a start as a traceback — ubuntu and macOS CI,
+    2026-11-17, on a loaded runner where the overlap was wide.  Windows
+    happened not to lose that race.
+
+    **The barrier is inside `poll`, which is where the window is**: a `poll`
+    that waits is what lets two threads hold the same child at once.  Under
+    the lock only one thread ever reaches the barrier, so the wait runs out
+    instead of hanging — a hang detector, not a budget, and the only half a
+    second this test costs.
+    """
+    gate = threading.Barrier(2, timeout=0.5)
+
+    class ExitedProc:
+        def poll(self) -> int:
+            with contextlib.suppress(threading.BrokenBarrierError):
+                gate.wait()
+            return 0
+
+    monkeypatch.setattr(launcher, "_spawned", [ExitedProc()])
+    monkeypatch.setattr(
+        launcher,
+        "_bring_up",
+        lambda spec, config_path=None: launcher.Outcome(spec, Status.RUNNING),
+    )
+
+    outcomes = list(
+        launcher._concurrently(launcher.ensure, [SPEC, replace(SPEC, name="other")])
+    )
+
+    assert [one.status for one in outcomes] == [Status.RUNNING, Status.RUNNING]
+    assert launcher._spawned == []
+
+
 def test_the_spawn_command_uses_this_interpreter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -920,6 +990,15 @@ def test_the_spawn_command_uses_this_interpreter(
     assert argv[0] == sys.executable
     assert argv[1:3] == ["-m", "slife2.plugins.llm.openai_server"]
     assert "--data-dir" in argv
+
+
+def test_the_spawn_command_pins_the_endpoint_path() -> None:
+    """**The child re-reads `servers.<name>.path` otherwise.**  The parent
+    probes the snapshot's URL; an edit between load and spawn moved the child's
+    bind and left the probe on a 404 until the start budget expired.
+    """
+    argv = launcher._argv(replace(SPEC, path="/custom"))
+    assert argv[argv.index("--path") + 1] == "/custom"
 
 
 # --- the agent name is exclusive ---------------------------------------------
@@ -1183,6 +1262,10 @@ def test_stop_says_ownership_is_unproven_rather_than_calling_it_reuse(
     assert killed == []
     assert any("could not be proven" in o.detail for o in outcomes)
     assert not any("pid reused" in o.detail for o in outcomes)
+    # **And the record stays**, because no evidence cleared it.  Dropping it
+    # here left a live daemon nothing could find: `status` said "external" and
+    # every later `down` refused to touch it.
+    assert runtime.read_record(SPEC.url) is not None
 
 
 def test_stop_calls_a_record_whose_process_is_gone_gone(
@@ -1255,3 +1338,65 @@ def test_stop_keeps_the_record_of_a_process_that_did_not_exit(
     assert runtime.read_record(SPEC.url) is not None, (
         "the record is the only thing that can find that pid again"
     )
+
+
+def test_the_last_client_stops_a_backend_another_config_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The last client is the machine's, not one config's.**  The servers are
+    shared, so another configuration may have started a model backend this file
+    never names; stopping only `specs(config)` left it running with no `status`
+    or `down` in either config able to find it.  `everything=True` is the exit
+    path, and the record is the machine-wide list.
+    """
+    seen: list[str] = []
+
+    def fake_stop(spec: launcher.ServerSpec) -> launcher.Outcome:
+        seen.append(spec.url)
+        return launcher.Outcome(spec, launcher.Status.NOT_RUNNING)
+
+    monkeypatch.setattr(launcher, "_stop_one", fake_stop)
+    monkeypatch.setattr(launcher, "specs", lambda _config: [SPEC])
+    monkeypatch.setattr(
+        launcher,
+        "records",
+        lambda: [
+            runtime.ServerRecord(
+                name="llm:openai-completions",
+                url="http://127.0.0.1:24999/mcp",
+                pid=123,
+                config="",
+            )
+        ],
+    )
+
+    list(launcher.stop(default_config(), everything=True))
+
+    assert SPEC.url in seen
+    assert "http://127.0.0.1:24999/mcp" in seen
+
+
+def test_a_plain_stop_stays_with_this_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`slife2 down` is not a broadcast: only the last client's exit passes
+    `everything`."""
+    seen: list[str] = []
+
+    def fake_stop(spec: launcher.ServerSpec) -> launcher.Outcome:
+        seen.append(spec.url)
+        return launcher.Outcome(spec, launcher.Status.NOT_RUNNING)
+
+    monkeypatch.setattr(launcher, "_stop_one", fake_stop)
+    monkeypatch.setattr(launcher, "specs", lambda _config: [SPEC])
+    monkeypatch.setattr(
+        launcher,
+        "records",
+        lambda: [
+            runtime.ServerRecord(
+                name="other", url="http://127.0.0.1:24999/mcp", pid=123, config=""
+            )
+        ],
+    )
+
+    list(launcher.stop(default_config()))
+
+    assert seen == [SPEC.url]

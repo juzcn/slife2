@@ -65,15 +65,22 @@ from typing import Any, Protocol, runtime_checkable
 import httpx2
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.host.config import (
+    DEFAULT_TUNNEL_PROVIDER,
+    KNOWN_TUNNEL_PROVIDERS,
+    unresolved_reference,
+)
 
 logger = logging.getLogger(__name__)
 
-#: The provider used when the section, or its `active:`, is absent.  A name this
-#: build does not have is a `ConfigError` instead (`_file_tunnel`).
-DEFAULT_PROVIDER = "ngrok"
+#: The provider used when the section, or its `active:`, is absent.  The name
+#: lives in `slife2.libs.host.config`, so the loader that refuses an unknown
+#: `active:` and this factory that builds it share one spelling; it stays
+#: exported here under the providers module's own name.
+DEFAULT_PROVIDER = DEFAULT_TUNNEL_PROVIDER
 
 #: Providers this build can actually construct (see :func:`create_provider`).
-KNOWN_PROVIDERS = frozenset({"ngrok", "localhost.run", "cloudflare"})
+KNOWN_PROVIDERS = KNOWN_TUNNEL_PROVIDERS
 
 #: Environment variable the active tunnel publishes its URL through.  Set on
 #: success, cleared on loss/stop.  Read by another *process* — a subagent
@@ -155,14 +162,21 @@ def _is_fake_ip_answer(address: object) -> bool:
 
     False for a public address, which is a real destination, and for anything
     unparseable — an edge address never observed is not an interception.
+
+    **The address is read before the resolver is asked.**  The probe is a
+    synchronous `getaddrinfo`, and `tunnel_status` reads this property on the
+    event loop; asking it for an ngrok or localhost.run tunnel (which report no
+    edge address, or a public one) stalled every share download in flight on a
+    question whose answer could not change the verdict.  Only an address that is
+    not public can be a fake-ip answer.
     """
-    if not _resolver_uses_fake_ip():
-        return False
     try:
         ip = ipaddress.ip_address(address)  # type: ignore[arg-type]
     except (ValueError, TypeError):
         return False
-    return not ip.is_global
+    if ip.is_global:
+        return False
+    return _resolver_uses_fake_ip()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -246,9 +260,12 @@ def _import_ngrok() -> Any:
 #: **verbatim** rather than raised (that module's rule, so a missing key fails
 #: where it is used).  A tunnel is the one place that reads badly: the literal
 #: text would be sent as the token and come back as an authentication failure
-#: naming nobody's mistake.  So the unresolved form is recognised here and
-#: reported as the missing credential it is.
-_UNRESOLVED = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::-([^}]*))?\}$")
+#: naming nobody's mistake.  So the unresolved form is recognised here with
+#: `unresolved_reference` — the one rule for "is this credential still a
+#: reference" — and reported as the missing credential it is.  The regex this
+#: module used to carry was anchored to the whole value, so `Bearer ${VAR}` (a
+#: reference `resolve_secret` substitutes inside a larger string) travelled as
+#: the token.
 
 
 def _auth_token(options: dict) -> str | None:
@@ -261,14 +278,8 @@ def _auth_token(options: dict) -> str | None:
     variable the config names, so the two agree when both are present.
     """
     token = str(options.get("token") or "").strip()
-    if token:
-        matched = _UNRESOLVED.match(token)
-        if matched is None:
-            return token
-        # Unresolved: the `:-default` is the only thing that could still answer.
-        token = (matched.group(1) or "").strip()
-        if token:
-            return token
+    if token and not unresolved_reference(token):
+        return token
     return os.environ.get("NGROK_AUTHTOKEN", "").strip() or None
 
 
@@ -332,6 +343,17 @@ class TunnelProvider(Protocol):
 
     @property
     def is_active(self) -> bool: ...
+
+    @property
+    def inherited(self) -> bool:
+        """Whether the URL is another process's tunnel, not one started here.
+
+        `SLIFE2_FILE_TUNNEL_URL` names a tunnel this process did not start: its
+        listener is the other process's, so a token minted in this process is
+        not in the map that listener serves.  Read by `expose_local_image`,
+        which refuses rather than handing out a link that answers 403.
+        """
+        ...
 
     @property
     def is_starting(self) -> bool:
@@ -433,6 +455,19 @@ class _TunnelProviderBase:
     def is_active(self) -> bool:
         """True when the tunnel is running."""
         return self.public_url is not None
+
+    @property
+    def inherited(self) -> bool:
+        """Whether the URL is another process's tunnel, not one started here.
+
+        `SLIFE2_FILE_TUNNEL_URL` names a tunnel this process did not start: its
+        listener is the other process's, so a token minted in this process is
+        not in the map that listener serves.  The URL is still active and still
+        belongs in `tunnel_status` (Appendix C: treat it as active and leave it
+        alone); what this property separates is the one thing that cannot work
+        through it — exposing a file here (`slife2.plugins.file_tunnel.server`).
+        """
+        return self._public_url is None and self.public_url is not None
 
     @property
     def is_starting(self) -> bool:
@@ -770,6 +805,19 @@ class _TunnelProviderBase:
                 await asyncio.to_thread(self._teardown)
                 self._drop_url()
                 down_since = None
+            elif self.public_url is not None:
+                # **An inherited URL is a tunnel this process did not start.**
+                # `SLIFE2_FILE_TUNNEL_URL` is how another instance (or a
+                # subagent's plugin process) hands down a tunnel that is already
+                # both published and reachable; there is no child here to probe,
+                # heal or respawn, and `is_reachable` answers from the URL
+                # alone.  Starting one would mint a second tunnel and overwrite
+                # the variable the parent passed down, so every link minted from
+                # then on would point at a hostname the parent does not know.
+                # The monitor's whole job for this case is to leave it alone.
+                down_since = None
+                await asyncio.sleep(_T.timeouts.pacing.tunnel_health)
+                continue
 
             # No tunnel — but an attempt may already be on its way: the plugin
             # eager-starts the tunnel on a task of its own, so this pass
@@ -1105,12 +1153,11 @@ class _CliTunnelProvider(_TunnelProviderBase):
         the number of live edge connections — so it answers the question the
         scraped ``_registered`` set only approximates.
 
-        ``None`` means *there was no metrics server to ask* (the child announced
-        none), which is the one case that licenses the caller to fall back to
-        what it scraped.  A probe that was attempted and could not be answered is
-        a different case and reaches the caller the same way — ``None`` — so
-        :meth:`_transport_alive` tells the two apart by ``_metrics_base`` being
-        set, and neither answer is "alive".
+        ``None`` means *there was no answer to read*: no metrics server was
+        announced, or one was and the probe failed.  :meth:`_transport_alive`
+        tells the two apart by ``_metrics_base``: no base falls back to what it
+        scraped, while a base with no answer is treated as **alive** — a metrics
+        server that hiccuped is not evidence that the tunnel is down.
         """
         base = self._metrics_base
         if not base:
@@ -1137,7 +1184,9 @@ class _CliTunnelProvider(_TunnelProviderBase):
         if os.name == "nt":
             kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         else:
-            # Own process group, so a stuck child can be killed as a group.
+            # Its own session, so the child does not share this daemon's
+            # controlling terminal or signal group.  `_kill_proc` signals the
+            # child's pid; a process it spawned itself is not walked.
             kwargs["start_new_session"] = True
 
         self._recent.clear()

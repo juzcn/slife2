@@ -1,15 +1,17 @@
-"""How the TUI talks to the servers it needs: the agent, its inbox, and the mesh.
+"""How the TUI talks to the servers it needs.
 
-Three clients, because a window holds three conversations with the outside: it
-*asks* the agent server for turns (:class:`AgentClient`), it *is asked* by the
-plugin that hands it messages from other channels (:class:`WindowClient`), and it
-*holds a place* for its agent on the A2A mesh (:class:`MeshClient`).  The last two
-point the other way round from the first, which is why both are calls held open
-rather than anything polled — and why the window's own liveness is what they
-report: a window that goes away drops both, and a peer sees the agent leave the
+Five protocols, because a window holds five conversations with the outside: it
+*asks* the agent server for turns (:class:`AgentClient`); it *is asked* by the
+plugin that hands it messages from other channels (:class:`WindowClient`); it
+*holds a place* for its agent on the A2A mesh (:class:`MeshClient`); it lists
+the agent tasks the picker offers (:class:`AgentTaskClient`); and a watch screen
+*reads* a conversation or task it is not running (:class:`WatchClient`).  The
+last four point the other way round from the first — a call held open rather
+than anything polled — which is why the window's own liveness is what they
+report: a window that goes away drops them, and a peer sees the agent leave the
 mesh at the same moment the inbox closes.
 
-All three are Protocols, so the TUI never imports FastMCP at the point of use and
+All five are Protocols, so the TUI never imports FastMCP at the point of use and
 tests can inject scripted clients.  That seam is the whole reason the widgets can
 be built and verified without a server running.
 """
@@ -22,38 +24,49 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from fastmcp import Client
+from fastmcp.client.progress import ProgressHandler
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     A2A_SERVER_NAME,
     AGENT_SERVER_NAME,
+    AGENT_TASK_SERVER_NAME,
     DEFAULT_AGENT,
     TUI_SERVER_NAME,
 )
+from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import close_server, open_server
+from slife2.libs.plugin.vocabulary import (
+    AGENT_TASK_LIST,
+    ATTACH,
+    JOIN,
+    TRANSCRIPT,
+    Handover,
+)
+from slife2.libs.plugin.vocabulary import decode as decode_handover
+from slife2.libs.turn import plan
 from slife2.libs.turn.events import TurnEvent, decode
 from slife2.libs.turn.watch import WatchItem
 from slife2.libs.turn.watch import decode as decode_watch
-from slife2.plugins.a2a.server import JOIN
-from slife2.plugins.tui.server import ATTACH, Handover
-from slife2.plugins.tui.server import decode as decode_handover
 from slife2.tui.widgets import WINDOW_CHANNEL
 
 
-def _unreadable(what: str, answer: Any) -> ConnectionError:
+def _unreadable(
+    what: str, answer: Any, *, server: str = "the agent server"
+) -> ConnectionError:
     """The loud failure a tool's answer that is not its shape raises, worded once.
 
-    Four answers here are contracts rather than data — a turn's `text`, the
-    transcript's `turns`, the subagent list, and the switch `model_switch`
-    reports — and each has an obvious empty that reads as a legitimate one: an
-    answer with no words, a conversation that never ran, an agent with no
-    subagents, a switch that worked.  So each quotes the payload rather than
-    summarising it, because a shape this build cannot read is the only evidence
-    there is that the far end is a different build (SDD Appendix C: a value that
-    cannot be read is not a value that is absent).
+    The answers here are contracts rather than data — a turn's `text`, the
+    transcript's `turns`, the subagent list, the task list, and the switch
+    `model_switch` reports — and each has an obvious empty that reads as a
+    legitimate one: an answer with no words, a conversation that never ran, an
+    agent with no subagents or tasks, a switch that worked.  So each quotes the
+    payload rather than summarising it, because a shape this build cannot read
+    is the only evidence there is that the far end is a different build (SDD
+    Appendix C: a value that cannot be read is not a value that is absent).
     """
-    return ConnectionError(f"the agent server did not {what} (it said {answer!r})")
+    return ConnectionError(f"{server} did not {what} (it said {answer!r})")
 
 
 @dataclass(frozen=True)
@@ -71,6 +84,22 @@ class TurnReply:
 
     text: str
     injected: bool = False
+
+
+@dataclass(frozen=True)
+class Conversation:
+    """What a window opens with: the conversation's turns and its current plan.
+
+    **One read, because the plan is drawn beside the history.**  `turns` is the
+    context store's and `plan` is the conversation's own file
+    (`slife2.libs.turn.plan`), validated here as the shape this build accepts.
+    A window and a watcher that open at the same moment must start from the
+    same pair, which is why the server answers both together and `Snapshot`
+    carries the same two fields.
+    """
+
+    turns: list[dict[str, Any]]
+    plan: list[dict[str, str]]
 
 
 class AgentClient(Protocol):
@@ -97,7 +126,7 @@ class AgentClient(Protocol):
         **The facts are the agent server's**, because it is the only place that
         says what a switch does to a conversation already running: `default`,
         `previous`, and how many conversations moved.  What the *window* draws
-        with them is the window's (`slife2.tui.i18n`), like every other line it
+        with them is the window's (`slife2.libs.harness.i18n`), like every other line it
         shows.  A refusal arrives as a `ToolError` — the server answered, the
         connection is fine, and its sentence is written for a person to read —
         which is what this used to infer from a `[refused]` prefix in the text.
@@ -135,28 +164,29 @@ class AgentClient(Protocol):
         `subagent_list` is a different question — it connects the mesh and wakes
         members to answer, neither of which a picker may do.
 
-        Each entry has `name`, `model` (empty for the maker's own), `role` and
-        `fork`.  A list this build cannot read raises rather than answering
+        Each entry has `name`, `model` (empty for the maker's own) and `role`.
+        A list this build cannot read raises rather than answering
         empty: an agent with no subagents is a real, empty list, and the two
         must not look alike (SDD Appendix C).
         """
         ...
 
-    async def transcript(self) -> list[dict[str, Any]]:
-        """The turns this conversation is made of, for a window to draw.
+    async def transcript(self) -> Conversation:
+        """The turns this conversation is made of, and its plan, for a window.
 
-        Empty for a conversation that has never run, which is the honest answer
-        for a new name and not a failure.  Read once, when the window opens: the
-        history is the server's, so a window that failed to read it has lost
-        nothing but the sight of it.
+        Empty turns are the honest answer for a new name and not a failure, and
+        so is an empty plan.  Read once, when the window opens: the history is
+        the server's, so a window that failed to read it has lost nothing but
+        the sight of it.
 
-        **A read that is missing `turns` is not that empty.**  A name with no
-        history is answered with a real turn list that happens to be empty
-        (`slife2.plugins.agent.server.transcript`, over `restore`'s own `{"turns": []}`);
-        a payload whose `turns` cannot be read is damage, and reading it as `[]`
-        is a window that shows a blank history and marks itself restored
-        (SDD Appendix C: a value that cannot be read is not a value that is
-        absent).
+        **A read that is missing `turns` or `plan` is not that empty.**  A name
+        with no history is answered with a real turn list that happens to be
+        empty (`slife2.plugins.agent.core.transcript`, over `restore`'s own
+        `{"turns": []}`), and a conversation with no plan with a real empty
+        list; a payload whose `turns` or `plan` cannot be read is damage, and
+        reading it as empty is a window that shows a blank history or no plan
+        and marks itself restored (SDD Appendix C: a value that cannot be read
+        is not a value that is absent).
         """
         ...
 
@@ -237,7 +267,158 @@ class WatchClient(Protocol):
         ...
 
 
-class MCPAgentClient:
+class AgentTaskClient(Protocol):
+    """The picker's view of the agent-task server.
+
+    A second connection rather than methods on :class:`AgentClient`, because
+    the tasks are another plugin's state: the agent server lists conversations
+    and the agent-task server lists the turns it is running, and a picker that
+    asked one of them about the other would be reading a table that does not
+    hold it.  It is separate from :class:`WatchClient` too: the list is one
+    call, and the watch screen opens its own client for the stream.
+    """
+
+    async def connect(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    async def tasks(self) -> list[dict[str, Any]]:
+        """The tasks this agent has, as `agent_task_list` answers.
+
+        Each row has at least `name` and `status`; `running` is the only state a
+        watch can join.  A list this build cannot read raises rather than
+        answering empty: an agent with no tasks is a real, empty list, and the
+        two must not look alike (SDD Appendix C).
+        """
+        ...
+
+
+def _progress[T](
+    decode: Callable[[str], T | None], deliver: Callable[[T], None]
+) -> ProgressHandler:
+    """Build a stream's handler from its line decoder and its sink.
+
+    Every stream here is progress notifications whose `message` is one line in
+    a vocabulary one module owns; a line this build has no word for is dropped
+    rather than killing the view, which is that decoder's contract
+    (`slife2.libs.turn.events.decode`).  The three streams read different
+    vocabularies and hand the result to different callbacks, and differ in
+    nothing else — so the "drop the unreadable, forward the rest" half is
+    spelled here, once.
+    """
+
+    async def on_progress(
+        progress: float, total: float | None, message: str | None
+    ) -> None:
+        item = decode(message or "")
+        if item is not None:
+            deliver(item)
+
+    return on_progress
+
+
+async def _keepalive(progress: float, total: float | None, message: str | None) -> None:
+    """A progress handler whose only job is to exist.
+
+    What arrives on the mesh's held call is the plugin's keepalive — the write
+    that makes a dead window noticeable at the far end
+    (`slife2.plugins.a2a.server._hold_open`) — so receiving it is the signal,
+    and there is nothing to decode.  A caller that sent *no* progress token
+    would get no keepalive at all, because `report_progress` is then a silent
+    no-op; sending this handler is what makes the departure a fact rather than
+    a hope.
+    """
+    return
+
+
+class _MCPClient:
+    """One held connection to one of our servers, and the rule every call follows.
+
+    **A transport failure drops the connection; a `ToolError` does not.**
+    `ToolError` is the server *answering* — a refusal it wrote for a person to
+    read — and the connection is fine, so dropping it would turn a bad request
+    into a reconnect storm on every retry.  Anything else is the transport
+    itself, and dropping the client is what lets the app's lazy retry reconnect
+    instead of believing it is connected to a server nothing is talking to
+    (see `run_turn`).
+
+    **The rule lives here, once, because the callers that need it differ only
+    in their arguments.**  It used to be copied into every streaming call and
+    into the task list — six copies of one `try`/`except`, exactly the shape
+    the next caller copies wrongly.  `_call` owns the rule now and `_stream_call`
+    states what is a stream's alone; `close`, which every client spelled
+    identically too, is the other half of the connection.
+    """
+
+    #: None means not connected.  `connect` sets it; `close` clears it before
+    #: awaiting, so a second close or a call failing during the first sees
+    #: "not connected" rather than a client being torn down twice.
+    _client: Client | None = None
+
+    async def close(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await close_server(client)
+
+    async def _call(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        *,
+        timeout: float | None,
+        meta: dict[str, Any] | None = None,
+        progress: ProgressHandler | None = None,
+    ) -> Any:
+        """Call one tool, with the transport rule stated in one place.
+
+        `payload` is the arguments; `meta` is the out-of-band identity a shared
+        server needs to know which conversation is asking; `progress` is the
+        handler that both receives a stream and — by existing — makes the
+        server's `report_progress` anything but a silent no-op.  `timeout` is
+        the caller's, because the two intentions here have different clocks: a
+        management call has a patience, a stream has none (`_stream_call`).
+        """
+        if self._client is None:
+            raise ConnectionError("not connected")
+        try:
+            return await self._client.call_tool(
+                name,
+                payload,
+                meta=meta,
+                progress_handler=progress,
+                timeout=timeout,
+            )
+        except ToolError:
+            raise
+        except Exception:
+            await self.close()
+            raise
+
+    async def _stream_call(
+        self,
+        name: str,
+        payload: dict[str, Any],
+        progress: ProgressHandler | None = None,
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> Any:
+        """Call one tool that streams until the view that made it goes away.
+
+        **No deadline**, because the call lasts exactly as long as the screen:
+        the management patience would detach a view that had merely been open
+        for a while.  **A progress handler is attached**, because passing one
+        is what makes the SDK attach a progress token and every server's
+        `report_progress` is a silent no-op without it — a stream minus its
+        handler is a view handed nothing while every submit still succeeds.
+
+        The transport rule is `_call`'s.
+        """
+        return await self._call(
+            name, payload, timeout=None, meta=meta, progress=progress
+        )
+
+
+class MCPAgentClient(_MCPClient):
     """An :class:`AgentClient` backed by an MCP connection.
 
     **This class holds an identity, not a conversation.**  The server keeps the
@@ -286,7 +467,6 @@ class MCPAgentClient:
         # rather than in the signature: a def-time default captures the value at
         # import (`slife2.helpers.timeouts` states the rule).
         self._timeout = _T.timeouts.work.management if timeout is None else timeout
-        self._client: Client | None = None
         #: Serialises `connect`, which has an await between its check and its
         #: use.  See the comment there.
         self._connecting = asyncio.Lock()
@@ -334,38 +514,14 @@ class MCPAgentClient:
                 timeout=None,
             )
 
-    async def close(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            await close_server(client)
-
     async def _call_tool(self, name: str, payload: dict[str, Any]) -> Any:
-        """Call one management tool, stating the transport rule in one place.
+        """Call one management tool on the management patience.
 
-        **A transport failure drops the connection; a `ToolError` does not.**
-        That is the whole of what `model_switch`, `transcript` and
-        `answer_approval` have in common, and each of them spelled it out — three
-        copies of one `try`/`except`, differing only in a tool name and a payload,
-        which is exactly the shape a fourth caller copies *wrongly*.  Written once
-        here, the sentence the class docstring repeats three times is a statement
-        about this method rather than a rule the next one has to remember.
-
-        `ToolError` is re-raised untouched because it is the server *answering* —
-        a refusal it wrote for a person to read — and the connection is fine, so
-        dropping it would turn a bad request into a reconnect storm on every
-        retry.  Anything else is the transport itself, and dropping the client is
-        what lets the app's lazy retry reconnect instead of believing it is
-        connected to a server nothing is talking to (see `run_turn`).
+        The transport rule is `_call`'s; what belongs here is the deadline — an
+        ordinary ask of our own daemon, and why
+        `slife2.helpers.timeouts.work.management` is the number.
         """
-        if self._client is None:
-            raise ConnectionError("not connected")
-        try:
-            return await self._client.call_tool(name, payload, timeout=self._timeout)
-        except ToolError:
-            raise
-        except Exception:
-            await self.close()
-            raise
+        return await self._call(name, payload, timeout=self._timeout)
 
     async def switch_model(self, ref: str) -> dict[str, Any]:
         result = await self._call_tool("model_switch", {"ref": ref})
@@ -380,33 +536,42 @@ class MCPAgentClient:
         self._model = ref
         return answer
 
-    async def transcript(self) -> list[dict[str, Any]]:
+    async def transcript(self) -> Conversation:
         """Read the conversation back, for the window that has just opened.
 
-        The transport rule is `_call_tool`'s, for `_call_tool`'s reason: a
-        failure that is not the server *answering* means the connection is gone,
-        and a client that kept it would look connected to a server nothing is
-        talking to for the rest of the session.
+        The transport rule is `_call`'s: a failure that is not the server
+        *answering* means the connection is gone, and a client that kept it
+        would look connected to a server nothing is talking to for the rest of
+        the session.
 
         A `turns` that is not a list raises rather than answering `[]`: an empty
         read is a name with no history, and a damaged one read as empty is a
         window that shows nothing and calls itself restored for the session.
-        The check is outside `_call_tool`, so the connection stays — the server
+        `plan` is read the same way — and through the plan's own validator, so a
+        plan this build would not have written is not drawn as one it did.  The
+        checks are outside `_call_tool`, so the connection stays — the server
         answered, and it is the answer this build cannot read.
         """
         result = await self._call_tool(
-            "transcript", {"agent": self._agent, "subagent": self._subagent}
+            TRANSCRIPT, {"agent": self._agent, "subagent": self._subagent}
         )
         payload = result.data
         turns = payload.get("turns") if isinstance(payload, dict) else None
         if not isinstance(turns, list):
             raise _unreadable("return a turn list", payload)
-        return list(turns)
+        raw_plan = payload.get("plan") if isinstance(payload, dict) else None
+        if not isinstance(raw_plan, list):
+            raise _unreadable("return a plan", payload)
+        try:
+            items = plan.from_wire(raw_plan, where="the plan")
+        except plan.PlanError as exc:
+            raise _unreadable("return a plan", payload) from exc
+        return Conversation(list(turns), items)
 
     async def models(self) -> list[dict[str, Any]]:
         """Read the models the config defines.  See `AgentClient.models`.
 
-        The transport rule is `_call_tool`'s: a failure that is not the server
+        The transport rule is `_call`'s: a failure that is not the server
         answering drops the connection, because a client that kept it would look
         connected to a server nothing is talking to for the rest of the session.
         The shape check is outside that, so a damaged answer keeps the link —
@@ -424,7 +589,7 @@ class MCPAgentClient:
     async def subagents(self) -> list[dict[str, Any]]:
         """Read the subagent list.  See `AgentClient.subagents`.
 
-        The transport rule is `_call_tool`'s: a failure that is not the server
+        The transport rule is `_call`'s: a failure that is not the server
         answering drops the connection, because a client that kept it would look
         connected to a server nothing is talking to for the rest of the session.
         The shape check is outside that, so a refusal keeps the link — the
@@ -450,47 +615,28 @@ class MCPAgentClient:
                 "approved": approved,
             },
         )
-        return str((result.data or {}).get("text") or "")
+        # **The empty sentence is a real answer — a waiting turn took it — so
+        # a shape this build cannot read is refused, not read as that empty.**
+        # The server writes `text` on both outcomes; a payload without one is
+        # a different build, and reporting it as "the turn moved on" would
+        # present a failure as a verdict (SDD Appendix C, invariant 11).
+        payload = result.data
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(text, str):
+            raise _unreadable("answer the approval", payload)
+        return text
 
     async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
         """Hold this conversation's watch open.  See `WatchClient.watch`.
 
-        **A call with no deadline**, for `run_turn`'s reason exactly: it lasts
-        as long as the view does, and a connection-level or call-level timeout
-        would detach a screen that had merely been open for a while.  A
-        transport failure drops this client — the screen's own, never the
+        A transport failure drops this client — the screen's own, never the
         window's — so a watch that goes away cannot cost a running turn.
         """
-        if self._client is None:
-            raise ConnectionError("not connected")
-
-        async def on_progress(
-            progress: float, total: float | None, message: str | None
-        ) -> None:
-            item = decode_watch(message or "")
-            if item is not None:
-                on_item(item)
-
-        try:
-            await self._client.call_tool(
-                "watch",
-                {"agent": self._agent, "subagent": self._subagent},
-                # Passing a progress handler is what makes the SDK attach a
-                # progress token, and the server's `report_progress` is a
-                # *silent no-op* without one — a screen that omitted this would
-                # watch a conversation and be handed nothing.
-                progress_handler=on_progress,
-                timeout=None,
-            )
-        except ToolError:
-            # The server answered and refused: the conversation is not
-            # watchable, or the call was badly formed.  The link is fine.
-            raise
-        except Exception:
-            # The transport itself is gone; dropping the client is what lets a
-            # later view reconnect rather than hold a dead connection.
-            await self.close()
-            raise
+        await self._stream_call(
+            "watch",
+            {"agent": self._agent, "subagent": self._subagent},
+            _progress(decode_watch, on_item),
+        )
 
     async def run_turn(
         self,
@@ -501,16 +647,6 @@ class MCPAgentClient:
         images: list[str] | None = None,
         receipt: str = "",
     ) -> TurnReply:
-        if self._client is None:
-            raise ConnectionError("not connected")
-
-        async def on_progress(
-            progress: float, total: float | None, message: str | None
-        ) -> None:
-            event = decode(message or "")
-            if event is not None:
-                on_event(event)
-
         payload: dict[str, object] = {
             "agent": self._agent,
             "subagent": self._subagent,
@@ -541,38 +677,14 @@ class MCPAgentClient:
         if receipt:
             payload["receipt"] = receipt
 
-        try:
-            result = await self._client.call_tool(
-                "send_message",
-                payload,
-                progress_handler=on_progress,
-                # Passing a progress handler is what makes the SDK attach a
-                # progress token, and `report_progress` on the server is a
-                # *silent no-op* without one.  Omitting it produces a turn that
-                # works perfectly and shows nothing until the very end — see
-                # `slife2.libs.turn.events`.
-                # **And no deadline on the call**, said explicitly rather than
-                # left to the default: this is the one call whose length is the
-                # answer's own business (`slife2.helpers.timeouts.work.management`).
-                timeout=None,
-            )
-        except ToolError:
-            # The server answered and the turn failed inside it — a bad API key,
-            # a model that does not exist.  The connection is fine, so keep it.
-            raise
-        except Exception:
-            # The transport itself is gone.  Dropping the client here is what
-            # lets the app's lazy retry actually reconnect: `connect()` returns
-            # early while `self._client` is set, so without this the app would
-            # stay "connected" to a dead server for the rest of the session and
-            # every subsequent turn would fail the same way.
-            await self.close()
-            raise
+        result = await self._stream_call(
+            "send_message", payload, _progress(decode, on_event)
+        )
 
         # **The turn's answer is `text`, and a payload without it is refused.**
         # Reading it as `""` draws a question with no answer and no error — a
         # failed turn presented as a finished one (SDD Appendix C).  Raised here,
-        # after the `try`, so the connection stays: the server answered, and it
+        # after the call, so the connection stays: the server answered, and it
         # is the answer this build cannot read.
         payload = result.data
         text = payload.get("text") if isinstance(payload, dict) else None
@@ -584,6 +696,82 @@ class MCPAgentClient:
         # can tell it when there are none.
         injected = bool(payload.get("injected")) if isinstance(payload, dict) else False
         return TurnReply(text=text, injected=injected)
+
+
+class MCPAgentTaskClient(_MCPClient):
+    """The agent-task server's list and one task's watch, over MCP.
+
+    **Two lifetimes in one class.**  The picker makes one with no `name`, calls
+    :meth:`tasks`, and closes it; the watch screen makes one with a name and
+    holds :meth:`watch` open for the screen's life.  Keeping the list here means
+    the tasks are read from the server that holds them, not from the agent
+    server's subagent directories — the two are different questions with
+    different answers.
+
+    The transport rule is `_call`'s: a failure that is not the server answering
+    drops the connection, so a later call reconnects instead of talking to a
+    dead one.  The watch call is the one with no deadline: it lasts as long as
+    the view does.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        agent: str = DEFAULT_AGENT,
+        name: str = "",
+        timeout: float | None = None,
+    ) -> None:
+        self._url = url
+        self._agent = agent
+        #: Which task this client watches; empty for the picker's list-only
+        #: client.  The task's name is its handle in the registry.
+        self._name = name
+        self._timeout = _T.timeouts.work.management if timeout is None else timeout
+
+    async def connect(self) -> None:
+        if self._client is not None:
+            return
+        self._client = await open_server(
+            self._url,
+            name=AGENT_TASK_SERVER_NAME,
+            fallback_tool=AGENT_TASK_LIST,
+            # No clock on the connection: a connection-level deadline is a
+            # deadline on every call that crosses it, and the watch is one.
+            timeout=None,
+        )
+
+    async def tasks(self) -> list[dict[str, Any]]:
+        """Read the task list.  See :class:`AgentTaskClient`.
+
+        The list is one management call, so it keeps the management patience
+        and carries the conversation id a shared server needs to know whose
+        tasks are being asked about.
+        """
+        result = await self._call(
+            AGENT_TASK_LIST,
+            {},
+            timeout=self._timeout,
+            meta=conversation_meta(self._agent),
+        )
+        payload = result.data
+        found = payload.get("tasks") if isinstance(payload, dict) else None
+        if not isinstance(found, list) or not all(
+            isinstance(one, dict) and isinstance(one.get("name"), str) for one in found
+        ):
+            raise _unreadable(
+                "return a task list", payload, server="the agent-task server"
+            )
+        return list(found)
+
+    async def watch(self, on_item: Callable[[WatchItem], None]) -> None:
+        """Hold one task's watch open.  See :class:`WatchClient`."""
+        await self._stream_call(
+            "watch",
+            {"name": self._name},
+            _progress(decode_watch, on_item),
+            meta=conversation_meta(self._agent),
+        )
 
 
 class WindowClient(Protocol):
@@ -632,7 +820,7 @@ class MeshClient(Protocol):
         ...
 
 
-class MCPWindowClient:
+class MCPWindowClient(_MCPClient):
     """A :class:`WindowClient` backed by an MCP connection.
 
     Holds an identity and nothing else — which window this is — because
@@ -645,7 +833,6 @@ class MCPWindowClient:
         #: Whose conversation this window is showing, which is the whole of what
         #: it tells the plugin: one session per agent, and this is the key.
         self._agent = agent
-        self._client: Client | None = None
 
     async def connect(self) -> None:
         """Open the connection, or raise with a message worth showing.
@@ -660,49 +847,13 @@ class MCPWindowClient:
             self._url, name=TUI_SERVER_NAME, fallback_tool=ATTACH
         )
 
-    async def close(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            await close_server(client)
-
     async def attach(self, on_handover: Callable[[Handover], None]) -> None:
-        if self._client is None:
-            raise ConnectionError("not connected")
-
-        async def on_progress(
-            progress: float, total: float | None, message: str | None
-        ) -> None:
-            handover = decode_handover(message or "")
-            if handover is not None:
-                on_handover(handover)
-
-        try:
-            await self._client.call_tool(
-                ATTACH,
-                {"agent": self._agent},
-                # Passing a progress handler is what makes the SDK attach a
-                # progress token, and the plugin's push is a *silent no-op*
-                # without one — a window that omitted this would be handed
-                # nothing while every `submit` still succeeded.  See
-                # `slife2.libs.turn.events` for the same seam on a turn's stream.
-                progress_handler=on_progress,
-                # A session lasts as long as the window, so this call is bounded
-                # by nothing: the default timeout would detach a window that had
-                # merely been open for a while.
-                timeout=None,
-            )
-        except ToolError:
-            # The plugin answered and refused — an agent it cannot place, a
-            # version mismatch.  The connection is fine, so keep it.
-            raise
-        except Exception:
-            # The transport is gone.  Dropping the client is what lets the app's
-            # retry reconnect, for `run_turn`'s reason.
-            await self.close()
-            raise
+        await self._stream_call(
+            ATTACH, {"agent": self._agent}, _progress(decode_handover, on_handover)
+        )
 
 
-class MCPMeshClient:
+class MCPMeshClient(_MCPClient):
     """A :class:`MeshClient` backed by an MCP connection to the A2A plugin.
 
     **Held rather than opened per call**, which is the opposite of
@@ -721,7 +872,6 @@ class MCPMeshClient:
         #: identity (`slife2.plugins.a2a.mesh`), so this is not a label: it is the MQTT
         #: client id and the last segment of the request topic a peer will use.
         self._agent = agent
-        self._client: Client | None = None
 
     async def connect(self) -> None:
         """Open the connection, or raise with a message worth showing.
@@ -737,46 +887,5 @@ class MCPMeshClient:
             self._url, name=A2A_SERVER_NAME, fallback_tool=JOIN
         )
 
-    async def close(self) -> None:
-        client, self._client = self._client, None
-        if client is not None:
-            await close_server(client)
-
     async def hold(self) -> None:
-        if self._client is None:
-            raise ConnectionError("not connected")
-
-        async def on_progress(
-            progress: float, total: float | None, message: str | None
-        ) -> None:
-            # **Nothing to do, and that is not the same as nothing to have.**
-            # What arrives here is the plugin's keepalive — the write that makes
-            # a dead window notice-able at the other end
-            # (`slife2.plugins.a2a.server._hold_open`) — and receiving it means the mesh
-            # still counts this window as here.  A caller that sent *no* progress
-            # token would get no keepalive at all, because `report_progress` is
-            # then a silent no-op, and its agent would stay online until
-            # something else noticed; sending this handler is what makes the
-            # departure a fact rather than a hope.
-            return
-
-        try:
-            await self._client.call_tool(
-                JOIN,
-                {"agent": self._agent},
-                progress_handler=on_progress,
-                # A mesh membership lasts as long as the window, so this call is
-                # bounded by nothing: the default timeout would take an agent off
-                # the mesh that had merely been on it for a while.
-                timeout=None,
-            )
-        except ToolError:
-            # The mesh answered and refused — the name is taken, or the broker is
-            # not there.  The connection is fine, so keep it: the caller decides
-            # whether to try again, and the sentence it carries is the reason.
-            raise
-        except Exception:
-            # The transport is gone.  Dropping the client is what lets the app's
-            # retry reconnect, for `attach`'s reason.
-            await self.close()
-            raise
+        await self._stream_call(JOIN, {"agent": self._agent}, _keepalive)

@@ -90,14 +90,14 @@ import base64
 import codecs
 import hashlib
 import ipaddress
-import json
 import logging
 import mimetypes
 import os
 import re
 import shutil
 import urllib.parse
-from collections.abc import Iterable, Iterator, Sequence
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from datetime import date as _date
 from pathlib import Path
 from typing import Any, Literal
@@ -109,12 +109,18 @@ from fastmcp.exceptions import ToolError
 from slife2.clients.embedder import EmbedderConnection
 from slife2.helpers import timeouts as _T
 from slife2.helpers.threads import off_loop
-from slife2.libs.host.config import CABINET_SERVER_NAME, Config
-from slife2.libs.host.paths import home
+from slife2.libs.host.config import (
+    CABINET_SERVER_NAME,
+    Config,
+    for_the_call,
+    load_cached,
+)
+from slife2.libs.host.paths import local_path
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import conversation_reader, house_server, serve_plugin
-from slife2.libs.store.index import Embedder
-from slife2.libs.turn.tokens import estimate_text_tokens
+from slife2.libs.store.answer import search_answer
+from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit
+from slife2.libs.turn.tools import as_tool_text
 from slife2.plugins.cabinet.store import (
     CORPUS_KIND_HINT,
     DIARY,
@@ -123,8 +129,10 @@ from slife2.plugins.cabinet.store import (
     FILE,
     IMAGE,
     NOTE,
+    PICTURES_DIR,
     REPLACE,
     REPORT,
+    SPECS,
     UPSERT,
     CabinetStore,
     accessible_path,
@@ -224,12 +232,21 @@ OTHER = "other"
 
 #: Names a `category` may not take, because they are the cabinet's own
 #: directories.  **The flattening is what makes this necessary**: the categories
-#: sit beside `notes/`, `diary/` and `reports/` at the cabinet root, so
-#: `category="notes"` would put a saved file among the notes' own mirrors and
-#: `file_list(category="notes")` would list both as one thing.  `pictures` is
-#: the `image` kind's directory: a file saved there would be indistinguishable
-#: from a picture a turn's `[Image:…]` reference points at.
-RESERVED_CATEGORIES = frozenset({"notes", "diary", "reports", "pictures"})
+#: sit beside the mirrors at the cabinet root, so `category="notes"` would put a
+#: saved file among the notes' own mirrors and `file_list(category="notes")`
+#: would list both as one thing; a file filed under `dumps` is silently
+#: overwritten by a later `dump_save` whose mirror stem matches its name, and one
+#: under `pictures` is indistinguishable from a picture a turn's `[Image:…]`
+#: reference points at.
+#:
+#: **Derived from the one place that owns the directories**, not respelled: the
+#: mirror dirs are `SPECS`' (`notes`, `diary`, `reports`, `dumps`) and the image
+#: kind's bytes dir is `PICTURES_DIR`.  A mirror rename in `SPECS` therefore
+#: moves the collision guard with it, where a hand-written set would silently
+#: stop guarding the directory it was meant to.
+RESERVED_CATEGORIES = frozenset(
+    {spec.mirror for spec in SPECS.values() if spec.mirror} | {PICTURES_DIR}
+)
 
 
 def category_for(name: str) -> str:
@@ -412,18 +429,6 @@ async def _fetch_url(
         ) from exc
 
 
-def _local_path(entry: str) -> Path:
-    """One local source path, as the caller's own working directory spells it.
-
-    **A relative path is the model's**, and its working directory is the data
-    directory — where its own tools run, and where a path a tool printed is
-    relative to.  This daemon's working directory is `runtime/`, so resolving a
-    relative path here would name a different file, or none at all.
-    """
-    path = Path(entry)
-    return path if path.is_absolute() or path.drive else home() / path
-
-
 #: What survives into a fetched file's name.  Letters, digits, dots and spaces
 #: are kept — a name a site chose is worth keeping — and everything else becomes
 #: a dash, the compromise `slug` makes for the mirrors.
@@ -452,12 +457,123 @@ def _download_name(url: str, mime: str) -> str:
     name = _UNSAFE_NAME.sub("-", urllib.parse.unquote(segment)).strip(" .-")
     if not name:
         name = "download"
+    # **A device name is reserved with any extension at all.**  Windows reads
+    # `NUL`, `NUL.txt` and `NUL.tar.gz` as the same device, so the check is on
+    # the part before the *first* dot — `Path.stem` strips only the last suffix
+    # and let the multi-part names through.
+    if name.split(".", 1)[0].upper() in _RESERVED_FILE_NAMES:
+        name = f"_{name}"
     stem, suffix = Path(name).stem, Path(name).suffix[:16]
-    if stem.upper() in _RESERVED_FILE_NAMES:
-        stem = f"_{stem}"
     if not suffix and mime:
         suffix = (mimetypes.guess_extension(mime) or "")[:16]
     return f"{stem[:80] or 'download'}{suffix}"
+
+
+async def _save_entry(
+    opened: CabinetStore,
+    entry: str,
+    *,
+    title: str,
+    tags: str,
+    summary: str,
+    category: str,
+) -> dict[str, Any]:
+    """Store one source, or raise the sentence that says why it was not stored.
+
+    **One entry is all-or-nothing**: the bytes are placed before the row is
+    written and taken back if the write refuses, so a failure leaves neither a
+    row without its file nor a file the cabinet has forgotten.  `file_save`
+    calls this once per source and keeps the failure as the answer's other part
+    — the caller decides what to do next from *which* sources were stored, so
+    the batch cannot stop at the first refusal.
+
+    **There is no embedder here.**  A saved file is keyword text and has no
+    vector (`Spec.vectorized`), so the write neither asks a model anything nor
+    opens an embedding connection.
+    """
+    scheme = urllib.parse.urlsplit(entry).scheme.casefold()
+    from_url = scheme in ("http", "https")
+    if not from_url and scheme and "://" in entry:
+        raise ToolError(f"{entry!r} is not an http(s) URL — only those are fetched.")
+    data: bytes | None = None
+    source: Path | None = None
+    if from_url:
+        data, mime = await _fetch_url(entry)
+        name = _download_name(entry, mime)
+        mime = mime or (mimetypes.guess_type(name)[0] or "")
+    else:
+        try:
+            source = local_path(entry)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        if not source.is_file():
+            raise ToolError(f"no such file: {source}")
+        name = source.name
+        mime = mimetypes.guess_type(name)[0] or ""
+    chosen = category.strip() or category_for(name)
+    # Windows strips trailing dots and spaces from a path component, so
+    # `notes.` is the notes directory; normalize to the component that
+    # would actually be created before the guard, or the reserved names
+    # are reachable through that spelling.
+    chosen = chosen.rstrip(". ")
+    # **Two questions, and the first is the one the second depends on.**
+    # A category is *one directory name*: `./notes`, `notes/`, `a/b` and
+    # an absolute path all name something else once a filesystem has
+    # normalised them, so a guard that compared the raw string against a
+    # set would let `"./notes"` through and file a saved attachment among
+    # the notes' own mirrors.  The second question is then asked of the
+    # component that would actually be created, and case-insensitively —
+    # this platform's filesystem is, so `"NOTES"` is the notes directory.
+    if not chosen or Path(chosen).name != chosen or ".." in Path(chosen).parts:
+        raise ToolError(
+            f"{chosen!r} is not one folder name — a category is a single "
+            f"name like `images`, not a path."
+        )
+    if chosen.casefold() in RESERVED_CATEGORIES:
+        raise ToolError(
+            f"{chosen!r} is where the cabinet keeps its "
+            f"{chosen.casefold()}, so a file cannot be filed under it — "
+            f"choose another category, or leave it out to file by extension."
+        )
+    target = unique_path(opened.root / chosen, name)
+    relative = target.relative_to(opened.root).as_posix()
+    try:
+        # The write is inside the `try` because `unique_path` has
+        # already created the destination: a copy that fails leaves an
+        # empty file where a failed copy used to leave nothing at all.
+        if from_url:
+            assert data is not None
+            await off_loop(target.write_bytes, data)
+            size = len(data)
+        else:
+            assert source is not None
+            await off_loop(shutil.copy2, source, target)
+            size = target.stat().st_size
+        written = await opened.write(
+            FILE,
+            relative,
+            # The path is the file's identity and `unique_path` has
+            # already claimed it: a row here is this document's, from an
+            # earlier save whose file went outside the cabinet, and
+            # replacing it is the repair rather than a second file.
+            mode=UPSERT,
+            title=title.strip() or Path(name).stem,
+            tags=parse_tags(tags),
+            summary=summary,
+            source=entry if from_url else str(source),
+            file_path=relative,
+            mime=mime,
+            size=size,
+        )
+    except Exception:
+        # **A save that raises stores nothing** — the same contract a
+        # turn's save keeps.  The bytes are already on disk by now, so
+        # they are what has to be taken back; a row without its file, or
+        # a file the cabinet has forgotten, are both worse than a refusal.
+        await off_loop(discard_file, target)
+        raise
+    assert written is not None, "an upsert always writes"
+    return written
 
 
 #: A byte as a reader sees it in a file that is not text: printable ASCII and
@@ -513,7 +629,12 @@ def _head_encoding(head: bytes) -> str:
     return "binary"
 
 
-def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP:
+def build_server(
+    config: Config,
+    *,
+    embedder: Embedder | None = None,
+    source: Callable[[], Config] | None = None,
+) -> FastMCP:
     """Build the cabinet server.
 
     `embedder` is the seam, and it is injectable for the reason
@@ -522,8 +643,26 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     no embedding endpoint behind it.  In production it is opened once against
     the embeddings server, because a write places its vector in the same call
     and a store that cannot embed stores nothing.
+
+    `source` is the config to read at call time — `load_cached` in production,
+    nothing when a test hands a config in (`slife2.libs.host.config.for_the_call`).
+    The readers' budget goes through `current()`, so an operator's edit to
+    `tool_result.bytes` reaches the next read rather than waiting for a restart.
     """
     embedding = EmbedderConnection(config, embedder=embedder)
+
+    def current() -> Config:
+        """The config this call is served from, not the one this daemon started on.
+
+        **The readers' cap and the harness's budget are one number** (the store's
+        docstring says so), and the harness reads it live (`current().tool_result.bytes`
+        in the agent server).  A cabinet that captured the boot snapshot would
+        diverge from it after an operator edit until a restart — the reader
+        handing back more than the budget, or less, which is the loop the bound
+        exists to close.  So the budget is read per call, the same rule the agent
+        server and the hub follow (SDD Invariant 9).
+        """
+        return for_the_call(source, config)
 
     #: Cabinets whose indexes have been brought up to date, once per process.
     #: A cabinet opened after this pass is not re-synced on every call: its own
@@ -553,8 +692,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
     #: Whose cabinet a call is about, **refused rather than guessed**.  One
     #: cabinet serves every agent, and which one a call is for is a fact only the
     #: caller has — so a call that says nothing is refused rather than answered
-    #: with somebody else's diary.  The pair is the conversation id: a non-fork
-    #: subagent resolves to its own cabinet, and a fork to its maker's.
+    #: with somebody else's diary.  The pair is the conversation id: a subagent
+    #: resolves to its own cabinet, and the maker to its own.
     conversation_of = conversation_reader("cabinet to act on", "the cabinet")
 
     async def cabinet(ctx: Context) -> CabinetStore:
@@ -654,10 +793,20 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
 
         A note, a day and a report are one copy on disk; the row carries the
         metadata and the address.  A row whose `mirror` is empty has no text to
-        read and answers empty (`body_of`).
+        read and answers empty (`text_of`).  **A row whose file is gone is
+        refused by name**: the store raises, because a document whose text is
+        gone is not an empty one, and the sentence a model reads has to say
+        which document and what happened — the same rule `dump_target` and
+        `file_target` state for the other two readers.
         """
         opened = await cabinet(ctx)
-        return await off_loop(opened.body_of, row)
+        try:
+            return await off_loop(opened.text_of, row)
+        except (OSError, UnicodeError) as exc:
+            raise ToolError(
+                f"{row.get('kind') or 'document'} {row.get('key')!r} is recorded "
+                f"but its file is gone or unreadable: {exc}"
+            ) from exc
 
     async def file_target(ctx: Context, path: str) -> Path:
         """The saved file a path names, resolved and checked.
@@ -707,7 +856,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await opened.write(
             NOTE,
             subject,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -743,7 +892,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             NOTE,
             subject,
             mode=REPLACE,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -840,7 +989,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await opened.write(
             DIARY,
             day,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -857,16 +1006,17 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """Read one day's diary entry.
 
         Args:
-            date: The day, `YYYY-MM-DD`.
+            date: The day, `YYYY-MM-DD`. Empty means today.
 
         Returns:
             The day's `kind`, `key`, `title`, `time`, `tags`, `summary` and
             `path` — the file an agent's own tools can open — and its whole
             file text under `text`; the date is the key, not part of the text.
         """
-        row = await missing_row(
-            ctx, DIARY, date, f"there is no diary entry for {date}."
-        )
+        # The same key rule the write uses: a day written as `20260105` is read
+        # back as that day, not refused as a key the store never held.
+        day = _diary_key(date)
+        row = await missing_row(ctx, DIARY, day, f"there is no diary entry for {day}.")
         return _document(row, text=await document_text(ctx, row))
 
     @mcp.tool(name="diary_update", meta=FOR_THE_MODEL)
@@ -896,7 +1046,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             DIARY,
             day,
             mode=REPLACE,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             embedder=await embedding.get(),
         )
@@ -912,15 +1062,18 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         A day is one document, so this removes everything written for it.
 
         Args:
-            date: The day, `YYYY-MM-DD`.
+            date: The day, `YYYY-MM-DD`. Empty means today.
 
         Returns:
             `kind`, `key` and `removed` — always `true`, because a day with no
             entry is refused rather than answered.
         """
-        await remove_of(ctx, DIARY, date, f"there is no diary entry for {date}.")
-        logger.info("diary_remove date=%s", date)
-        return {"kind": DIARY, "key": date, "removed": True}
+        # The write's key rule again, so a day written in any accepted spelling
+        # is the day this removes.
+        day = _diary_key(date)
+        await remove_of(ctx, DIARY, day, f"there is no diary entry for {day}.")
+        logger.info("diary_remove date=%s", day)
+        return {"kind": DIARY, "key": day, "removed": True}
 
     @mcp.tool(name="diary_list", meta=FOR_THE_MODEL)
     async def diary_list(
@@ -959,12 +1112,14 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         summary: str = "",
         category: str = "",
     ) -> dict[str, Any]:
-        """Copy a local file, or fetch a URL, into the cabinet.
+        """Copy local files, or fetch URLs, into the cabinet.
 
-        A local file is copied and never moved, so what you point at stays
-        where it is. An `http(s)` URL is fetched and stored under the site's
-        filename. A search does not read inside the file: it matches the file's
-        name, where it came from and any `summary` you write.
+        Each source is stored or refused on its own: one that cannot be read,
+        fetched or filed does not take the others with it, and the answer says
+        which is which. A local file is copied and never moved, so what you
+        point at stays where it is. An `http(s)` URL is fetched and stored under
+        the site's filename. A search does not read inside the file: it matches
+        the file's name, where it came from and any `summary` you write.
 
         Args:
             paths: Local paths or `http(s)` URLs. A relative path is relative
@@ -978,107 +1133,47 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 and so on. Empty picks one from the extension.
 
         Returns:
-            `saved` — one row per file, with the fields a listing shows
+            `saved` — one row per file stored, with the fields a listing shows
             (including `path`, the file an agent's own tools can open), so the
             `key` is the path each file was stored under. A file already there
             under that name is stored beside it rather than over it, which is
-            why the key is worth reading.
+            why the key is worth reading. `failed` — one entry per source that
+            was not stored, with the `source` as you gave it and the `error`
+            that refused it; nothing was stored for that source.
         """
         opened = await cabinet(ctx)
         entries = [path.strip() for path in paths if path.strip()]
         if not entries:
             raise ToolError("name at least one local path or http(s) URL.")
-        local: list[Path] = []
-        for entry in entries:
-            scheme = urllib.parse.urlsplit(entry).scheme.casefold()
-            if scheme in ("http", "https"):
-                continue
-            if scheme and "://" in entry:
-                raise ToolError(
-                    f"{entry!r} is not an http(s) URL — only those are fetched."
-                )
-            local.append(_local_path(entry))
-        missing = [str(path) for path in local if not path.is_file()]
-        if missing:
-            raise ToolError("no such file: " + ", ".join(missing))
         saved: list[dict[str, Any]] = []
+        failed: list[dict[str, str]] = []
         for entry in entries:
-            from_url = urllib.parse.urlsplit(entry).scheme.casefold() in (
-                "http",
-                "https",
-            )
-            data: bytes | None = None
-            source: Path | None = None
-            if from_url:
-                data, mime = await _fetch_url(entry)
-                name = _download_name(entry, mime)
-                mime = mime or (mimetypes.guess_type(name)[0] or "")
-            else:
-                source = _local_path(entry)
-                name = source.name
-                mime = mimetypes.guess_type(name)[0] or ""
-            chosen = category.strip() or category_for(name)
-            # **Two questions, and the first is the one the second depends on.**
-            # A category is *one directory name*: `./notes`, `notes/`, `a/b` and
-            # an absolute path all name something else once a filesystem has
-            # normalised them, so a guard that compared the raw string against a
-            # set would let `"./notes"` through and file a saved attachment among
-            # the notes' own mirrors.  The second question is then asked of the
-            # component that would actually be created, and case-insensitively —
-            # this platform's filesystem is, so `"NOTES"` is the notes directory.
-            if not chosen or Path(chosen).name != chosen or ".." in Path(chosen).parts:
-                raise ToolError(
-                    f"{chosen!r} is not one folder name — a category is a single "
-                    f"name like `images`, not a path."
-                )
-            if chosen.casefold() in RESERVED_CATEGORIES:
-                raise ToolError(
-                    f"{chosen!r} is where the cabinet keeps its "
-                    f"{chosen.casefold()}, so a file cannot be filed under it — "
-                    f"choose another category, or leave it out to file by extension."
-                )
-            target = unique_path(opened.root / chosen, name)
-            relative = target.relative_to(opened.root).as_posix()
             try:
-                # The write is inside the `try` because `unique_path` has
-                # already created the destination: a copy that fails leaves an
-                # empty file where a failed copy used to leave nothing at all.
-                if from_url:
-                    assert data is not None
-                    await off_loop(target.write_bytes, data)
-                    size = len(data)
-                else:
-                    assert source is not None
-                    await off_loop(shutil.copy2, source, target)
-                    size = target.stat().st_size
-                written = await opened.write(
-                    FILE,
-                    relative,
-                    # The path is the file's identity and `unique_path` has
-                    # already claimed it: a row here is this document's, from an
-                    # earlier save whose file went outside the cabinet, and
-                    # replacing it is the repair rather than a second file.
-                    mode=UPSERT,
-                    title=title.strip() or Path(name).stem,
-                    tags=parse_tags(tags),
+                written = await _save_entry(
+                    opened,
+                    entry,
+                    title=title,
+                    tags=tags,
                     summary=summary,
-                    source=entry if from_url else str(source),
-                    file_path=relative,
-                    mime=mime,
-                    size=size,
-                    embedder=await embedding.get(),
+                    category=category,
                 )
-            except Exception:
-                # **A save that raises stores nothing** — the same contract a
-                # turn's save keeps.  The bytes are already on disk by now, so
-                # they are what has to be taken back; a row without its file, or
-                # a file the cabinet has forgotten, are both worse than a refusal.
-                await off_loop(discard_file, target)
-                raise
-            assert written is not None, "an upsert always writes"
-            saved.append(facts(written))
-        logger.info("file_save count=%d", len(saved))
-        return {"saved": saved}
+            except ToolError as exc:
+                # **A refused source is the answer's other part, not the
+                # call's end.**  The caller's next move is decided by *which*
+                # sources were stored, so a later URL that cannot be fetched
+                # must not hide the files already stored — a retry that did
+                # not know them would store them again under `-1` names.
+                logger.info("file_save refused %r: %s", entry, exc)
+                failed.append({"source": entry, "error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - one source's failure is the answer's other half
+                logger.warning("file_save failed for %r: %s", entry, exc, exc_info=exc)
+                failed.append(
+                    {"source": entry, "error": f"{type(exc).__name__}: {exc}"}
+                )
+            else:
+                saved.append(facts(written))
+        logger.info("file_save saved=%d failed=%d", len(saved), len(failed))
+        return {"saved": saved, "failed": failed}
 
     @mcp.tool(name="file_remove", meta=FOR_THE_MODEL)
     async def file_remove(ctx: Context, path: str) -> dict[str, Any]:
@@ -1138,7 +1233,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             mode=mode,
             offset=offset,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="file_grep", meta=FOR_THE_MODEL)
@@ -1197,7 +1292,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset=offset,
             char=char,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="file_list", meta=FOR_THE_MODEL)
@@ -1268,7 +1363,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         row = await opened.write(
             REPORT,
             title,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             period_start=period_start,
             period_end=period_end,
@@ -1335,7 +1430,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             REPORT,
             title,
             mode=REPLACE,
-            body=content,
+            text=content,
             tags=parse_tags(tags),
             period_start=period_start,
             period_end=period_end,
@@ -1433,7 +1528,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             mode=mode,
             offset=offset,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="dump_grep", meta=FOR_THE_MODEL)
@@ -1495,7 +1590,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             offset=offset,
             char=char,
             limit=limit,
-            budget=config.tool_result.tokens,
+            budget=current().tool_result.bytes,
         )
 
     @mcp.tool(name="dump_save")
@@ -1518,7 +1613,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         A second call under one key replaces, because the key is one call: a
         re-run writes the same output twice rather than two facts.
 
-        **The text is the mirror file; the row holds no body.**  A dump can be
+        **The text is the mirror file; the row holds no copy.**  A dump can be
         a gigabyte of output, and keeping the same bytes in SQLite as well
         would be the duplication this arrangement exists to avoid.
 
@@ -1543,10 +1638,9 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             DUMP,
             call,
             mode=UPSERT,
-            body=output,
+            text=output,
             title=tool,
             source=tool,
-            embedder=await embedding.get(),
         )
         assert row is not None, "an upsert always writes"
         written = opened.root / str(row["mirror"])
@@ -1601,7 +1695,8 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         """
         opened = await cabinet(ctx)
         if url.startswith(("http://", "https://")):
-            key = f"pictures/url-{hashlib.sha256(url.encode('utf-8')).hexdigest()[:16]}"
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+            key = f"{PICTURES_DIR}/url-{digest}"
             mime = mimetypes.guess_type(url)[0] or ""
             row = await opened.write(
                 IMAGE,
@@ -1610,7 +1705,6 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 title=mime or "image",
                 source=url,
                 mime=mime,
-                embedder=await embedding.get(),
             )
             assert row is not None, "an upsert always writes"
             return {
@@ -1632,14 +1726,21 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             "application/octet-stream"
         )
         relative = (
-            f"pictures/{hashlib.sha256(data).hexdigest()[:16]}"
+            f"{PICTURES_DIR}/{hashlib.sha256(data).hexdigest()[:16]}"
             f"{mimetypes.guess_extension(mime) or '.img'}"
         )
         target = opened.root / relative
+        # **The bytes are content-addressed, so a target already there holds
+        # exactly these bytes** — an existing file is success, not a collision,
+        # and this call takes no ownership of it for the take-back below.
         created = not target.exists()
         if created:
             target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(f"{target.name}.{os.getpid()}.part")
+            # **A temp name per write, not per process.**  Two saves of one new
+            # image overlap normally, and a shared `<name>.<pid>.part` let the
+            # two writers interleave, or one's `os.replace` find the other had
+            # already moved it — a failed save for a picture that was stored.
+            temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.part")
             try:
                 with temporary.open("wb") as handle:
                     handle.write(data)
@@ -1656,13 +1757,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
                 file_path=relative,
                 mime=mime,
                 size=len(data),
-                embedder=await embedding.get(),
             )
         except Exception:
-            # **Only a file this call created is taken back.**  A content
-            # address can already hold the bytes of an earlier save, and that
-            # row (and every marker pointing at it) still needs them.
-            if created:
+            # **Only a file this call created is taken back, and only while no
+            # row needs it.**  A content address can already hold the bytes of an
+            # earlier save, and a concurrent save of this same picture may have
+            # committed its row in the window — that row (and every marker
+            # pointing at it) still needs the bytes, so a file a row references
+            # is left in place.
+            if created and opened.get(IMAGE, relative) is None:
                 discard_file(target)
             raise
         assert row is not None, "an upsert always writes"
@@ -1765,11 +1868,15 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             limit: How many hits this page may hold.
 
         Returns:
-            `results` — `kind`, `key`, `title`, `time`, `tags`, `summary`,
-            `path` and `excerpt` per hit, with `similarity` where meaning ranked
-            it and `matched_in` (`line`, or `rest` for elsewhere in the
-            document) where your words were found — and `browsed`, true when
-            neither was given and the page is simply newest first.
+            The one search answer: `results` — `kind`, `key`, `title`, `time`,
+            `tags`, `summary`, `path` and `excerpt` per hit, with `similarity`
+            where meaning ranked it and `matched_in` (`line`, or `rest` for
+            elsewhere in the document) where your words were found — `best`
+            (the highest meaning score on the page, `null` when nothing was
+            scored by meaning), `confidence` (`sure`, `weak` or `none`; `null`
+            when `browsed`), `browsed` (true when neither input was given and
+            the page is simply newest first) and `limit` (the page size this
+            answer was cut to).
         """
         opened = await cabinet(ctx)
         try:
@@ -1784,7 +1891,7 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
-        return _hits(found)
+        return _hits(found, limit=page_limit(limit, MAX_PAGE))
 
     @mcp.tool(name="cabinet_summarize", meta=FOR_THE_MODEL)
     async def cabinet_summarize(
@@ -1820,6 +1927,13 @@ def build_server(config: Config, *, embedder: Embedder | None = None) -> FastMCP
         wanted = kind.strip()
         if wanted not in DOCUMENT_KINDS:
             raise ToolError(CORPUS_KIND_HINT)
+        # **A diary's key is the day every tool spells.**  `diary_write` and
+        # `diary_update` store the canonical `YYYY-MM-DD`, so a summarise naming
+        # `20260105` would describe a row the reader can never reach — the same
+        # day in its other accepted spelling.  The other kinds' keys are their
+        # callers' words and are taken as written.
+        if wanted == DIARY:
+            key = _diary_key(key)
         row = await opened.annotate(
             wanted,
             key,
@@ -1893,7 +2007,7 @@ def _line_fill(
     budget: int,
     where: str,
 ) -> dict[str, Any]:
-    """Fill a line page from a stream, **never larger than `budget` tokens**.
+    """Fill a line page from a stream, **never larger than `budget` bytes**.
 
     The bound is on the whole answer, envelope included: a reader that handed
     back more than the budget would be a tool of ours feeding the harness's own
@@ -1920,9 +2034,7 @@ def _line_fill(
         kept.append((number, text))
         following = number + 1 if number < total_lines else None
         if (
-            estimate_text_tokens(
-                _wire(_line_payload(kept, total_lines, total_chars, following, where))
-            )
+            _size(_line_payload(kept, total_lines, total_chars, following, where))
             > budget
         ):
             kept.pop()
@@ -1931,7 +2043,7 @@ def _line_fill(
         next_line = following
     if not kept:
         raise ToolError(
-            f"line {start} is longer than a {budget}-token window on its own — "
+            f"line {start} is longer than a {budget}-byte window on its own — "
             f'read it with mode="char", offset={first_offset} '
             f"(the file is at {_where(where)})."
         )
@@ -1980,7 +2092,7 @@ def _char_window(
     """Fit a character window of *text* starting at *index*, within *budget*.
 
     `base` is the absolute offset of `text[0]` in the text a model addresses:
-    `0` for a whole dump body, and the file offset of a gathered chunk for a
+    `0` for a whole dump, and the file offset of a gathered chunk for a
     saved file.  So `next` is always an address in the original, not in the
     chunk.  **The window is filled against the budget, and no line is
     scanned** — this is the mode for text without useful lines.
@@ -2003,21 +2115,17 @@ def _char_window(
     low, high = 0, room
     while low < high:
         middle = (low + high + 1) // 2
-        if estimate_text_tokens(_wire(page_of(middle))) <= budget:
+        if _size(page_of(middle)) <= budget:
             low = middle
         else:
             high = middle - 1
     count = low
-    page = page_of(count)
-    while count > 0 and estimate_text_tokens(_wire(page)) > budget:
-        count -= max(count // 16, 1)
-        page = page_of(count)
     if count == 0:
         raise ToolError(
-            f"a {budget}-token window cannot hold a character of this text — "
-            f"raise `tool_result.tokens`; the file is at {_where(where)}."
+            f"a {budget}-byte window cannot hold a character of this text — "
+            f"raise `tool_result.bytes`; the file is at {_where(where)}."
         )
-    return page
+    return page_of(count)
 
 
 def _grep_pattern(pattern: str) -> str:
@@ -2029,7 +2137,7 @@ def _grep_pattern(pattern: str) -> str:
 
 def _grep_hits(
     lines: Iterable[tuple[int, int, str]], wanted: str, start: int, after: int
-) -> Iterator[tuple[int, int, str]]:
+) -> Iterator[tuple[int, int, str, int]]:
     """Every occurrence in *lines* at or after line *start* and character *after*.
 
     **Every occurrence, not the first one in a line.**  A minified JSON dump is
@@ -2039,20 +2147,38 @@ def _grep_hits(
     cannot say which occurrence on that line.
 
     **The matching is the same for a dump and a file.**  It reads a line source,
-    not a body: both readers feed lines as they are read from the file.  The
-    folded index can be larger than
-    the line's when casefolding expands a character (`ß` -> `ss`); clamping keeps
-    the address inside the line whose text it belongs to.
+    not a whole text: both readers feed lines as they are read from the file.
+
+    **A folded index is not an original one.**  `ß` casefolds to `ss`, and `İ`
+    to `i` plus a combining dot, so the folded line can be longer than the line
+    — and the old `min(found, len(line))` clamp only kept the answer inside the
+    line while pointing at the wrong character.  The caller passes that offset
+    back to `dump_read`/`file_read mode="char"`, so the match started late (or
+    early), and the reader the address exists for read the wrong text.  Each
+    folded character therefore remembers the original character it came from:
+    one pass per line, and the address is the line's own offset.
     """
     for number, offset, line in lines:
         if number < start:
             continue
         folded = line.casefold()
+        if len(folded) == len(line):
+            # The common case: casefolding changed no character's width, so the
+            # folded index is the original index.
+            positions: list[int] | None = None
+        else:
+            positions = []
+            pieces: list[str] = []
+            for index, character in enumerate(line):
+                piece = character.casefold()
+                pieces.append(piece)
+                positions.extend([index] * len(piece))
+            folded = "".join(pieces)
         found = folded.find(wanted)
         while found >= 0:
-            at = offset + min(found, len(line))
+            at = offset + (found if positions is None else positions[found])
             if at >= after:
-                yield number, at, line
+                yield number, at, line, offset
             found = folded.find(wanted, found + len(wanted))
 
 
@@ -2069,7 +2195,12 @@ def _grep_payload(
         "lines": total_lines,
         "chars": total_chars,
         "matched": matched,
-        "matches": list(shown),
+        # `start` is the line's own offset, carried for the window math and not
+        # part of the answer the model reads.
+        "matches": [
+            {key: value for key, value in match.items() if key != "start"}
+            for match in shown
+        ],
         "path": where,
     }
     if first_unshown is not None:
@@ -2102,7 +2233,7 @@ def _grep_finalize(
         page = _grep_payload(
             total_lines, total_chars, matched, shown, first_unshown, where
         )
-        if estimate_text_tokens(_wire(page)) <= budget:
+        if _size(page) <= budget:
             return page
         if len(shown) > 1:
             dropped = shown.pop()
@@ -2113,20 +2244,20 @@ def _grep_finalize(
             if not match.get("cut"):
                 match["cut"] = True
                 match["text"], match["text_char"] = _fit_match_text(
-                    page, match["text"], wanted, budget
+                    page, match["text"], wanted, budget, match["start"]
                 )
                 continue
             first_unshown = match["char"]
             shown.clear()
             continue
         raise ToolError(
-            f"a {budget}-token window cannot hold this answer — raise "
-            f"`tool_result.tokens`."
+            f"a {budget}-byte window cannot hold this answer — raise "
+            f"`tool_result.bytes`."
         )
 
 
 def _grep_answer(
-    hits: Iterable[tuple[int, int, str]],
+    hits: Iterable[tuple[int, int, str, int]],
     *,
     wanted: str,
     total_lines: int,
@@ -2156,18 +2287,18 @@ def _grep_answer(
     def page() -> dict[str, Any]:
         return _grep_payload(total_lines, total_chars, matched, shown, None, where)
 
-    for number, at, line in hits:
+    for number, at, line, line_start in hits:
         matched += 1
         if full or (limit and len(shown) >= limit):
             if first_unshown is None:
                 first_unshown = at
             continue
-        shown.append({"line": number, "char": at, "text": line})
+        shown.append({"line": number, "char": at, "text": line, "start": line_start})
         match = shown[-1]
         if len(line) > window:
             try:
                 match["text"], match["text_char"] = _fit_match_text(
-                    page(), line, wanted, budget
+                    page(), line, wanted, budget, line_start
                 )
             except ToolError:
                 # There is no room for even an address on this page; the match
@@ -2178,7 +2309,7 @@ def _grep_answer(
                 full = True
                 continue
             match["cut"] = True
-        if estimate_text_tokens(_wire(page())) > budget:
+        if _size(page()) > budget:
             if len(shown) == 1:
                 # Keep the only address there is; the finalizer cuts its text.
                 full = True
@@ -2336,11 +2467,10 @@ def _stream_read(
             where=where,
         )
     start = _char_start(0 if offset is None else offset, total_chars)
-    # The window's size in characters is not known until it is measured;
-    # gather a generous multiple of the budget (a token is at least one
-    # character, and four covers the priciest BPE splits) and let
-    # `_char_window` cut it back to what fits.
-    room = budget * 4 + 1024
+    # The window's size in characters is not known until it is measured; a
+    # character is at least one byte, so a byte budget's worth of characters
+    # is a safe bound on what can fit.  `_char_window` cuts it back.
+    room = budget + 1024
     if limit:
         room = min(room, limit)
     chunk = _file_char_text(target, encoding, start, room)
@@ -2427,7 +2557,7 @@ GREP_AFTER_CHARS = 300
 
 
 def _fit_match_text(
-    page: dict[str, Any], line: str, wanted: str, budget: int
+    page: dict[str, Any], line: str, wanted: str, budget: int, line_start: int
 ) -> tuple[str, int]:
     """A window of a very long matched line, and where it starts.
 
@@ -2444,13 +2574,16 @@ def _fit_match_text(
     budget keeps its two addresses and as much of itself as fits, marked `cut`;
     only a window with not one character of room is refused.
 
-    Returns `(text, text_char)`.  The match's `char` is its absolute offset;
-    its line starts at `char - found`, so the window starts at that plus
-    `start`.
+    Returns `(text, text_char)`.  `found` is *this* match's offset within the
+    line — `char - line_start`, the address `_grep_hits` already mapped through
+    the casefold positions — not the first occurrence `find` would return, which
+    on a line with several matches windows the wrong one and mis-addresses the
+    window.  The line starts at `char - found`, so the window starts at that
+    plus `start`.
     """
-    found = min(max(line.casefold().find(wanted), 0), len(line))
-    length = len(wanted)
     char = int(page["matches"][-1]["char"])
+    found = min(max(char - line_start, 0), len(line))
+    length = len(wanted)
 
     def candidate(start: int, end: int) -> dict[str, Any]:
         match = {
@@ -2462,7 +2595,7 @@ def _fit_match_text(
         return {**page, "matches": [*page["matches"][:-1], match]}
 
     def fits(start: int, end: int) -> bool:
-        return estimate_text_tokens(_wire(candidate(start, end))) <= budget
+        return _size(candidate(start, end)) <= budget
 
     before, after = GREP_BEFORE_CHARS, GREP_AFTER_CHARS
     while before or after:
@@ -2486,8 +2619,8 @@ def _fit_match_text(
             high = middle - 1
     if low == 0:
         raise ToolError(
-            f"this match is longer than a {budget}-token window even as an "
-            f"address; raise `tool_result.tokens`."
+            f"this match is longer than a {budget}-byte window even as an "
+            f"address; raise `tool_result.bytes`."
         )
     return line[start : start + low], char - found + start
 
@@ -2501,44 +2634,45 @@ def _where(where: str) -> str:
     return where or "the cabinet"
 
 
-def _wire(payload: dict[str, Any]) -> str:
-    """A payload as the text a model is handed, for measuring it against the budget.
+def _size(payload: dict[str, Any]) -> int:
+    """A payload's size as the model receives it, in UTF-8 bytes.
 
-    JSON, which is what every tool of ours answers in — and deliberately the
-    *wider* of the two spellings of it: the serializer that puts a structured
-    result in a tool message drops the spaces after `,` and `:`, and this keeps
-    them, so the number a window is measured against is never smaller than what
-    the model reads.
+    `as_tool_text` is the one renderer that builds a tool message — the hub and
+    the loop both go through it — so this measures what the conversation
+    carries, not an approximation of it.  The budget is `tool_result.bytes`;
+    the addresses (`offset`, `limit`, `next`) stay characters.
     """
-    return json.dumps(payload, ensure_ascii=True, default=str)
+    return len(as_tool_text(payload).encode("utf-8", "backslashreplace"))
 
 
 def _document(row: dict[str, Any], *, text: str) -> dict[str, Any]:
     """One document as the payload a model reads: its own fields, and its text.
 
     The text is always the caller's: a note, a day and a report live in their
-    file, and the row holds no body.  One key for every kind, because "the text
+    file, and the row holds no copy.  One key for every kind, because "the text
     of this document" is one question however a kind answers it.
     """
     return {**facts(row), "text": text}
 
 
-def _hits(found: dict[str, Any]) -> dict[str, Any]:
+def _hits(found: dict[str, Any], *, limit: int) -> dict[str, Any]:
     """A search answer as the payload a model reads.
+
+    The page is `search_answer`'s — the one envelope all three searches give
+    (`slife2.libs.store.answer`).  `browsed` is given whether or not it is true,
+    because "these are the newest, unranked" and "these are what your words and
+    your sentences found" are the two things a reader of the page has to tell
+    apart; and when it is true the envelope withholds `confidence` rather than
+    calling a browse a miss.
 
     **A search answer that cannot be read is not a search that found nothing.**
     An answer with no `results` list used to render as the same "nothing
     matched" a real miss produces, which is a verdict a model acts on rather
-    than a failure it retries (SDD Appendix C, "a failure is not a verdict"); only a
-    *readable* empty list may say the search found nothing, and anything else
-    fails the call.  The raise is this plugin's to make — the store's shape is
-    the thing that is wrong — and the far end reads it as a failed call rather
-    than as a confident negative.
-
-    `browsed` is given whether or not it is true, because "these are the newest,
-    unranked" and "these are what your words and your sentences found" are the
-    two things a reader of the page has to tell apart, and a key that is only
-    present in one of the two cases is one they have to know to look for.
+    than a failure it retries (SDD Appendix C, "a failure is not a verdict");
+    only a *readable* empty list may say the search found nothing, and anything
+    else fails the call.  The raise is this plugin's to make — the store's shape
+    is the thing that is wrong — and the far end reads it as a failed call
+    rather than as a confident negative.
     """
     rows = found.get("results")
     if not isinstance(rows, list):
@@ -2546,7 +2680,13 @@ def _hits(found: dict[str, Any]) -> dict[str, Any]:
             f"cabinet_search could not read the cabinet's answer — `results` "
             f"came back as {rows!r}"
         )
-    return {"results": rows, "browsed": bool(found.get("browsed"))}
+    return search_answer(
+        rows,
+        scores=[row.get("similarity") for row in rows],
+        worded=any(row.get("matched_in") for row in rows),
+        browsed=bool(found.get("browsed")),
+        limit=limit,
+    )
 
 
 def _today() -> str:
@@ -2568,10 +2708,14 @@ def _diary_key(value: str) -> str:
     """
     day = value.strip() or _today()
     try:
-        _day(day)
+        parsed = _day(day)
     except ValueError as exc:
         raise ToolError(f"{day!r} is not a date — write it as `YYYY-MM-DD`.") from exc
-    return day
+    # **The key is the canonical spelling, not the caller's.**  `fromisoformat`
+    # accepts `20260105`, `2026-W02-1` and `2026W021` as the same day, and
+    # returning the argument made each of them a separate diary row — one day
+    # in two documents, and rows that sort outside the `YYYY-MM-DD` order.
+    return parsed.isoformat()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2579,7 +2723,9 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        # `load_cached` rather than the boot config: a reader's budget follows
+        # an edit to `tool_result.bytes` on the next call, not on restart.
+        build=lambda config: build_server(config, source=load_cached),
         logger=logger,
     )
 

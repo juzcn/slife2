@@ -99,9 +99,9 @@ def _period_start(day: date, period: str) -> date:
         return day.replace(day=1)
     if period == "quarter":
         return date(day.year, 3 * ((day.month - 1) // 3) + 1, 1)
-    if period == "year":
-        return date(day.year, 1, 1)
-    raise InvalidTimeBound(_bound_error("since", period))
+    # `_PERIOD_RE` is the only source of `period`, and it names the four words
+    # above; the year is the remaining one.
+    return date(day.year, 1, 1)
 
 
 def _resolve_period(which: str, period: str, role: str, today: date) -> date:
@@ -236,6 +236,18 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
     except (OverflowError, ValueError):
         raise InvalidTimeBound(_bound_error(role, value)) from None
 
+    # **A date-only bound is still a moment someone has to place.**  The
+    # comparison readers give it the local day's offset (`instant_bound`), and
+    # a year the platform's calendar conversion cannot restate — Windows fails
+    # from year 4000 — was an `OSError` out of a query rather than a bound this
+    # grammar refuses.  The string itself stays a date: text-prefix readers
+    # still compare it as written.
+    if "T" not in resolved:
+        try:
+            at(datetime.fromisoformat(resolved))
+        except (OverflowError, OSError, ValueError):
+            raise InvalidTimeBound(_bound_error(role, value)) from None
+
     # A model may write UTC or some other offset, and the column holds local
     # time.  Comparing the two lexicographically is wrong exactly at the
     # boundary — the same instant written two ways is two different strings.
@@ -258,14 +270,23 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
             # — but it raises rather than returning the bound un-normalised:
             # skipping the local-offset rewrite is the one thing this module
             # guarantees, so a value that reached here unparseable is a bound it
-            # cannot place (SDD Appendix C).
+            # cannot place (SDD Appendix C).  The test suite drives this with a
+            # `_canonical` that answers garbage, which is what keeps the
+            # invariant guarded against a future edit rather than trusted.
             raise InvalidTimeBound(_bound_error(role, value)) from None
         try:
             resolved = at(moment)
-        except (OverflowError, ValueError):
+        except (OverflowError, OSError, ValueError):
             # The offset rewrite can carry the instant past the calendar's end
             # (`9999-12-31T23:59:59+00:00` in a zone ahead of UTC), which is a
             # bound this build cannot place for the same reason as the above.
+            # **`OSError` is the same overflow, on the platforms that say it
+            # that way**: `astimezone` reaches the C library to restate the
+            # moment, and a moment past the calendar's end is a failure the C
+            # library may report as `OSError` rather than as the arithmetic's
+            # `OverflowError` — measured on Windows as `[Errno 22]`.  Both are
+            # this bound being unplaceable, and `can_place` promises to answer
+            # that rather than raise (SDD Appendix C).
             raise InvalidTimeBound(_bound_error(role, value)) from None
 
     return resolved
@@ -279,7 +300,8 @@ def can_place(value: str, *, role: str = "since") -> bool:
     caller that hands a model-written bound straight to the store finds out it
     is unreadable as an `InvalidTimeBound` out of the middle of a query — which
     is the right thing for a caller with no answer, and the wrong thing for one
-    that has a better answer available.  `slife2.libs.turn.context`'s discriminator reply
+    that has a better answer available.  `slife2.libs.turn.context`'s
+    decision-model reply
     is the second kind: a bound it cannot place is a reply it should drop, and
     an exception out of there fails a whole turn that had a perfectly good
     fallback.

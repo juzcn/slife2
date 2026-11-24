@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import subprocess
@@ -107,7 +108,7 @@ def test_an_agent_name_cannot_collide_with_a_server_address() -> None:
 # --- records -----------------------------------------------------------------
 
 
-def test_record_round_trips() -> None:
+def test_a_record_round_trips() -> None:
     record = runtime.ServerRecord.now(
         name="agent",
         url="http://127.0.0.1:24000/mcp",
@@ -119,6 +120,41 @@ def test_record_round_trips() -> None:
     assert runtime.read_record(record.url) == record
 
 
+def test_a_record_write_flushes_before_it_publishes_and_cleans_its_temporary(
+    monkeypatch,
+) -> None:
+    """**The bytes reach the disk before the name does**, and a refused rename
+    leaves nothing beside the file.
+
+    `_write_json_atomic` wrote a fixed `.tmp` with no flush or fsync, where the
+    registry and state-file writers already staged a fresh temporary and
+    fsynced it; two writers could share the name, and a crash could publish an
+    empty record.  The same mechanic now serves all four.
+    """
+    record = runtime.ServerRecord.now(
+        name="agent",
+        url="http://127.0.0.1:24000/mcp",
+        pid=1234,
+        config="c.yaml",
+        version="1",
+    )
+    synced: list[int] = []
+    monkeypatch.setattr(runtime.os, "fsync", lambda fd: synced.append(fd))
+    runtime.write_record(record)
+    assert synced, "the record's bytes were never flushed to the disk"
+    assert runtime.read_record(record.url) == record
+
+    path = runtime.record_path(record.url)
+
+    def refuse(_src, _dst) -> None:
+        raise OSError("the destination is locked")
+
+    monkeypatch.setattr(runtime, "replace_file", refuse)
+    assert runtime._write_json_atomic(path, record) is False
+    assert not list(path.parent.glob("*.tmp")), "a failed write left its temporary"
+    assert runtime.read_record(record.url) == record, "the old record is untouched"
+
+
 def test_a_missing_record_is_absent_not_an_error() -> None:
     assert runtime.read_record("http://127.0.0.1:9999/mcp") is None
 
@@ -127,7 +163,7 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     """Bookkeeping must never block a start.
 
     This is the registered tolerance of `_read_json_dataclass` (`SDD
-    SDD Appendix C): damage reads as absence, which is accepted for a *recorded pid* but
+    Appendix C): damage reads as absence, which is accepted for a *recorded pid* but
     is why `live_clients` does not delete a damaged record while its pid is
     alive — there the cost is a live client nobody counts.
     """
@@ -135,6 +171,28 @@ def test_a_corrupt_record_reads_as_absent() -> None:
     path = runtime.record_path(url)
     path.write_text("{ not json", encoding="utf-8")
     assert runtime.read_record(url) is None
+
+
+def test_a_damaged_record_is_absent_and_named(caplog) -> None:
+    """**Damage is read as absence, and is not silent.**
+
+    A file that exists and cannot be read is damage — a crash-truncated write,
+    or a record from another build — where a missing file is the ordinary first
+    start.  Both may read as absent, because neither may block a start; only the
+    damage is logged, so the reader is not left guessing which happened.
+    """
+    url = "http://127.0.0.1:24000/mcp"
+    path = runtime.record_path(url)
+    path.write_text("{ not json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
+        assert runtime.read_record(url) is None
+    assert "could not be read as a record" in caplog.text
+    assert str(path) in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
+        assert runtime.read_record("http://127.0.0.1:9999/mcp") is None
+    assert caplog.text == "", "a missing record is not damage"
 
 
 def test_a_record_that_is_not_a_record_reads_as_absent() -> None:
@@ -163,6 +221,46 @@ def test_a_claim_round_trips_and_a_corrupt_one_reads_as_absent() -> None:
     assert runtime.read_claim("nobody") is None
 
     runtime.agent_claim_path("alpha").write_text("{ not json", encoding="utf-8")
+    assert runtime.read_claim("alpha") is None
+
+
+def test_a_record_with_a_pid_outside_the_process_table_reads_as_absent(caplog) -> None:
+    """**JSON `1e400` is `inf`, and `int(inf)` is an overflow.**
+
+    The reader's contract is that damage reads as absence; the exception tuple
+    covered `ValueError`/`KeyError`/`TypeError` but not `OverflowError`, so a
+    record from another build or a hand edit crashed `status`, `down` and start
+    instead of being reported as the damaged bookkeeping it is.
+    """
+    url = "http://127.0.0.1:24000/mcp"
+    runtime.record_path(url).write_text(
+        json.dumps(
+            {
+                "name": "agent",
+                "url": url,
+                "pid": float("inf"),
+                "start_token": "",
+                "config": "",
+                "version": "",
+                "started_at": "",
+            }
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
+        assert runtime.read_record(url) is None
+    assert "could not be read as a record" in caplog.text
+
+
+@pytest.mark.parametrize("pid", ["1e400", str(10**20), str(2**63)])
+def test_a_claim_with_a_pid_the_kernel_cannot_hold_reads_as_absent(pid: str) -> None:
+    path = runtime.agent_claim_path("alpha")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'{{"name":"alpha","pid":{pid},"start_token":"","started_at":"",'
+        f'"headless":false}}',
+        encoding="utf-8",
+    )
     assert runtime.read_claim("alpha") is None
 
 
@@ -386,6 +484,18 @@ def test_pid_alive_is_true_for_this_process() -> None:
 
 def test_pid_alive_is_false_for_a_pid_that_cannot_exist() -> None:
     assert runtime.pid_alive(999_999) is False
+
+
+@pytest.mark.parametrize("pid", [10**20, 2**63])
+def test_pid_alive_is_false_for_a_pid_the_kernel_cannot_hold(pid: int) -> None:
+    """A number past `pid_t`/`DWORD` is not a pid, and asking the kernel about
+    one raises `OverflowError`/`ctypes.ArgumentError` instead of answering."""
+    assert runtime.pid_alive(pid) is False
+
+
+@pytest.mark.parametrize("pid", [10**20, 2**63])
+def test_a_start_token_is_unavailable_for_such_a_pid(pid: int) -> None:
+    assert runtime.process_start_token(pid) is None
 
 
 def test_pid_alive_does_not_kill_the_process_it_checks() -> None:
@@ -1002,3 +1112,20 @@ async def test_the_close_survives_the_cancellation_it_exists_for(
 
     await asyncio.wait_for(closed.wait(), timeout=1)
     assert closed.is_set()
+
+
+def test_one_config_file_gets_one_write_lock_however_it_is_spelled(
+    tmp_path: Path,
+) -> None:
+    """**A lock keyed by the spelling does not lock.**
+
+    Two clients can reach one home through a symlink, a junction, a `..` or a
+    different case.  A digest of the string would be two locks for one file, so
+    two `mcp_set`/`cli_set` edits could read-modify-write at once and one would
+    vanish — exactly what the lock exists to prevent.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text("providers: {}\n", encoding="utf-8")
+    alias = tmp_path / ".." / tmp_path.name / "slife2.yaml"
+
+    assert runtime.config_key(path) == runtime.config_key(alias)

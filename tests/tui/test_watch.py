@@ -13,12 +13,19 @@ import asyncio
 import pytest
 from fakes import FakeWatchClient
 from textual.app import App
+from textual.widgets import Static
 
-from slife2.libs.turn.events import TextDelta, TurnFinished
+from slife2.libs.turn.events import (
+    TextDelta,
+    ToolCallFinished,
+    ToolCallStarted,
+    TurnFinished,
+    UsageReported,
+)
 from slife2.libs.turn.messages import Message, Usage
-from slife2.libs.turn.watch import Closed, Snapshot, TurnStarted
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.watch import WatchScreen
-from slife2.tui.widgets import ChatView, HistoryInput
+from slife2.tui.widgets import ChatView, HistoryInput, PlanView
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
 
@@ -73,6 +80,10 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
             Snapshot([stored_turn()]),
             TurnStarted("what is 6*7?", "agent:jack"),
             TextDelta("It is "),
+            # The bar's per-call report crosses the watch stream too; this
+            # screen has no bar, and drawing it would put a figure in the
+            # transcript nobody typed (see `draw`'s module docstring).
+            UsageReported(last_usage=Usage(completion_tokens=9)),
             TextDelta("42."),
             finished("It is 42."),
         )
@@ -91,6 +102,7 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
         assert "Agent(jack)>" in text, "the maker's bubble, not its own word"
         assert "It is 42." in text, "and the answer as it arrived"
         assert text.count("It is 42.") == 1, "deltas and the result are one block"
+        assert "9 tokens" not in text, "the bar's figure is not the watcher's line"
 
         # A subagent has no window, and this screen is not one: there is no
         # prompt to type into.
@@ -102,6 +114,150 @@ async def test_the_screen_draws_the_history_the_message_and_the_live_answer() ->
         await pilot.pause()
         assert len(app.screen_stack) == 1, "back to the window"
         assert watch.closed is True, "the watch call was cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_task_watch_draws_the_brief_and_signs_with_the_task() -> None:
+    """A task's description is a block, not a user message.
+
+    Nobody in the conversation said it, so it does not wear `You>` or any
+    sender's bubble; the assistant's words wear the task's own bubble, the same
+    `AsyncTask(name)>` the window uses for its answer.  The description is model
+    text and is drawn as `Text`, so brackets in it are not markup.
+    """
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TaskBrief("research", "Find [the] retry policy.", "running"),
+            TextDelta("It is in retry.py."),
+            finished("It is in retry.py."),
+            Closed("the task finished"),
+        )
+    )
+    app: App[None] = App()
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("research", lambda: watch, task=True))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        header = str(app.screen.query_one("#watch-header", Static).content)
+        assert "watching task research" in header
+        brief = app.screen.query_one("#watch-brief", Static)
+        assert brief.display is True, "the brief is shown only when it arrives"
+        brief_text = str(brief.content)
+        assert "task research — running" in brief_text
+        assert "Find [the] retry policy." in brief_text, "markup in model text is text"
+
+        text = app.screen.query_one(ChatView).plain_text()
+        assert "AsyncTask(research)>" in text
+        assert "It is in retry.py." in text
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_the_watched_plan_is_drawn_and_updated_by_a_write() -> None:
+    """The strip is the watcher's too: the snapshot carries the plan, and a
+    plan write in the watched turn reaches it through the same rule the window
+    uses (`PlanView.observe`)."""
+    watch = FakeWatchClient(
+        (
+            Snapshot(
+                [],
+                [{"text": "read the config", "status": "active"}],
+            ),
+        )
+    )
+    app: App[None] = App()
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("scout", lambda: watch))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        view = app.screen.query_one(PlanView)
+        assert "plan 0/1" in view.plain_text()
+        assert "read the config" in view.plain_text()
+
+        watch.send(
+            ToolCallStarted(
+                call_id="p1",
+                name="plan_write",
+                arguments={"items": [{"text": "write the tests", "status": "done"}]},
+            )
+        )
+        watch.send(
+            ToolCallFinished(
+                call_id="p1",
+                name="plan_write",
+                ok=True,
+                result_preview='{"done": 1, "total": 1}',
+                result_chars=24,
+                elapsed_ms=1,
+            )
+        )
+        await pilot.pause()
+
+        assert "plan 1/1" in view.plain_text()
+        assert "write the tests" in view.plain_text()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_turn_leaves_no_parked_plan_write() -> None:
+    """The watcher's settle: a write whose finish never came is parked no
+    longer than the turn that started it.
+
+    `Closed` is the watched turn's ending (cancelled, failed, link dropped),
+    and it settles the strip's parked writes as the window's endings do — a
+    later frame reusing the id finds nothing parked, and the stale items are
+    not drawn as a committed plan.
+    """
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TurnStarted("plan it", "agent:jack"),
+            ToolCallStarted(
+                call_id="p1",
+                name="plan_write",
+                arguments={
+                    "items": [{"text": "a plan never committed", "status": "active"}]
+                },
+            ),
+            Closed("the turn was cancelled"),
+        )
+    )
+    app: App[None] = App()
+    async with app.run_test(size=SIZE) as pilot:
+        app.push_screen(WatchScreen("scout", lambda: watch))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        view = app.screen.query_one(PlanView)
+        assert not view._started, "the closed turn's write leaked"
+        assert not view.display, "a write never committed draws no plan"
+
+        # A later turn reuses the id and finishes it without a start of its
+        # own: nothing is parked for it, so the stale items are not drawn.
+        watch.send(TurnStarted("again", "agent:jack"))
+        watch.send(
+            ToolCallFinished(
+                call_id="p1",
+                name="plan_write",
+                ok=True,
+                result_preview="{}",
+                result_chars=2,
+                elapsed_ms=1,
+            )
+        )
+        await pilot.pause()
+        text = view.plain_text()
+
+    assert "a plan never committed" not in text, (
+        "a reused call id popped the closed turn's stale write"
+    )
 
 
 @pytest.mark.asyncio

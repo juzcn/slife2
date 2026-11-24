@@ -32,12 +32,12 @@ answer that does not block.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, cast
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -49,6 +49,7 @@ from slife2.clients.gateway import (
     proxied_name,
     transport_for,
 )
+from slife2.helpers.threads import off_loop
 from slife2.libs.host import configfile
 from slife2.libs.host.config import (
     Config,
@@ -57,6 +58,7 @@ from slife2.libs.host.config import (
     for_the_call,
 )
 from slife2.libs.host.paths import home_key
+from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import forwarded_conversation, request_meta
 from slife2.libs.plugin.protocol import (
     CALL_SOURCE,
@@ -66,6 +68,7 @@ from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE,
     house_server,
 )
+from slife2.libs.store.catalogue import tool_row
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +103,7 @@ def page_of[T](
     number the caller will add its page to, and a negative one would make the
     next page overlap this one.
     """
-    size = cap if limit <= 0 else min(int(limit), cap)
-    start = max(0, int(offset))
+    size, start = page_window(limit, offset, unset=cap, cap=cap)
     return rows[start : start + size], size, start
 
 
@@ -282,14 +284,14 @@ class Link:
         from, which is why they, and only they, carry one.
         """
         schema = getattr(tool, "input_schema", None)
-        return {
-            "name": proxied_name(self.settings.name, str(getattr(tool, "name", ""))),
-            "description": str(getattr(tool, "description", "") or ""),
+        return tool_row(
+            name=proxied_name(self.settings.name, str(getattr(tool, "name", ""))),
+            description=str(getattr(tool, "description", "") or ""),
             # What the far end calls it, which is not what the model calls it:
             # the advertised name is sanitised and carries the server in front.
-            "remote_name": str(getattr(tool, "name", "")),
-            "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
-        }
+            remote_name=str(getattr(tool, "name", "")),
+            schema=schema,
+        )
 
 
 class Links:
@@ -664,8 +666,8 @@ class Family:
             and previous.link is one.link
         )
         if shared:
-            assert one.link is not None  # `previous.link is one.link` is not None
-            await one.link.reconfigure(
+            link = cast(Link, one.link)
+            await link.reconfigure(
                 settings,
                 directory=self._directory,
                 transport=self._transports.get(settings.name),
@@ -723,12 +725,13 @@ class Family:
     def connecting(self) -> None:
         """Start a connect attempt for every entry that is switched on.
 
-        Called at startup and on every ask: a source that is not answering is one
-        this has to ask about again, and the only moment there is to ask is a
-        `list_sources`.
+        Called on every ask: a source that is not answering is one this has to
+        ask about again, and the only moment there is to ask is a `list_sources`.
+        The connect is asked for directly — building a whole declaration for its
+        side effect would construct every row twice per ask.
         """
         for one in self._held.values():
-            one.declaration()
+            one.connecting()
 
     async def settle(self) -> None:
         """Let attempts already in flight finish, briefly.
@@ -902,6 +905,29 @@ def entry_report(one: Held, name: str, *, words: FamilyWords) -> dict[str, Any]:
     return report
 
 
+async def report_entry(
+    homes: Homes[Family],
+    name: str,
+    raw: Mapping[str, Any],
+    *,
+    words: FamilyWords,
+) -> dict[str, Any]:
+    """One entry's read-only report, against the home this call is for.
+
+    The `*_get` half of both connection families: settle this home's link once,
+    then answer `entry_report`'s facts — or the one fact that remains when the
+    process does not hold the name.  Here rather than in each family because the
+    two differ in the entry and in nothing this function reads.
+    """
+    family = homes.current()
+    family.connecting()
+    await family.settle()
+    one = family.held(name)
+    if one is None:
+        return {"name": name, "state": state_word(raw, None)}
+    return entry_report(one, name, words=words)
+
+
 async def apply_and_report(
     family: Family, settings: ToolServerSettings, *, words: FamilyWords
 ) -> dict[str, Any]:
@@ -933,6 +959,12 @@ def refusal(config: Config, name: str) -> str | None:
     written across every row it owns, so sharing one would mark somebody else's
     playbooks broken.
 
+    A name the *other connection section* owns is refused too, but by the loader
+    (`slife2.libs.host.config`, the one place both sections are known): the
+    writer judges every entry through `load`, so the collision is caught before
+    the write counts and a second check here would be a second sentence for one
+    refusal.
+
     Three names and not every reserved word: the rest of what a source may not be
     called — the plugin's own name, a category the hub owns — the hub refuses
     loudly at declaration time (`Upstream._record`), and duplicating that list
@@ -941,6 +973,15 @@ def refusal(config: Config, name: str) -> str | None:
     **One sentence, with no marker in front of it.**  `prepare_entry` raises it,
     so the failure is the call's status and the sentence is only the reason.
     """
+    if not name.strip():
+        # **The hub refuses an empty source name before it can be declared.**
+        # The write succeeded, so the call reported a server added — while
+        # `refresh_declared` dropped the blank name and no tool ever appeared.
+        # The refusal belongs where every other unusable name is refused.
+        return (
+            "a source needs a name — it is how the model's tools are addressed "
+            "and how the entry is found in the section. Choose one."
+        )
     if name in config.plugins():
         return (
             f"'{name}' is a server slife2 itself runs, so its tools "
@@ -1041,7 +1082,30 @@ def state_word(raw: Mapping[str, Any], one: Held | None) -> str:
     return one.state
 
 
-def prepare_entry(
+def describe_entry(
+    one: Held | None, name: str, raw: Mapping[str, Any], *, words: FamilyWords
+) -> dict[str, Any]:
+    """One row of a `*_list` — what the entry is, and whether it is usable.
+
+    **A listing is for choosing, not for reading the entry.**  The operator's
+    sentence about it, the link's state, and a count or the failure's reason are
+    what a model chooses between entries with; the command, URL, spec and
+    credential are `*_get`'s.  One builder for both connection families: the row
+    differs only by the count's name, which is `FamilyWords.unit`'s plural —
+    the same key `entry_report` writes.
+    """
+    row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
+    if one is not None and one.settings.enabled:
+        if one.usable:
+            row[f"{words.unit}s"] = len(one.rows or [])
+        elif one.error:
+            row["error"] = one.error
+    if description := str(raw.get("description") or ""):
+        row["description"] = description
+    return row
+
+
+async def prepare_entry(
     config: Config,
     name: str,
     build: Callable[[], tuple[ToolServerSettings, Mapping[str, Any]]],
@@ -1074,7 +1138,10 @@ def prepare_entry(
         raise ToolError(why)
     try:
         settings, entry = build()
-        configfile.upsert(section, name, entry)
+        # The write takes the cross-process config lock (up to `storage.filelock`)
+        # and round-trips the YAML — blocking work on a loop that serves every
+        # conversation this plugin holds, so it hops.
+        await off_loop(configfile.upsert, section, name, entry)
     except ConfigError as exc:
         raise ToolError(str(exc)) from exc
     return settings
@@ -1086,15 +1153,13 @@ async def list_entries(
     offset: int,
     *,
     words: FamilyWords,
-    describe: Callable[[Held | None, str, Mapping[str, Any]], dict[str, Any]],
 ) -> dict[str, Any]:
     """The `*_list` answer: every entry as the file has it, with its state.
 
     Settles first, for the reason the hub's `servers()` does: this is the
     answer to "why is my tool missing", and a server that started a moment ago
     reads as one still starting — two different problems this tool exists to
-    tell apart.  The row is the family's own, because an MCP entry is a command
-    or a URL and a REST entry is a spec and a base URL.
+    tell apart.  The row is `describe_entry`'s, one builder for both families.
 
     **An empty section is an empty page and not a sentence**: an answer naming
     another tool in prose is a cross-reference to keep in step, where `total`
@@ -1104,7 +1169,10 @@ async def list_entries(
     family.connecting()
     await family.settle()
     entries = configfile.read_section(words.section)
-    rows = [describe(family.held(name), name, raw) for name, raw in entries.items()]
+    rows = [
+        describe_entry(family.held(name), name, raw, words=words)
+        for name, raw in entries.items()
+    ]
     return listed(rows, words.collection, limit, offset, cap=LIST_PAGE)
 
 
@@ -1134,7 +1202,7 @@ async def remove_entry(
             f"'{name}' is not {words.entry} under `{words.section}:` — "
             f"see `{words.list_tool}`."
         )
-    removed = configfile.remove(words.section, name)
+    removed = await off_loop(configfile.remove, words.section, name)
     stopped = await family.remove(name)
     if removed:
         logger.info("%s name=%s", words.remove_log, name)
@@ -1162,7 +1230,7 @@ async def switch_entry(
             f"'{name}' is not in `{words.section}:` — `{words.set_tool}` adds it, "
             f"`{words.list_tool}` shows what is there."
         )
-    configfile.set_enabled(words.section, name, enabled)
+    await off_loop(configfile.set_enabled, words.section, name, enabled)
     one = await family.set_enabled(name, enabled)
     if one is None:
         return {"name": name, "enabled": enabled, "state": "not held"}
@@ -1189,12 +1257,38 @@ class Documents:
     assembling the envelope itself, because every key in it is a claim to the
     hub — `up`, `transport`, `category` — and a second copy of the envelope is a
     second place one of them can come out wrong.
+
+    **`live` is what keeps the mirror from freezing at the first ask.**  The
+    entries are copied when the home is first served, and the config file is
+    the only description of what exists (SDD Invariant 9): a `cli_set` from
+    another process, or a hand edit, lands on the file while this one runs.
+    `cli_list` and `cli_get` read the file directly, so a mirror that never
+    re-read it reported the edit by one half of the family and not the other.
+    `reload` runs on every `list_sources` — the declaration a search is built
+    from — and on the document families' own list tool, so the two answers
+    cannot disagree.  **A server built with a config handed in passes no
+    reader**: there is no live file for it, and the tools' own writes update
+    this mirror rather than the injected object — a refresh there would undo
+    the switch it just set.
     """
 
     source: str
     category: str
     section: str
     entries: dict[str, Any]
+    reload: Callable[[], Mapping[str, Any]] | None = None
+
+    def refreshed(self) -> dict[str, Any]:
+        """Re-read this home's section from the config as it is *now*.
+
+        The mirror is replaced rather than patched: the file is the whole truth
+        and a patch would have to know what changed.  A caller that already
+        holds the dict keeps the snapshot it holds; every tool body asks
+        `homes.current().entries` afresh, which is the contract `Homes` states.
+        """
+        if self.reload is not None:
+            self.entries = dict(self.reload())
+        return self.entries
 
     def declare(self, description: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
         """This server's whole holding, as `list_sources` answers it.
@@ -1232,13 +1326,27 @@ class Documents:
         """
         current = self.entries.get(name)
         if current is not None:
-            self.entries[name] = replace(current, enabled=enabled)
+            updated = dict(self.entries)
+            updated[name] = replace(current, enabled=enabled)
+            self.entries = updated
         elif make is not None:
-            self.entries[name] = make()
+            updated = dict(self.entries)
+            updated[name] = make()
+            self.entries = updated
 
     def forgotten(self, name: str) -> None:
-        """Drop one entry from the mirror, after the file has been changed."""
-        self.entries.pop(name, None)
+        """Drop one entry from the mirror, after the file has been changed.
+
+        **Copy-on-write**, because `list_sources` is a sync tool FastMCP runs on
+        a worker thread and this runs on the loop: `pop` on the dict that thread
+        is iterating raises "dictionary changed size during iteration".  A
+        reader keeps whichever complete dict it captured; the mirror moves to a
+        new one.
+        """
+        if name in self.entries:
+            self.entries = {
+                key: value for key, value in self.entries.items() if key != name
+            }
 
 
 class Homes[T]:
@@ -1297,17 +1405,27 @@ class Homes[T]:
         self._injected = injected
         self._on_build = on_build
         self._held: dict[str, T] = {}
+        self._lock = threading.Lock()
 
     def current(self) -> T:
-        """This home's, built and started on the way out of the first ask."""
+        """This home's, built and started on the way out of the first ask.
+
+        **Under a lock, because the first ask can come from two threads.**  The
+        document and job families serve `list_sources` synchronously, which
+        FastMCP runs in a worker thread, while their management tools run on the
+        loop; without the lock both can see an unbuilt home and build it, and the
+        thread's mirror — scanned before a management edit landed — overwrites
+        the loop's, losing the edit until the process restarts.
+        """
         key = home_key()
-        held = self._held.get(key)
-        if held is None:
-            held = self._build(for_the_call(self._source, self._injected))
-            self._held[key] = held
-            if self._on_build is not None:
-                self._on_build(held)
-        return held
+        with self._lock:
+            held = self._held.get(key)
+            if held is None:
+                held = self._build(for_the_call(self._source, self._injected))
+                self._held[key] = held
+                if self._on_build is not None:
+                    self._on_build(held)
+            return held
 
     def every(self) -> list[T]:
         """Every home's, for the two ends of this process's life."""
@@ -1346,7 +1464,10 @@ def build_document_server(
     `build_family_server` gives: the section belongs to a home), and copied into
     a mirror **one per home** (`Homes`); `rows` turns a mirror into catalogue
     rows, which is the one thing a family cannot share because a playbook's row
-    *is* its document and a command's is its invocation.
+    *is* its document and a command's is its invocation.  The mirror is
+    **re-read from the config on every `list_sources`**, because the file is
+    what `cli_list` and `skill_list` read and the two must report the same edit
+    (`Documents.refreshed`).
 
     A document family has nothing to start and nothing to close — the mirror is
     a dictionary — so a home's copy is made when it is first asked for and
@@ -1362,6 +1483,16 @@ def build_document_server(
             category=category,
             section=section,
             entries=dict(entries(theirs)),
+            # **The reader, not the config object.**  `for_the_call` resolves at
+            # refresh time and in the caller's home, which is the same rule
+            # `Homes.current` builds by.  An injected config has no reader: the
+            # tools' own writes update the mirror and the object is not what
+            # they were told to change, so re-reading it would undo them.
+            reload=(
+                (lambda: entries(for_the_call(source, config)))
+                if source is not None
+                else None
+            ),
         ),
         source,
         config,
@@ -1378,8 +1509,13 @@ def build_document_server(
         whole list rather than a difference, because that is what makes a
         deleted document stop being a hit — a merge reads an absent name as a row
         the source no longer has.
+
+        **The section is re-read first**, so a `cli_set` in another process or a
+        hand edit is in front of the search that follows rather than only in
+        front of `cli_list`.
         """
         held = family.current()
+        held.refreshed()
         return held.declare(description, rows(held.entries))
 
     management(mcp, family)
@@ -1465,9 +1601,11 @@ def build_family_server(
         Not per client, for the reason the hub's is not: this process's pool is
         the process's, and a client disconnecting is not a reason to restart
         every stdio server behind it.
+
+        Nothing is started here: homes are built on the first ask, and
+        `on_build=Family.start` starts each as it is built — at lifespan start
+        there is no home yet to start.
         """
-        for one in family.every():
-            one.start()
         try:
             yield {}
         finally:

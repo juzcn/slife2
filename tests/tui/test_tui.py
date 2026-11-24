@@ -10,24 +10,27 @@ exits.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 import pytest
 from fakes import (
     FakeAgentClient,
+    FakeAgentTaskClient,
     FakeMeshClient,
     FakeWatchClient,
     FakeWindowClient,
     RefusingMeshClient,
 )
 from fastmcp.exceptions import ToolError
+from textual.widgets import Static
 
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import FUNC_TOOL_UNLOAD, ToolCounts
+from slife2.libs.plugin.vocabulary import NOTE, Handover
 from slife2.libs.turn.context import turn_failed_note
 from slife2.libs.turn.events import (
     PREVIEW_CHARS,
-    ContextChosen,
     MessageCutIn,
     TextDelta,
     ThinkingDelta,
@@ -36,9 +39,15 @@ from slife2.libs.turn.events import (
     ToolCallStarted,
     ToolsCounted,
     TurnFinished,
+    UsageReported,
 )
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.watch import Snapshot, TurnStarted
+from slife2.libs.turn.tools import (
+    CHECK_NEW_INPUT,
+    HARNESS_CALL_PREFIX,
+    TURN_COMPACT,
+)
+from slife2.libs.turn.watch import Closed, Snapshot, TaskBrief, TurnStarted
 from slife2.tui.app import SlifeApp, TurnEventMessage
 from slife2.tui.client import MCPAgentClient, TurnReply
 from slife2.tui.theme import GLYPHS, PALETTE
@@ -49,6 +58,8 @@ from slife2.tui.widgets import (
     ConversationPicker,
     HistoryInput,
     ModelPicker,
+    PlanView,
+    QuestionStrip,
     StatusBar,
     ToolCallWidget,
 )
@@ -455,6 +466,240 @@ async def test_final_answer_replaces_what_was_streamed() -> None:
     assert "garb" not in text
 
 
+async def test_a_note_mid_answer_still_trims_the_authoritative_text() -> None:
+    """A cut-in is a new call: the block after the note is its whole answer.
+
+    The note ends the iteration it arrived in, and the deltas after it belong to
+    the next call — whose authoritative text is drawn whole, not as the
+    remainder of a block the previous call had already closed.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("The answer"))
+        on_event(MessageCutIn(text="note"))
+        on_event(TextDelta(" is 42"))
+        return "The answer is 42"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        await settle(pilot, app)
+        blocks = [widget.text for widget in app.query(AssistantMessage)]
+
+    assert blocks == ["The answer", "The answer is 42"], (
+        "the next call's answer is drawn whole after the cut-in"
+    )
+
+
+async def test_a_compaction_note_is_drawn_mid_turn() -> None:
+    """The machinery's own call is a note; its answer is the line's text."""
+    report = "Dropped 2 message(s) from this turn's model context."
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallFinished(
+                call_id=f"{HARNESS_CALL_PREFIX}turn_compact_test",
+                name=TURN_COMPACT,
+                ok=True,
+                result_preview=report,
+                result_chars=len(report),
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert any(report in text for text in notes)
+
+
+async def test_a_model_called_compaction_is_a_panel_not_a_note() -> None:
+    """The model may call `_turn_compact`; that call is the model's tool use.
+
+    A panel is the ordinary shape for a call the model made; the machinery's
+    own call is the note.  The transcript shows the panel and no note.
+    """
+    report = "Dropped 2 message(s) from this turn's model context."
+
+    def respond(prompt: str, on_event):
+        on_event(ToolCallStarted(call_id="c1", name=TURN_COMPACT, arguments={}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name=TURN_COMPACT,
+                ok=True,
+                result_preview=report,
+                result_chars=len(report),
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
+
+    assert panels == [TURN_COMPACT], "a model's own call is an ordinary panel"
+    assert not any(report in text for text in notes)
+
+
+async def test_a_model_called_check_new_input_is_a_panel() -> None:
+    """The call-id rule has no exception for `_check_new_input`.
+
+    The message may come from any channel, and a model's own poll of the inbox
+    is the model's tool call: a panel.  The delivered message's own note is the
+    `MessageCutIn` line, which this turn did not emit.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(ToolCallStarted(call_id="c1", name=CHECK_NEW_INPUT, arguments={}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name=CHECK_NEW_INPUT,
+                ok=True,
+                result_preview="hello",
+                result_chars=5,
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert panels == [CHECK_NEW_INPUT], "a model's own call is an ordinary panel"
+    assert not any("hello" in text for text in notes)
+
+
+async def test_a_note_before_a_tool_call_does_not_trim_the_final_answer() -> None:
+    """The account is bounded to the model call in flight.
+
+    The authoritative answer is the *last* call's text, and a tool panel ends
+    the call that streamed before it.  A note that closed a block in an earlier
+    iteration recorded words the final answer does not contain — carrying them
+    across the panel trimmed an answer that happened to begin with them:
+    "Let me check the results: 42" became " the results: 42".
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("Let me check"))
+        on_event(MessageCutIn(text="note"))
+        on_event(ToolCallStarted(call_id="c1", name="calc", arguments={"e": "6*7"}))
+        on_event(
+            ToolCallFinished(
+                call_id="c1",
+                name="calc",
+                ok=True,
+                result_preview="42",
+                result_chars=2,
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("Let me check the results: 42"))
+        return "Let me check the results: 42"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        await settle(pilot, app)
+        blocks = [widget.text for widget in app.query(AssistantMessage)]
+
+    assert blocks[-1] == "Let me check the results: 42", (
+        "an earlier iteration's words trimmed the final answer"
+    )
+
+
+async def test_a_cut_in_does_not_trim_the_final_answer() -> None:
+    """A cut-in closes an iteration the same way a tool panel does.
+
+    The message is taken at a tool boundary — the cut-in's note closes the block
+    it arrived in — and the answer still coming is the next call's text.  What
+    streamed before the note is not a prefix of it, so the drawn-prefix account
+    starts over there too.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(TextDelta("Let me check"))
+        on_event(MessageCutIn(text="note"))
+        on_event(MessageCutIn(text="also look at the logs", channel="wechat"))
+        on_event(TextDelta("Let me check the results: 42"))
+        return "Let me check the results: 42"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "6*7?")
+        await settle(pilot, app)
+        blocks = [widget.text for widget in app.query(AssistantMessage)]
+        text = shown(app)
+
+    assert "also look at the logs" in text
+    assert blocks[-1] == "Let me check the results: 42", (
+        "the words before the cut-in trimmed the final answer"
+    )
+
+
+async def test_a_cut_in_note_strips_the_channel_marker() -> None:
+    """The delivered words, not the address the model needs.
+
+    A channel hands its message over with the marker its reader strips: wechat
+    prefixes the peer's two ids, a peer agent its own envelope.  The marker is
+    content in the conversation — the model replies through it — and the window
+    takes it back off everywhere it draws somebody's words (`ChatView.add_user`
+    does, and SDD §10.2 states the rule).  The cut-in note is the other place a
+    channel's words are drawn, so it must strip the same vocabulary rather than
+    put `peer_wechat_id` on somebody's screen.
+    """
+    marked = '[Wechat:{"peer_wechat_id": "peer-1"}] hello'
+
+    def respond(prompt: str, on_event):
+        on_event(MessageCutIn(text=marked, channel="wechat"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "start")
+        text = shown(app)
+
+    assert "[hello]" in text
+    assert "peer_wechat_id" not in text, "the marker is the model's, not the person's"
+
+
+async def test_a_cut_in_from_this_window_keeps_words_that_look_like_a_marker() -> None:
+    """A marker-shaped word is only stripped where it is the sender's envelope.
+
+    The person's own messages carry no marker, so text they typed that merely
+    begins like one is their words and stays as typed — the same rule the user
+    line keeps (`is_own_channel`).
+    """
+    typed = '[Wechat:{"peer_wechat_id": "peer-1"}] hello'
+
+    def respond(prompt: str, on_event):
+        on_event(MessageCutIn(text=typed, channel="tui"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "start")
+        text = shown(app)
+
+    assert "peer_wechat_id" in text, "a person's own words are not rewritten"
+
+
 async def test_model_output_is_not_parsed_as_markup() -> None:
     """`[bold]` from a model is text, not an instruction to the renderer.
 
@@ -739,16 +984,16 @@ async def test_text_after_a_tool_panel_opens_a_new_block() -> None:
 
 
 async def test_tool_panels_do_not_pile_up_across_turns() -> None:
-    """Every panel stays on screen; only the current turn's calls stay addressable.
+    """Every panel stays on screen; the map holds only calls still in flight.
 
     The map the transcript keeps is what a result finds its panel through, and it
     was never pruned: one widget handle per call, for the life of the window, so
     a day of agent work — thousands of calls, each with its own id — retained
-    thousands of handles that nothing would ever look up again.  It is bounded by
-    the turn now, which is also what settles what a reused id means: a call id is
-    unique only within the turn that used it (`add_user` clears the map as each
-    turn opens), so a later turn registering `c1` cannot complete the earlier
-    turn's panel of the same name.
+    thousands of handles that nothing would ever look up again.  A completed call
+    is removed when its result lands, and a new turn clears whatever is left
+    (`add_user`), which is also what settles what a reused id means: a call id is
+    unique only within the turn that used it, so a later turn registering `c1`
+    cannot complete the earlier turn's panel of the same name.
 
     Distinct ids per turn are the point of the count — one id reused five times
     overwrites itself and would read as bounded even while leaking.
@@ -778,7 +1023,7 @@ async def test_tool_panels_do_not_pile_up_across_turns() -> None:
         panels = list(app.query(ToolCallWidget))
 
     assert len(panels) == 5, "the transcript is still the whole conversation"
-    assert len(chat._tools) == 1, "but only the last turn's call is still addressable"
+    assert len(chat._tools) == 0, "no completed call is still addressable"
 
 
 # --- scrolling the transcript -------------------------------------------------
@@ -1243,19 +1488,287 @@ async def test_a_restored_failed_turn_reads_as_the_harness_line_not_an_answer() 
     assert "jack> [TURN-FAILED" not in text, "the harness's line is not the model's"
 
 
+async def test_an_unload_note_is_drawn_mid_turn() -> None:
+    """The trim is a machinery call; its five lists become the names that left."""
+    answer = json.dumps(
+        {
+            "unloaded": ["subagent_group_member_list"],
+            "refused": [],
+            "no_load_state": [],
+            "unknown": [],
+            "not_loaded": [],
+        }
+    )
+
+    def respond(prompt: str, on_event):
+        on_event(
+            ToolCallFinished(
+                call_id=f"{HARNESS_CALL_PREFIX}func_tool_unload_test",
+                name=FUNC_TOOL_UNLOAD,
+                ok=True,
+                result_preview=answer,
+                result_chars=len(answer),
+                elapsed_ms=1,
+            )
+        )
+        on_event(TextDelta("done"))
+        return "done"
+
+    app = make_app(respond)
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "go")
+        await settle(pilot, app)
+        notes = [str(widget.render()) for widget in app.query(".system-message")]
+
+    assert any("[unloaded: subagent_group_member_list]" in text for text in notes)
+
+
+async def test_a_restored_compaction_reads_as_the_tools_own_output() -> None:
+    """The machinery's pair is a note; the model's own call is an ordinary panel.
+
+    The machinery's answer is the note, the same text the model read and the
+    live line showed.  A model's own call to the same tool keeps its own id and
+    draws a panel — the call is the model's.
+    """
+    report = "Dropped 2 message(s) from this turn's model context."
+    own = "Dropped 1 message(s) from this turn's model context."
+    client = answering_with(
+        stored(
+            Message(role="user", content="one"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id=f"{HARNESS_CALL_PREFIX}turn_compact_test",
+                        name=TURN_COMPACT,
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content=report,
+                tool_call_id=f"{HARNESS_CALL_PREFIX}turn_compact_test",
+            ),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id="c1", name=TURN_COMPACT)],
+            ),
+            Message(role="tool", content=own, tool_call_id="c1"),
+            Message(role="assistant", content="done"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+        panels = list(app.query(ToolCallWidget))
+
+    assert f"[{report}]" in text
+    assert f"[{own}]" not in text, "the model's own call is not a note"
+    assert [panel.tool_name for panel in panels] == [TURN_COMPACT], (
+        "a model's own call is an ordinary panel"
+    )
+
+
 async def test_a_name_that_has_never_run_shows_nothing() -> None:
     """No empty heading, and no "restored 0 turns": that is inventing an event."""
     app = window(answering_with())
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
         assert shown(app) == ""
+        assert app.query_one(PlanView).plain_text() == "", "no plan, no strip"
+        assert not app.query_one(PlanView).display
 
 
-def context_of(kept: int, recalled: int, rerank: str = ""):
-    """A scripted client whose turn reports the discriminator's answer first."""
+PLAN_ITEMS = [
+    {"text": "read the config", "status": "done"},
+    {"text": "run the tests", "status": "active"},
+]
+
+
+async def test_the_plan_comes_back_with_the_history() -> None:
+    """The plan is conversation state, and a window that opens must show it.
+
+    It is read with the history rather than scavenged from the restored turns:
+    a rebuild may have dropped the turn that wrote it, and the file is what the
+    model's next turn will be given regardless.
+    """
+    client = answering_with(*CONVERSATION)
+    client.plan = PLAN_ITEMS
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        view = app.query_one(PlanView)
+        text = view.plain_text()
+        showing = view.display
+
+    assert "plan 1/2" in text
+    assert "read the config" in text
+    assert "run the tests" in text
+    assert showing
+
+
+def plan_turn(items: list[dict[str, str]], *, ok: bool = True):
+    """A scripted turn that writes one plan and then answers."""
 
     def respond(prompt: str, on_event):
-        on_event(ContextChosen(kept=kept, recalled=recalled, rerank=rerank))
+        on_event(
+            ToolCallStarted(call_id="p1", name="plan_write", arguments={"items": items})
+        )
+        on_event(
+            ToolCallFinished(
+                call_id="p1",
+                name="plan_write",
+                ok=ok,
+                result_preview='{"done": 0, "total": 2}',
+                result_chars=24,
+                elapsed_ms=1,
+            )
+        )
+        on_event(
+            TurnFinished(
+                text="planned",
+                usage=Usage(),
+                last_usage=Usage(),
+                iterations=1,
+                stop_reason="stop",
+            )
+        )
+        return "planned"
+
+    return respond
+
+
+async def test_a_successful_plan_write_updates_the_strip_live() -> None:
+    """The tool's call is the event, and a successful one is the new plan."""
+    app = make_app(plan_turn(PLAN_ITEMS))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "plan it")
+        text = app.query_one(PlanView).plain_text()
+
+    assert "plan 1/2" in text
+    assert "read the config" in text
+    assert "run the tests" in text
+
+
+async def test_a_long_plan_is_reachable_by_scrolling() -> None:
+    """The strip's cap is a window, not a clip.
+
+    A plan may hold 24 items (`plan.MAX_ITEMS`) and the stylesheet caps the
+    strip at eight rows, so a longer plan is readable only if the strip
+    scrolls.  A `Static` capped in height measures the cap and keeps the rows
+    below it out of its virtual size — `QuestionStrip`'s own docstring states
+    the rule — so the active step (the one the person is watching for) can be
+    unreachable no matter what key or wheel is used.
+    """
+    items = [
+        {"text": f"step {index}", "status": "active" if index == 15 else "pending"}
+        for index in range(20)
+    ]
+    app = make_app(plan_turn(items))
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "plan it")
+        view = app.query_one(PlanView)
+        assert view.display
+        assert view.max_scroll_y > 0, "the rows under the cap are not reachable"
+        view.scroll_end(animate=False)
+        assert await settled(pilot, lambda: view.scroll_y > 0)
+        assert view.scroll_y == view.max_scroll_y
+        assert "step 15" in "\n".join(visible_lines(app))
+
+
+async def test_a_refused_plan_write_is_not_drawn() -> None:
+    """A refused write is a plan the server never stored, so the strip keeps
+    the plan it had — the tool panel shows the refusal, not the strip."""
+    client = FakeAgentClient(
+        plan_turn([{"text": "a plan nobody wrote", "status": "pending"}], ok=False)
+    )
+    client.plan = PLAN_ITEMS
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        await submit(pilot, "plan it")
+        text = app.query_one(PlanView).plain_text()
+
+    assert "plan 1/2" in text, "the previous plan still stands"
+    assert "a plan nobody wrote" not in text
+
+
+async def test_a_cancelled_turn_leaves_no_parked_plan_write() -> None:
+    """A write whose outcome never came is parked no longer than its turn.
+
+    The parking is by call id, and only a matching finish pops it — a turn
+    cancelled mid-write left the entry for the session's life, and a later
+    turn's reused id popped it and drew a stale plan as a committed one.  The
+    settle every ending passes through clears it; the old plan stands.
+    """
+    started = asyncio.Event()
+    stale = [{"text": "a plan never committed", "status": "active"}]
+
+    async def writes_then_hangs(
+        prompt, on_event, *, channel="tui", images=None, receipt=""
+    ):
+        on_event(
+            ToolCallStarted(call_id="p1", name="plan_write", arguments={"items": stale})
+        )
+        started.set()
+        await asyncio.sleep(30)
+        return TurnReply("never")
+
+    app = make_app(answering("unused"))
+    app._client_factory().run_turn = writes_then_hangs  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "plan it")
+        await asyncio.wait_for(
+            started.wait(),
+            timeout=2,  # timeouts: the value this test is built around, not a budget
+        )  # timeouts: the value this test is built around, not a budget
+        await pilot.pause()
+        view = app.query_one(PlanView)
+        assert view._started, "the write is parked while its turn runs"
+
+        await pilot.press("escape")
+        await settle(pilot, app)
+        assert "[interrupted]" in shown(app)
+        assert not view._started, "the cancelled turn's write leaked"
+        assert not view.display, "a write never committed draws no plan"
+
+        # A later turn reuses the id and finishes it without a start of its
+        # own: nothing is parked for it, so the stale items are not drawn.
+        async def finishes_only(
+            prompt, on_event, *, channel="tui", images=None, receipt=""
+        ):
+            on_event(
+                ToolCallFinished(
+                    call_id="p1",
+                    name="plan_write",
+                    ok=True,
+                    result_preview="{}",
+                    result_chars=2,
+                    elapsed_ms=1,
+                )
+            )
+            return TurnReply("done")
+
+        app._client_factory().run_turn = finishes_only  # type: ignore[method-assign]
+        await submit(pilot, "again")
+        await settle(pilot, app)
+        text = view.plain_text()
+
+    assert "a plan never committed" not in text, (
+        "a reused call id popped the cancelled turn's stale write"
+    )
+    assert not view.display
+
+
+def rebuild_of(report: str):
+    """A scripted client whose turn carries the rebuild's answer first."""
+
+    def respond(prompt: str, on_event):
+        on_event(MessageCutIn(text=report))
         on_event(TextDelta("ok"))
         on_event(
             TurnFinished(
@@ -1271,55 +1784,35 @@ def context_of(kept: int, recalled: int, rerank: str = ""):
     return respond
 
 
-async def test_the_discriminators_decision_is_reported_under_the_prompt() -> None:
-    """One model call decides the context, and this is the only sight of it.
+async def test_the_rebuilds_answer_is_reported_under_the_prompt() -> None:
+    """The harness pair's answer is the model's and the person's one line.
 
-    The note is `add_note`'s, so it carries the class the restored history's line
-    carries — the same shape and the same dim styling, which is the point: both
-    say what the harness did, and a reader has one kind of line to learn.  It
-    lands between the prompt and the answer because that is what it is about:
-    the context the answer was written from, not a comment on how it went.
+    It lands between the prompt and the answer because that is what it is
+    about: the context the answer was written from, not a comment on how it
+    went.  The counts and the estimate are the tool's own report.
     """
-    app = window(FakeAgentClient(context_of(12, 3)))
+    report = "kept 12/20, recalled 3/40, token usage ~48,000 (4.8%)."
+    app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
         blocks = [widget.classes for widget in app.query_one(ChatView).children]
         text = shown(app)
 
-    assert "[kept 12 turns, recalled 3]" in text
+    assert report in text
     assert "user-message" in blocks[0]
-    assert "system-message" in blocks[1], "the line the restore writes is this line"
-    assert "assistant-message" in blocks[2]
+    assert "system-message" in blocks[1], "the note is the harness's line"
+    assert "assistant-message" in blocks[-1]
 
 
-async def test_the_context_note_is_spelled_the_way_the_restored_one_is() -> None:
-    """`1 turn`, not `1 turns` — one phrase, written in one place.
-
-    A reader who has learned to read `[restored 14 turns]` should not meet
-    `1 turns` in the note that sits beside it.
-    """
-    app = window(FakeAgentClient(context_of(1, 0)))
+async def test_a_failed_decision_is_reported_in_the_rebuilds_answer() -> None:
+    """No decision is a tool error the model reads, not a zero it must explain."""
+    report = "the decision model did not answer (timeout)"
+    app = window(FakeAgentClient(rebuild_of(report)))
     async with app.run_test(size=SIZE) as pilot:
         await submit(pilot, "hi")
-        assert "[kept 1 turn, recalled 0]" in shown(app)
+        text = shown(app)
 
-
-async def test_a_reranker_that_cannot_be_used_is_reported_once_per_change() -> None:
-    """A provider with no cross-encoder is news once, not a line per turn.
-
-    The status rides every `ContextChosen`; a view that drew each one would put
-    the same sentence before every turn.  The note is the change, so the first
-    turn says it and the second — same status — does not.
-    """
-    app = window(FakeAgentClient(context_of(2, 1, rerank="unavailable")))
-    async with app.run_test(size=SIZE) as pilot:
-        await submit(pilot, "hi")
-        first = shown(app)
-        await submit(pilot, "again")
-        second = shown(app)
-
-    assert "rerank off — the recall keeps its fused order" in first
-    assert second.count("rerank off") == 1, "the same status is not news twice"
+    assert "the decision model did not answer (timeout)" in text
 
 
 async def test_the_restored_history_says_how_much_came_back() -> None:
@@ -1596,14 +2089,12 @@ async def test_a_restored_tool_panel_opens_and_shows_what_it_returned() -> None:
     assert "e = 6*7" in expanded
 
 
-async def test_a_restored_cut_in_is_a_message_not_a_tool_panel() -> None:
-    """A message that jumped the queue is a person's line, live and rebuilt.
+async def test_a_restored_cut_in_is_a_note_not_a_tool_panel() -> None:
+    """A message that jumped the queue is a harness note, live and rebuilt.
 
     The pair is in the turn log because that is how a mid-turn message enters
-    the conversation, but what it carries is something somebody said.  The
-    record keeps the channel on the tool message (`Message.to_record`), so the
-    rebuilt line wears the bubble the live one wore — and the harness call itself
-    is not drawn as a tool, which it never was.
+    the conversation, but what it carries is something somebody said; the
+    unified line is the note, and the harness call itself is not a tool panel.
     """
     client = answering_with(
         stored(
@@ -1634,11 +2125,51 @@ async def test_a_restored_cut_in_is_a_message_not_a_tool_panel() -> None:
         text = shown(app)
         panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
 
-    assert "Wechat> and this" in text
+    assert "[and this]" in text
     assert "_check_new_input" not in text, "the harness call is not a tool panel"
     assert panels == []
-    assert text.index("You> start") < text.index("Wechat> and this")
-    assert text.index("Wechat> and this") < text.index("both answered")
+    assert text.index("You> start") < text.index("[and this]")
+    assert text.index("[and this]") < text.index("both answered")
+
+
+async def test_a_restored_cut_in_strips_the_channel_marker() -> None:
+    """The rebuilt line is the live one, marker taken back off.
+
+    The stored tool message is what the model read — the marker included — and
+    the rebuild draws it through the same note the live turn used.  A rebuild
+    that passed the envelope through would make the same message read two ways
+    depending on whether the window was open when it arrived.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="start"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    ToolCall(
+                        id="_harness_check_new_input_1",
+                        name="_check_new_input",
+                        arguments={},
+                    )
+                ],
+            ),
+            Message(
+                role="tool",
+                content='[Wechat:{"peer_wechat_id": "peer-1"}] hello',
+                tool_call_id="_harness_check_new_input_1",
+                channel="wechat",
+            ),
+            Message(role="assistant", content="both answered"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+    assert "[hello]" in text
+    assert "peer_wechat_id" not in text
 
 
 async def test_a_restored_result_reads_like_a_live_one() -> None:
@@ -1755,11 +2286,12 @@ async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -
     assert blocks[1].thinking_expanded is True, "the answer should not"
 
 
-async def test_a_harness_tool_call_is_not_drawn() -> None:
-    """`_func_tool_unload` is the harness talking to itself, and always was.
+async def test_a_restored_model_called_harness_tool_is_a_panel() -> None:
+    """A model's own call to a harness tool keeps its id and is an ordinary panel.
 
-    It is in the record because the model's tool list carries it, and the live
-    transcript does not show it either.
+    `_func_tool_unload` is in the model's list, so the model may call it; that
+    call is the model's tool use, and only a pair the harness wrote (`_harness_…`)
+    is a note.
     """
     client = answering_with(
         stored(
@@ -1781,17 +2313,52 @@ async def test_a_harness_tool_call_is_not_drawn() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await restored(pilot, app)
         names = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        text = shown(app)
 
-    assert names == ["calc"]
+    assert names == [FUNC_TOOL_UNLOAD, "calc"]
+    assert "[dropped 3]" not in text, "the model's own call is not a note"
 
 
-async def test_a_live_harness_tool_call_is_not_drawn() -> None:
+async def test_a_restored_model_called_check_new_input_is_a_panel() -> None:
+    """A stored model-called `_check_new_input` pair is a panel, not a note.
+
+    The harness-written pair is the delivery note (`test_a_restored_cut_in_is_a_note_not_a_tool_panel`);
+    a model's own poll keeps its own id and is the ordinary panel.
+    """
+    client = answering_with(
+        stored(
+            Message(role="user", content="start"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={})],
+            ),
+            Message(
+                role="tool",
+                content="and this",
+                tool_call_id="c1",
+                channel="wechat",
+            ),
+            Message(role="assistant", content="both answered"),
+        )
+    )
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        panels = [panel.tool_name for panel in app.query(ToolCallWidget)]
+        text = shown(app)
+
+    assert panels == [CHECK_NEW_INPUT]
+    assert "[and this]" not in text, "the model's own call is not a note"
+
+
+async def test_a_live_harness_tool_call_is_a_note_not_a_panel() -> None:
     """The live half of the same rule: a harness pair is not a tool panel.
 
     `_check_new_input` reaches the screen as the `MessageCutIn` line, and
-    `_func_tool_unload` reaches it as nothing at all.  Drawing a tool panel for
-    either is how a cut-in came to appear twice — once as the message it was,
-    and once as the machinery's call that carried it.
+    `_func_tool_unload` as its answer's note.  Drawing a tool panel for either
+    is how a cut-in came to appear twice — once as the message it was, and once
+    as the machinery's call that carried it.
     """
 
     def respond(prompt: str, on_event):
@@ -1820,13 +2387,22 @@ async def test_a_live_harness_tool_call_is_not_drawn() -> None:
                 arguments={},
             )
         )
+        unloaded = json.dumps(
+            {
+                "unloaded": ["subagent_group_member_list"],
+                "refused": [],
+                "no_load_state": [],
+                "unknown": [],
+                "not_loaded": [],
+            }
+        )
         on_event(
             ToolCallFinished(
                 call_id="_harness_func_tool_unload_2",
                 name=FUNC_TOOL_UNLOAD,
                 ok=True,
-                result_preview="dropped 3",
-                result_chars=9,
+                result_preview=unloaded,
+                result_chars=len(unloaded),
                 elapsed_ms=1,
             )
         )
@@ -1849,7 +2425,10 @@ async def test_a_live_harness_tool_call_is_not_drawn() -> None:
         text = shown(app)
 
     assert names == [], "the harness's calls are not tool panels"
-    assert "Wechat> a note" in text, "the cut-in is the message's own line"
+    assert "[a note]" in text, "the cut-in is the harness note's line"
+    assert "unloaded: subagent_group_member_list" in text, (
+        "the trim's five lists become the names that left"
+    )
     assert "_check_new_input" not in text
     assert FUNC_TOOL_UNLOAD not in text
 
@@ -2082,6 +2661,43 @@ async def test_a_dead_server_does_not_kill_the_app() -> None:
         assert "not connected" in shown(app)
 
 
+class DroppingTurn(FakeAgentClient):
+    """A client whose turn dies at the transport once the drain is waiting on it."""
+
+    def __init__(self) -> None:
+        super().__init__(answering("never"))
+        self.drop = asyncio.Event()
+
+    async def run_turn(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        await self.drop.wait()
+        self.connected = False
+        raise ConnectionError("the agent server went away")
+
+
+async def test_a_turn_that_loses_the_transport_disconnects_the_bar() -> None:
+    """**The transcript says the turn failed; the bar says the link did.**
+
+    A turn that dies at the transport closes the client, and nothing wrote the
+    window's own flag but a connect or a failed history read — so the bar went
+    on looking healthy until the next prompt reconnected, which is the one thing
+    it exists to prevent.  The client's `connected` is the authority: a server
+    that answered with a failure keeps the link, and a dropped one does not.
+    """
+    client = DroppingTurn()
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        await submit(pilot, "hi")
+        # The drain is now parked on the turn; the drop lands under it.
+        assert await settled(pilot, lambda: app._turn is not None)
+        client.drop.set()
+        assert await settled(pilot, lambda: "disconnected" in status(app))
+        assert "the agent server went away" in shown(app), "the turn said why"
+        text = status(app)
+
+    assert PALETTE["red"] in text, "a dropped link is the error colour"
+
+
 class PendingConnect(FakeAgentClient):
     """A client whose first connection stays pending until the test opens the gate."""
 
@@ -2263,6 +2879,34 @@ async def test_a_catalogue_count_from_a_turn_moves_the_bar() -> None:
         assert "tools 24/253" in status(app)
         # The count is the bar's fact, not a line in the transcript.
         assert "tools 24/253" not in shown(app)
+
+
+async def test_a_usage_report_moves_the_bar_per_model_call() -> None:
+    """**The context figure follows a turn's calls**, not only its ending.
+
+    A turn that calls tools makes several model calls, so waiting for
+    `TurnFinished` held the previous turn's number for the whole run — exactly
+    when a long loop makes the figure worth watching.  This turn scripts the
+    per-call report and no `TurnFinished` at all (a stream whose last line was
+    dropped), so only the report can have moved the bar.
+    """
+
+    def respond(prompt: str, on_event):
+        on_event(UsageReported(last_usage=Usage(completion_tokens=25_000)))
+        on_event(TextDelta("working"))
+        return "working"
+
+    client = FakeAgentClient(respond)
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        model="m",
+        context_window=100_000,
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        await settle(pilot, app)
+        assert "25,000 (25.0%)" in status(app)
 
 
 async def test_the_status_bar_wraps_instead_of_clipping_at_a_narrow_width() -> None:
@@ -2463,6 +3107,79 @@ async def test_ctrl_c_quits_when_no_turn_is_running() -> None:
         await pilot.press("ctrl+c")
         await pilot.pause()
         assert not app.is_running
+
+
+async def test_ctrl_c_interrupts_a_turn_that_is_still_connecting() -> None:
+    """The cold-start window: the drain is connecting and restoring, and the
+    submission's call is already in flight.
+
+    `_turn` is None until the drain mounts the first block, but the send started
+    the moment the words arrived — so ctrl+c here interrupts work that is
+    running rather than quitting over it.  The call is cancelled; when the
+    connect lands, the drain draws the line and `[interrupted]`, and the app
+    stays up.
+    """
+    gate = asyncio.Event()
+    client = FakeAgentClient(answering("unused"))
+
+    async def slow_connect() -> None:
+        await gate.wait()
+        client.connected = True
+
+    client.connect = slow_connect  # type: ignore[method-assign]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert app._turn is None and app._order, "the drain is still connecting"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running, "ctrl+c quit over a turn that was still in flight"
+        assert app._interrupting is True
+
+        gate.set()
+        await settle(pilot, app)
+        assert "[interrupted]" in shown(app)
+        assert app.is_running
+
+    assert client.prompts == [], "the cancelled send never reached run_turn"
+
+
+async def test_ctrl_c_does_not_quit_while_a_replys_tail_is_flushed() -> None:
+    """The post-reply window: the answer arrived, and the drain is applying the
+    turn's last events before it finalises the entry.
+
+    `_turn` is done but `_order` still holds the submission — work is in flight,
+    so ctrl+c is not the "nothing to stop" that quits.  The reply already
+    arrived, so the interrupt changes nothing about the answer: it lands, and
+    the app stays up.
+    """
+    app = make_app(answering("the answer"))
+    gate = asyncio.Event()
+    flush = app._flush_events
+
+    async def held_flush() -> None:
+        await gate.wait()
+        await flush()
+
+    app._flush_events = held_flush  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "hi")
+        assert await settled(
+            pilot, lambda: app._turn is not None and app._turn.done()
+        ), "the reply never came back"
+        assert app._order, "the entry was finalised before the flush"
+
+        await pilot.press("ctrl+c")
+        await pilot.pause()
+        assert app.is_running, "ctrl+c quit while the reply was being finalised"
+
+        gate.set()
+        await settle(pilot, app)
+        assert "the answer" in shown(app)
+        assert "[interrupted]" not in shown(app)
 
 
 async def test_a_cancelled_turn_accepts_nothing_more() -> None:
@@ -2705,6 +3422,43 @@ async def test_a_keystroke_while_a_call_awaits_an_answer_does_not_refuse_it() ->
     assert typed == "a", "the keystroke went to the draft, which is where it was aimed"
 
 
+async def test_a_turn_that_fails_under_an_approval_settles_the_question() -> None:
+    """A prompt whose turn died is a question nobody is waiting on.
+
+    The server refuses an unanswered request after its own bound, but a
+    transport that drops while the turn is parked reaches the window as a
+    failed turn and never as a `TurnFinished`.  The row otherwise stays
+    `pending`: `y`/`n` answer a dead turn and `Ctrl+O` refuses to open while it
+    is up — the state both `TurnFinished` and the cancel path settle, and the
+    third ending was missing it.
+    """
+    client = FakeAgentClient(answering("unused"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async def dies_parked(
+        prompt: str, on_event, *, channel: str = "tui", images=None, receipt: str = ""
+    ):
+        on_event(ToolApprovalRequested("call-1", "sensitive", {"path": "/tmp/x"}))
+        # The row has to be mounted before the failure, or `_turn_over` drops
+        # the request and there is no pending question to settle.  The pump
+        # runs while this task yields, so this is a matter of turns rather than
+        # of wall time; the bound only keeps a broken app from hanging.
+        for _ in range(500):
+            if app._approval is not None:
+                break
+            await asyncio.sleep(0.01)
+        raise ConnectionError("the stream went away while the turn was parked")
+
+    client.run_turn = dies_parked  # type: ignore[method-assign]
+
+    async with app.run_test(size=SIZE) as pilot:
+        await submit(pilot, "do it")
+        assert await settled(pilot, lambda: app._approval is None)
+        assert await settled(pilot, lambda: bool(client.answers))
+        assert client.answers == [("call-1", False)]
+        assert "requests approval" not in shown(app)
+
+
 # --- the model switch ---------------------------------------------------------
 
 #: Two models, so "switch" has somewhere to switch to, and with different
@@ -2769,7 +3523,7 @@ async def test_ctrl_s_lists_the_models_and_opens_on_the_one_in_use() -> None:
         await pilot.press("ctrl+s")
         assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
-        listing = shown(app)
+        listing = app.query_one(ModelPicker).plain_text()
         assert "local/big" in listing and "local/small" in listing
         assert "ctx 100,000" in listing, "what the model is, beside its name"
         assert "Big" in listing and "thinking" in listing
@@ -2811,7 +3565,9 @@ async def test_ctrl_s_lists_the_models_the_server_answers_with_now() -> None:
         # The config moved under the window, as `model_remove` makes it move.
         client.models_answer = MODEL_ROWS[:1]
         await pilot.press("ctrl+s")
-        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 2)
+        # One picker: the cancelled one was replaced by its line in the
+        # transcript, and the new question took the strip.
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
         latest = app.query(ModelPicker)[-1]
         assert "local/big" in latest.plain_text()
@@ -2842,7 +3598,7 @@ async def test_a_model_the_list_does_not_offer_is_said_so_and_enter_picks_nothin
         await pilot.press("ctrl+s")
         assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
 
-        listing = shown(app)
+        listing = app.query_one(ModelPicker).plain_text()
         assert "local/gone" in listing, "the model in use is named"
         assert "not one of these" in listing
 
@@ -2885,7 +3641,9 @@ async def test_choosing_a_model_switches_it_and_the_bar_follows() -> None:
         await pilot.pause()
 
         assert client.switches == ["local/small"]
-        assert "Switched to local/small" in shown(app), "the picker's own line"
+        # **No "Selected" line**: the note below is the window's whole record
+        # of the switch, and a second line saying the same thing is noise.
+        assert "Selected" not in shown(app), "the choice wrote its own line"
         # And the window's note, drawn from the server's *facts* — which model it
         # is now, which it was, and how many conversations moved, which is the
         # half only the server knows.
@@ -2900,7 +3658,9 @@ async def test_escape_offers_nothing_and_changes_nothing() -> None:
     """A picker is a question, and a question can be left unanswered.
 
     Nothing is switched, the conversation keeps its model, and the prompt has
-    the keys back — the picker is not a mode that has to be exited from.
+    the keys back — the picker is not a mode that has to be exited from.  `Esc`
+    is silent: a question closed without a choice is not a fact the transcript
+    records.
     """
     client = FakeAgentClient(answering("ok"))
     client.models_answer = MODEL_ROWS
@@ -2919,7 +3679,8 @@ async def test_escape_offers_nothing_and_changes_nothing() -> None:
         await pilot.pause()
 
         assert client.switches == []
-        assert "Cancelled" in shown(app)
+        assert shown(app) == "", "a cancelled question left a line"
+        assert not app.query_one(QuestionStrip).display, "the question is still up"
         assert "local/big" in status(app)
         assert isinstance(app.focused, HistoryInput)
         assert app.is_running
@@ -2948,6 +3709,144 @@ async def test_a_second_ctrl_s_does_not_stack_a_picker() -> None:
         await pilot.press("ctrl+s")
         await pilot.pause()
         assert app._switching, "and a later Ctrl+S opens one again"
+
+
+async def test_the_other_key_is_ignored_while_a_question_is_open() -> None:
+    """**One question at a time, and only the user ends it.**
+
+    `Ctrl+O` while `Ctrl+S` is asking must not open a second picker: the
+    second would take the focus, and the blur would cancel the first — two
+    questions gone and no answer.  A stray letter is not an answer either;
+    the choice or `Esc` is, and the other key works again after it.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
+    client.subagents_answer = [{"name": "scout"}]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+
+        await pilot.press("ctrl+o")
+        await pilot.press("a")
+        await pilot.pause()
+        assert not app.query(ConversationPicker), "a second question opened"
+        assert len(app.query(ModelPicker)) == 1, "the open question was dismissed"
+        assert app._switching, "and its latch is still the one waiting"
+
+        # `Esc` is the way out, and the other key works again.
+        await pilot.press("escape")
+        assert await settled(pilot, lambda: not app._switching)
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+
+
+async def test_a_question_waits_in_the_fixed_strip_not_the_transcript() -> None:
+    """**A question is current state, not history, while it asks.**
+
+    A picker mounted in the transcript scrolled away under a running turn: the
+    keys kept reaching it while the list stopped being readable.  It now waits
+    in the fixed strip, so what the loop draws lands above it and moves
+    nothing.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.subagents_answer = [{"name": "scout"}]
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+        picker = app.query_one(ConversationPicker)
+        assert app.query_one(QuestionStrip).query(ConversationPicker), "left the strip"
+        assert not app.query_one(ChatView).query(ConversationPicker), (
+            "the question is in the transcript"
+        )
+
+        # What the loop draws lands above the question; the question stays.
+        for index in range(40):
+            app.query_one(ChatView).add_note(f"line {index}")
+        await pilot.pause()
+        assert "Watch a subagent or agent task" in "\n".join(visible_lines(app))
+        assert app.query_one(ConversationPicker) is picker
+
+
+async def test_a_question_stacks_above_the_plan_and_the_plan_stays_put() -> None:
+    """**The plan is not displaced by a question.**  The plan is the strip
+    directly above the prompt; the later question stacks above it, and both
+    stay visible.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = MODEL_ROWS
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/big",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        app.query_one(PlanView).set_plan(
+            [{"text": "map the module", "status": "pending"}]
+        )
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+
+        lines = visible_lines(app)
+        plan_top = next(i for i, line in enumerate(lines) if "map the module" in line)
+        question_top = next(i for i, line in enumerate(lines) if "local/big" in line)
+        assert question_top < plan_top, (
+            "the later question did not stack above the plan"
+        )
+        assert "Switch model" in "\n".join(lines)
+
+
+async def test_a_long_picker_scrolls_to_keep_the_cursor_in_view() -> None:
+    """The strip is capped; the cursor is not.
+
+    Every row stays reachable: the cap makes the list scroll, and the widget
+    scrolls the row under the cursor into view — otherwise a choice below the
+    cap is one the person cannot read.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.models_answer = [
+        {
+            "ref": f"local/m{index}",
+            "provider": "local",
+            "model": f"m{index}",
+            "name": f"m{index}",
+            "marks": [],
+            "context_window": 0,
+            "max_tokens": 0,
+        }
+        for index in range(20)
+    ]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        agent="jack",
+        model="local/m0",
+    )
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        assert await settled(pilot, lambda: len(app.query(ModelPicker)) == 1)
+
+        for _ in range(15):
+            await pilot.press("down")
+        await pilot.pause()
+
+        strip = app.query_one(QuestionStrip)
+        assert strip.scroll_y > 0, "the capped list did not scroll"
+        assert "local/m15" in "\n".join(visible_lines(app))
 
 
 async def test_ctrl_s_over_an_approval_does_not_refuse_the_call() -> None:
@@ -3236,8 +4135,8 @@ async def test_a_cut_in_is_drawn_inside_the_running_turn_and_answered_once() -> 
         await settle(pilot, app)
 
         text = shown(app)
-        assert text.index("You> alpha") < text.index("You> beta")
-        assert text.index("You> beta") < text.index("answer to both")
+        assert text.index("You> alpha") < text.index("[beta]")
+        assert text.index("[beta]") < text.index("answer to both")
         assert text.count("answer to both") == 1, "one turn answered both messages"
         assert "beta" not in status(app), "a folded message is not still queued"
 
@@ -3248,7 +4147,7 @@ async def test_a_handed_over_cut_in_is_drawn_and_answered_once() -> None:
     The window's own input and a channel hand-over take the same `_submit` and
     the same receipt, so the cut-in rule has one implementation.  This is the
     half the typed-prompt test cannot prove: its channel is `tui`, and the
-    receipt and bubble of a hand-over are the ones that have to reach the
+    receipt and note line of a hand-over are the ones that have to reach the
     transcript.
     """
     started = asyncio.Event()
@@ -3280,9 +4179,9 @@ async def test_a_handed_over_cut_in_is_drawn_and_answered_once() -> None:
         await settle(pilot, app)
 
         text = shown(app)
-        assert "Subagent(gamma)> beta" in text
-        assert text.index("You> alpha") < text.index("Subagent(gamma)> beta")
-        assert text.index("Subagent(gamma)> beta") < text.index("answer to both")
+        assert "[beta]" in text
+        assert text.index("You> alpha") < text.index("[beta]")
+        assert text.index("[beta]") < text.index("answer to both")
         assert text.count("answer to both") == 1, "one turn answered both messages"
         assert "beta" not in status(app), "a folded message is not still queued"
 
@@ -3480,6 +4379,27 @@ async def test_a_pushed_note_is_drawn_and_does_not_wait_for_a_turn() -> None:
     assert "PeerAgent(jill)>" not in text
 
 
+async def test_a_pushed_note_is_drawn_by_the_pump_not_by_the_push() -> None:
+    """**The inbox callback is not a widget thread.**
+
+    The push arrives on the MCP client's task, so a note drawn straight from it
+    can jump ahead of a `TextDelta` already queued in Textual's pump: a line
+    about a peer arriving lands above text that streamed before it.  The
+    hand-over is carried in a `Message` and branched in its handler, which is
+    the road every turn event already takes — so the callback itself leaves the
+    transcript alone, and the pump draws the line in queue order.
+    """
+    client = FakeAgentClient(answering("ok"))
+    app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
+    async with app.run_test(size=SIZE) as pilot:
+        app._take(Handover(ticket=1, text="⚡ jill online", channel="", kind=NOTE))
+        assert "jill online" not in shown(app), "the push drew a widget itself"
+
+        await pilot.pause()
+
+        assert "[⚡ jill online]" in shown(app)
+
+
 async def test_a_window_holds_its_agent_on_the_mesh_and_lets_go_with_it() -> None:
     """The window is the enrollment: joining is the call, leaving is its cancel.
 
@@ -3561,17 +4481,18 @@ async def test_ctrl_o_offers_the_subagents_the_server_lists() -> None:
 
         listing = app.query_one(ConversationPicker).plain_text()
         assert "scout" in listing and "researcher" in listing
-        assert "Watch a subagent" in listing
+        assert "Watch a subagent or agent task" in listing
+        assert "subagent" in listing
 
-        # Escape is the cancel, and it leaves a line saying so rather than a
-        # picker that vanished.
+        # Escape closes the question silently: nothing happened to report.
         await pilot.press("escape")
         await pilot.pause()
         await pilot.pause()
-        assert "Cancelled" in shown(app)
+        assert not app.query(ConversationPicker)
+        assert shown(app) == "", "a cancelled question left a line"
 
 
-async def test_ctrl_o_with_no_subagents_names_the_tool_that_makes_one() -> None:
+async def test_ctrl_o_with_nothing_to_watch_names_the_tools_that_make_one() -> None:
     """An empty list is said, not shown as a picker with no rows."""
     client = FakeAgentClient(answering("ok"))
     app = SlifeApp("http://test/mcp", client_factory=lambda: client, agent="jack")
@@ -3579,9 +4500,10 @@ async def test_ctrl_o_with_no_subagents_names_the_tool_that_makes_one() -> None:
     async with app.run_test(size=SIZE) as pilot:
         await pilot.pause()
         await pilot.press("ctrl+o")
-        assert await settled(pilot, lambda: "no subagents yet" in shown(app))
+        assert await settled(pilot, lambda: "nothing to watch yet" in shown(app))
         assert not app.query(ConversationPicker)
-        assert "`subagent_set`" in shown(app)
+        assert "`subagent_create`" in shown(app)
+        assert "`agent_task_start`" in shown(app)
 
 
 async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window() -> (
@@ -3631,9 +4553,9 @@ async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window()
         assert "It is 42." in text
 
         # `Ctrl+O` is the window's key, not the watch's: with the screen up it
-        # does nothing rather than mounting a picker underneath it.  The
-        # decided picker from the first press is still in the window's
-        # transcript, so the count is what says a second one was not mounted.
+        # does nothing rather than mounting a picker underneath it.  The first
+        # press's picker was removed when it was decided, so the count is what
+        # says a second one was not mounted.
         mounted = len(app.query(ConversationPicker))
         await pilot.press("ctrl+o")
         await pilot.pause()
@@ -3642,11 +4564,112 @@ async def test_choosing_a_subagent_watches_it_and_escape_returns_to_the_window()
 
         await pilot.press("escape")
         assert await settled(pilot, lambda: len(app.screen_stack) == 1)
-        # The picker left its decision line in the window's transcript — that
-        # is the window's own record of the key — and nothing the watched
+        # The choice left no line in the window's transcript — the watch
+        # header was its record while it was up — and nothing the watched
         # conversation said is in it.
-        assert "Watching scout" in shown(app)
+        assert shown(app) == ""
         assert "what is 6*7?" not in shown(app)
         assert "It is 42." not in shown(app)
+
+    assert watch.closed is True, "leaving the screen is the detach"
+
+
+async def test_ctrl_o_offers_running_tasks_beside_subagents() -> None:
+    """The picker is one question over two servers.
+
+    Tasks are read from the agent-task server and only the running ones are
+    offered: a stopped task has no events left to watch.  The list client is
+    the picker's own and is closed when the read is done.
+    """
+    client = FakeAgentClient(answering("ok"))
+    client.subagents_answer = [{"name": "scout"}]
+    tasks = FakeAgentTaskClient()
+    tasks.tasks_answer = [
+        {"name": "research", "status": "running"},
+        {"name": "done", "status": "finished"},
+    ]
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        task_client_factory=lambda: tasks,
+        agent="jack",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+
+        listing = app.query_one(ConversationPicker).plain_text()
+        assert "subagent  scout" in listing
+        assert "task  research" in listing
+        assert "done" not in listing, "a stopped task has nothing left to watch"
+
+    assert tasks.closed is True, "the picker's list connection is its own lifetime"
+
+
+async def test_choosing_a_task_watches_its_brief_and_its_turn() -> None:
+    """A task's screen is its description, then the one turn it runs.
+
+    `TaskBrief` is drawn as a block above the transcript rather than as a user
+    message: the description is what the task was given, and nobody in the
+    conversation said it.  The assistant's words wear the task's bubble, the
+    same `AsyncTask(name)>` the window uses for its answer.
+    """
+    client = FakeAgentClient(answering("ok"))
+    tasks = FakeAgentTaskClient()
+    tasks.tasks_answer = [{"name": "research", "status": "running"}]
+    watch = FakeWatchClient(
+        (
+            Snapshot([]),
+            TaskBrief(
+                "research",
+                "Find the retry policy.",
+                "running",
+            ),
+            TextDelta("The policy is in retry.py."),
+            TurnFinished(
+                text="The policy is in retry.py.",
+                usage=Usage(),
+                last_usage=Usage(),
+                iterations=1,
+                stop_reason="stop",
+            ),
+            Closed("the task finished; its answer was delivered to the conversation"),
+        )
+    )
+    app = SlifeApp(
+        "http://test/mcp",
+        client_factory=lambda: client,
+        task_client_factory=lambda: tasks,
+        task_watch_client_factory=lambda name: watch,
+        agent="jack",
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+o")
+        assert await settled(pilot, lambda: len(app.query(ConversationPicker)) == 1)
+        await pilot.press("enter")
+        assert await settled(pilot, lambda: isinstance(app.screen, WatchScreen))
+        await asyncio.wait_for(watch.watching.wait(), timeout=5)
+        await pilot.pause()
+
+        header = str(app.screen.query_one("#watch-header", Static).content)
+        assert "watching task research" in header
+        brief = str(app.screen.query_one("#watch-brief", Static).content)
+        assert "task research — running" in brief
+        assert "Find the retry policy." in brief
+
+        text = app.screen.query_one(ChatView).plain_text()
+        assert "AsyncTask(research)>" in text
+        assert "The policy is in retry.py." in text
+        assert "the task finished" in text
+
+        await pilot.press("escape")
+        assert await settled(pilot, lambda: len(app.screen_stack) == 1)
+        # The choice wrote nothing: the watch header carried the name while
+        # the screen was up.
+        assert shown(app) == ""
 
     assert watch.closed is True, "leaving the screen is the detach"

@@ -5,24 +5,26 @@ about `D:\\pictures\\cat.png`, or a chat API that takes a URL and nothing else,
 cannot read this machine's disk.  So the plugin does three things and they are
 the whole of it:
 
-* it holds a **tunnel** — this machine's port, published as an HTTPS URL
+* it holds a **tunnel** — a loopback port, published as an HTTPS URL
   (`providers.py`, and the `file-tunnel:` section says which one),
 * it holds a **registry** of what has been exposed: a token per file, pinned to
   the exact file it was minted for,
-* it serves the bytes at ``GET /share/{token}``, on the same port, because the
-  far end fetches that path *through the tunnel*.
+* it serves the bytes at ``GET /share/{token}``, on a listener of its own that
+  is the *only* thing the tunnel forwards to.
 
 **A plugin, by SDD §2.4's test.**  It holds somebody else's connection — a
 tunnel process, or an SDK holding an account — so it is a process rather than a
 library, for the same reason the model backends are: a library would put the
 tunnel in every importer.
 
-**And it is the first plugin here with a second HTTP route.**  Every other one
-serves a single MCP endpoint at `servers.<name>.path`; this one answers
-`/share/{token}` beside it, on the same port, registered with FastMCP's
-`custom_route` and served by the same `mcp.run(...)` the house `serve()` makes.
-Nothing about `house_server` changes for it — but it is a real difference, and
-it is why this plugin cannot be reached by a client that only speaks MCP.
+**The tunnel is pointed at the share listener, not at the MCP app.**  A tunnel
+forwards a port, and every provider here — ngrok, localhost.run, cloudflared —
+forwards the whole of it.  A route registered beside the MCP endpoint would
+therefore publish the endpoint as well: a stranger who learned the hostname
+could call every tool, not only fetch the one file.  So the public port is a
+server that answers `/share/{token}` and nothing else, and the MCP app keeps
+`servers.file-tunnel.port` to itself.  That is the one structural difference
+from every other plugin here.
 
 LLM-visible tools: ``expose_local_image``, ``unexpose_local_image``.
 Internal tools (no ``meta``, so the hub withholds them): ``tunnel_status``.
@@ -38,20 +40,30 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import uvicorn
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
+from starlette.routing import Route
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import FILE_TUNNEL_SERVER_NAME, Config
-from slife2.libs.plugin.audience import FOR_THE_MODEL, request_conversation
+from slife2.libs.host.paths import local_path
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    ConversationKey,
+    conversation_key,
+    request_conversation,
+)
 from slife2.libs.plugin.protocol import house_server, serve_plugin
 from slife2.plugins.file_tunnel.providers import (
     TunnelProvider,
@@ -139,7 +151,7 @@ class Exposure:
 
     __slots__ = ("token", "path", "owner", "dev", "ino", "size", "mtime_ns")
 
-    def __init__(self, token: str, path: str, owner: tuple[str, str] | None) -> None:
+    def __init__(self, token: str, path: str, owner: ConversationKey | None) -> None:
         self.token = token
         self.path = path
         self.owner = owner
@@ -205,28 +217,38 @@ class Exposed:
     capability, so the map is keyed by it and cannot be partitioned by a caller
     that the route never sees.
 
-    What is held per agent is the *owner*, which is what lets one conversation
-    refuse to revoke another's link (see :meth:`revoke`) — the one place the
-    identity is available and can be made to matter.
+    What is held per conversation is the *owner*, which is what lets one
+    conversation refuse to revoke another's link (see :meth:`revoke`) — the one
+    place the identity is available and can be made to matter.  The owner is
+    `(home, agent, subagent)`: this process serves every home, so two homes'
+    `jack` are two conversations (`slife2.libs.plugin.audience.conversation_key`).
+    The reuse key is
+    `(path, owner)` for that reason: two conversations exposing one file are two
+    links, and a single `path` key would hand the second the first's token,
+    which it cannot revoke, and let the first's revoke kill the second's.
     """
 
     def __init__(self) -> None:
         self._by_token: dict[str, Exposure] = {}
-        self._by_path: dict[str, str] = {}
+        self._by_path: dict[tuple[str, ConversationKey | None], str] = {}
 
-    def register(self, path: str, owner: tuple[str, str] | None) -> Exposure:
-        """Publish *path*, reusing its token when the file has not changed.
+    def register(self, path: str, owner: ConversationKey | None) -> Exposure:
+        """Publish *path*, reusing this owner's token when the file has not changed.
 
         The token is 30 hex characters (``secrets.token_hex(15)``) —
         deliberately under 32, which is the length a generic redactor treats as
         a secret, and hex rather than base64url so nothing in it breaks the URL
         detection of whatever is drawing the answer.
 
-        A path that already has a token whose pin no longer matches gets a NEW
-        one: otherwise the caller would be handed the same URL that now answers
-        403 to everyone holding it.
+        **The reuse is per owner as well as per path.**  A second conversation
+        exposing the same file gets a token of its own — otherwise it is handed
+        the first conversation's link, cannot revoke it, and loses it to the
+        first conversation's revoke.  A token whose pin no longer matches gets a
+        NEW one, so a changed file is re-exposed rather than handed back as a
+        URL that now answers 403.
         """
-        existing = self._by_path.get(path)
+        key = (path, owner)
+        existing = self._by_path.get(key)
         if existing is not None:
             found = self._by_token.get(existing)
             if found is not None and found.matches(_stat(path)):
@@ -238,9 +260,18 @@ class Exposed:
         token = secrets.token_hex(15)
         exposure = Exposure(token, path, owner)
         self._by_token[token] = exposure
-        self._by_path[path] = token
-        logger.debug("exposed path=%s token=%s", path, token)
+        self._by_path[key] = token
+        logger.debug("exposed path=%s", path)
         return exposure
+
+    def token_for(self, path: str, owner: ConversationKey | None) -> str:
+        """The token this owner already holds for *path*, or `""`.
+
+        A publish that fails after registering must not revoke a link the owner
+        already had and may already have handed out; this is what tells the two
+        apart.
+        """
+        return self._by_path.get((path, owner), "")
 
     def lookup(self, token: str) -> Exposure | None:
         """The exposure behind *token*, or ``None`` if this process never
@@ -248,13 +279,13 @@ class Exposed:
         """
         return self._by_token.get(token)
 
-    def revoke(self, token: str, owner: tuple[str, str] | None) -> Revoked:
+    def revoke(self, token: str, owner: ConversationKey | None) -> Revoked:
         """Withdraw *token*, unless it belongs to somebody else.
 
         An exposure made by a call that named no conversation has no owner and
         anyone may revoke it.  One that named a conversation may be revoked by
         that conversation and no other: the tokens are in one map, so without
-        this rule any agent could kill any other's link.
+        this rule any conversation could kill any other's link.
         """
         found = self._by_token.get(token)
         if found is None:
@@ -267,10 +298,24 @@ class Exposed:
     def _drop(self, token: str) -> None:
         found = self._by_token.pop(token, None)
         if found is not None:
-            self._by_path.pop(found.path, None)
+            self._by_path.pop((found.path, found.owner), None)
 
     def __len__(self) -> int:
         return len(self._by_token)
+
+
+def _owner(ctx: Any) -> ConversationKey | None:
+    """The conversation that owns a link, **with its home**.
+
+    The ambient home is the caller's around a served call
+    (`slife2.libs.plugin.protocol.ServeTheCallersHome`), and the servers are
+    shared across homes — two homes may each run an agent called `jack`.  The
+    pair alone made the second home's jack the same owner as the first's, so it
+    could revoke a link it never made (and re-exposing one absolute path handed
+    it the first home's token).
+    """
+    conversation = request_conversation(ctx)
+    return conversation_key(*conversation) if conversation else None
 
 
 def _stat(path: str) -> os.stat_result | None:
@@ -298,13 +343,27 @@ def content_disposition(filename: str) -> str:
         filename.encode("latin-1")
     except UnicodeEncodeError:
         ascii_fallback = re.sub(r"[^ -~]", "_", filename)
-        ascii_fallback = ascii_fallback.replace('"', "_").replace("\\", "_")
+        ascii_fallback = _header_safe(ascii_fallback)
         ascii_fallback = ascii_fallback[:80] or "file"
         return (
             f"inline; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(filename)}"
         )
-    safe = filename.replace('"', "_").replace("\\", "_")
-    return f'inline; filename="{safe}"'
+    return f'inline; filename="{_header_safe(filename)}"'
+
+
+def _header_safe(filename: str) -> str:
+    """A filename with the characters an HTTP header value cannot carry.
+
+    **A control character is not a filename.**  CR and LF end a header line, and
+    a POSIX name may legally contain them (`"a\\nb.png"`); h11 rejects the value
+    while uvicorn writes it and the share fails instead of serving.  The quote
+    and backslash are escaped by this header's own syntax, so they are folded
+    to `_` as before.
+    """
+    folded = "".join(
+        "_" if ord(char) < 32 or ord(char) == 127 else char for char in filename
+    )
+    return folded.replace('"', "_").replace("\\", "_")
 
 
 def _content_type(path: Path) -> str:
@@ -314,11 +373,13 @@ def _content_type(path: Path) -> str:
     return guessed or "application/octet-stream"
 
 
-def _chunks(path: Path):
-    """Yield *path* in chunks, closing the handle however the reader stops."""
-    with open(path, "rb") as handle:
+def _chunks(handle):
+    """Yield an open file in chunks, closing it however the reader stops."""
+    try:
         while chunk := handle.read(_CHUNK):
             yield chunk
+    finally:
+        handle.close()
 
 
 async def serve_exposed(exposure: Exposure) -> Response:
@@ -328,38 +389,192 @@ async def serve_exposed(exposure: Exposure) -> Response:
     answers (403 for a file replaced since it was pinned, 404 for one deleted,
     a chunked 200) are decisions about *what* to serve, and they cost nothing
     to test without a tunnel or a socket.
+
+    **The file is opened before it is judged, and the response streams that
+    handle.**  A `stat` followed by a lazy `open` is two observations of a path
+    a writer can change in between: a file replaced under the link was then
+    served despite its pin, and one appended to made `Content-Length` disagree
+    with the bytes that followed.  `fstat` on the open handle is the same file
+    the body comes from, so the pin, the length and the bytes are one
+    observation.
     """
     path = Path(exposure.path)
-    stat = _stat(exposure.path)
-    if stat is None:
+    try:
+        handle = open(path, "rb")  # noqa: SIM115 - closed by `_chunks`
+    except OSError:
         return Response("The file is no longer there.", status_code=404)
-    if not path.is_file():
-        return Response("The file is no longer there.", status_code=404)
-    if not exposure.matches(stat):
-        logger.warning(
-            "share_changed_since_exposed token=%s path=%s — refusing",
-            exposure.token,
-            path,
+    try:
+        stat = os.fstat(handle.fileno())
+        if not exposure.matches(stat):
+            handle.close()
+            logger.warning(
+                "share_changed_since_exposed token=%s path=%s — refusing",
+                exposure.token,
+                path,
+            )
+            return Response(
+                "The file changed since this link was made. Expose it again for "
+                "the current one.",
+                status_code=403,
+            )
+
+        content_type = _content_type(path)
+        logger.info(
+            "share_served path=%s mime=%s size=%s", path, content_type, stat.st_size
         )
-        return Response(
-            "The file changed since this link was made. Expose it again for "
-            "the current one.",
-            status_code=403,
+        return StreamingResponse(
+            _chunks(handle),
+            status_code=200,
+            headers={
+                "Content-Type": content_type,
+                "Content-Length": str(stat.st_size),
+                "Content-Disposition": content_disposition(path.name),
+            },
+        )
+    except BaseException:
+        # The response owns the handle once it is returned; until then it is
+        # this call's to close.
+        handle.close()
+        raise
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# The listener the tunnel is pointed at
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def share_app(exposed: Exposed) -> Starlette:
+    """The whole public surface: ``GET /share/{token}`` and nothing else.
+
+    **An app of its own rather than a route on the MCP app.**  A tunnel
+    forwards a port, so whatever that port answers is what the hostname
+    publishes; mounting this route beside the MCP endpoint would publish the
+    endpoint too.  The tunnel is pointed here instead, and the MCP app is not
+    reachable through it at all.
+
+    Split from the listener for the same reason `serve_exposed` is split from
+    the route: the interesting answers are decisions about *what* to serve,
+    and they cost nothing to test without a socket.
+    """
+
+    async def share(request: Request) -> Response:
+        """Serve an exposed file to whoever holds its token."""
+        token = request.path_params["token"]
+        found = exposed.lookup(token)
+        if found is None:
+            return Response("Unknown share link.", status_code=403)
+        return await serve_exposed(found)
+
+    return Starlette(routes=[Route("/share/{token}", share, methods=["GET"])])
+
+
+class ShareListener:
+    """A loopback HTTP server for :func:`share_app`, on an ephemeral port.
+
+    The tunnel needs a port, and it must not be the MCP server's.  Binding
+    ``127.0.0.1:0`` lets the OS pick one; this app is the only thing that port
+    ever answers, so "the tunnel publishes the share route only" is a property
+    of what is listening rather than of a filter that would have to keep pace
+    with every route the MCP app grows.
+
+    It runs as a task in the plugin's loop, the way the MCP server's uvicorn
+    does, so no second thread and no second event loop are involved.  Uvicorn
+    logs through the root handler (`log_config=None`), which is where the
+    house formatter masks credentials; a served file is already named by
+    `share_served`, and the house pins `uvicorn.access` above DEBUG, so no
+    per-request line is added.
+    """
+
+    def __init__(self, app: Starlette) -> None:
+        self._app = app
+        self._server: uvicorn.Server | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._sock: socket.socket | None = None
+        self._port: int | None = None
+
+    @property
+    def port(self) -> int:
+        """The bound port — the address the tunnel is pointed at."""
+        if self._port is None:
+            raise RuntimeError("the share listener is not running")
+        return self._port
+
+    async def start(self) -> int:
+        """Bind the loopback port, serve on it, and answer with the port.
+
+        The socket is bound and listening here rather than by uvicorn, so the
+        port is known before the server starts — the tunnel is handed an
+        address that is already accepting connections, not one that will
+        exist momentarily.
+        """
+        if self._port is not None:
+            return self._port
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(128)
+        port = int(sock.getsockname()[1])
+        config = uvicorn.Config(
+            self._app,
+            host="127.0.0.1",
+            port=port,
+            log_config=None,  # the root handler is the masking point
+            lifespan="off",  # this app has nothing to start or stop
+            # **No `access_log=False`.**  That flag mutates the process-wide
+            # `uvicorn.access` logger (handlers and propagation), which is the
+            # MCP server's too.  The house already pins that logger above
+            # DEBUG, so a share request leaves `share_served` as its line and
+            # nothing here changes the logger the host runs on.
+        )
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(
+            server.serve(sockets=[sock]), name="file-tunnel-share"
         )
 
-    content_type = _content_type(path)
-    logger.info(
-        "share_served path=%s mime=%s size=%s", path, content_type, stat.st_size
-    )
-    return StreamingResponse(
-        _chunks(path),
-        status_code=200,
-        headers={
-            "Content-Type": content_type,
-            "Content-Length": str(stat.st_size),
-            "Content-Disposition": content_disposition(path.name),
-        },
-    )
+        deadline = time.monotonic() + _T.timeouts.ready.connect_ours
+        while not server.started:
+            if task.done():
+                sock.close()
+                error = task.exception()
+                raise RuntimeError(
+                    f"the share listener could not start: {error!r}"
+                ) from error
+            if time.monotonic() >= deadline:
+                task.cancel()
+                sock.close()
+                raise RuntimeError(
+                    "the share listener did not start within "
+                    f"{_T.timeouts.ready.connect_ours:.0f}s"
+                )
+            await asyncio.sleep(_T.timeouts.pacing.lock_poll)
+
+        self._server, self._task, self._sock, self._port = server, task, sock, port
+        logger.info("share_listener_started url=http://127.0.0.1:%d", port)
+        return port
+
+    async def stop(self) -> None:
+        """Ask the listener to exit and wait for it, bounded at every step."""
+        server, task, sock = self._server, self._task, self._sock
+        self._server = self._task = self._sock = None
+        self._port = None
+        if server is None or task is None:
+            if sock is not None:
+                sock.close()
+            return
+
+        server.should_exit = True
+        _, pending = await asyncio.wait({task}, timeout=_T.timeouts.grace.drain)
+        if pending:
+            # Uvicorn's own graceful window did not end it — a connection it
+            # was waiting on, or a shutdown that was never woken.
+            server.force_exit = True
+            _, pending = await asyncio.wait({task}, timeout=_T.timeouts.grace.drain)
+        if pending:
+            task.cancel()
+            logger.warning("share_listener_stop_timeout")
+        if sock is not None:
+            sock.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -377,52 +592,64 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
     against fake subprocesses in
     `tests/plugins/file_tunnel/test_file_tunnel_providers.py`.
 
-    **The port comes from the config, not from a bound socket.**
-    `serve_plugin` already knows the address, and the tunnel is pointed at the
-    port it says.  What that costs is the `--port` override on *this* plugin:
-    it moves the MCP server and leaves the tunnel forwarding to the configured
-    port.  Nothing calls it that way, and a tunnel needs an address that is
-    written down somewhere either way.
+    **The tunnel is pointed at the share listener, not at this server.**  The
+    MCP address from `servers:` is where slife2's own clients connect; it must
+    not be what the public hostname forwards to.  The listener binds a
+    loopback port of its own when the plugin starts, and the tunnel takes that
+    port — so `/mcp` is not on the public surface, and the `--port` override
+    moves the MCP server without moving the tunnel.
     """
     exposed = Exposed()
     tunnel = provider or create_provider(
         config.file_tunnel.active,
         config.file_tunnel.options_for(config.file_tunnel.active),
     )
-    port = config.server(CONFIG_KEY).port
+    share = ShareListener(share_app(exposed))
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP):
-        """Start the tunnel at startup, and keep it up; stop it on the way out.
+        """Start the share listener and the tunnel; stop both on the way out.
 
-        The start is a task and is never awaited here.  A tunnel takes seconds
-        (an ngrok session, an SSH handshake, a cloudflared registration) and
-        the plugin must not be slower to load for it — the monitor that
-        follows picks up anything the eager attempt did not finish, so a
-        failed start costs a log line rather than the plugin.
+        **The listener comes first, because the tunnel is pointed at it.**
+        It is local and must come up: a listener that cannot bind fails the
+        plugin's start rather than letting a tunnel publish a wider surface
+        than the one file an exposure means.
+
+        The tunnel's start is a task and is never awaited here.  A tunnel
+        takes seconds (an ngrok session, an SSH handshake, a cloudflared
+        registration) and the plugin must not be slower to load for it — the
+        monitor that follows picks up anything the eager attempt did not
+        finish, so a failed start costs a log line rather than the plugin.
         """
-        eager = asyncio.create_task(_start(tunnel, port, why="eager"))
+        port = await share.start()
+        # **An inherited tunnel is left alone.**  `SLIFE2_FILE_TUNNEL_URL` is
+        # another process's published tunnel; starting one here minted a second
+        # tunnel and overwrote the variable the parent passed down, so every
+        # link handed out afterwards belonged to a hostname the parent did not
+        # know — and `inherited` stopped refusing exposures it exists to refuse.
+        eager = (
+            None
+            if tunnel.inherited
+            else asyncio.create_task(_start(tunnel, port, why="eager"))
+        )
         tunnel.start_monitor(port)
         try:
             yield {}
         finally:
             tunnel.stop_monitor()
-            eager.cancel()
-            # `stop` kills a child and waits for it — up to the kill timeout.
-            await asyncio.to_thread(tunnel.stop)
+            if eager is not None:
+                eager.cancel()
+            try:
+                # `stop` kills a child and waits for it — up to the kill timeout.
+                await asyncio.to_thread(tunnel.stop)
+            finally:
+                # The listener goes even if the tunnel's stop was cancelled:
+                # a socket left bound would outlive the state that explains it.
+                await share.stop()
 
     mcp: FastMCP = house_server(
         SERVER_NAME, instructions=INSTRUCTIONS, lifespan=lifespan
     )
-
-    @mcp.custom_route("/share/{token}", methods=["GET"])
-    async def share(request: Request) -> Response:
-        """Serve an exposed file to whoever holds its token."""
-        token = request.path_params["token"]
-        found = exposed.lookup(token)
-        if found is None:
-            return Response("Unknown share link.", status_code=403)
-        return await serve_exposed(found)
 
     # ── For the model ────────────────────────────────────────────────────
 
@@ -439,8 +666,9 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         conversation otherwise.
 
         Args:
-            path: The file on this machine, as an absolute path or one
-                relative to where slife2 was started.
+            path: The file on this machine, as an absolute path or one relative
+                to your working directory — the data directory, where your own
+                tools run.
 
         Returns:
             `url` — the public link to hand to whoever needs the file — its
@@ -449,7 +677,10 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         """
         if not path.strip():
             raise ToolError("no file was named — pass the path of the file to publish.")
-        target = Path(path)
+        try:
+            target = local_path(path)
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
         if not target.exists():
             raise ToolError(f"there is no file at {path}.")
         if not target.is_file():
@@ -470,7 +701,21 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 f"while the tunnel is up, so this would publish it."
             )
 
-        await _ensure(tunnel, port)
+        if tunnel.inherited:
+            # **A URL another process started is served by another process.**
+            # Its tunnel forwards to that process's share listener, and this
+            # process's `Exposed` map is the private registry that listener
+            # knows nothing about — a token minted here is a link the far end
+            # answers 403 for.  Refusing is the honest answer; registering one
+            # only moved the failure to whoever fetched it.
+            raise ToolError(
+                "the public URL this process reports is another process's "
+                "tunnel (`SLIFE2_FILE_TUNNEL_URL`), and that process's share "
+                "listener does not know this one's links — a URL minted here "
+                "would answer 403. Expose the file from the process that owns "
+                "the tunnel."
+            )
+        await _ensure(tunnel, share.port)
         if not tunnel.is_active:
             raise ToolError(
                 "the tunnel is not up, so there is no public URL to "
@@ -493,9 +738,17 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "HTTP 530. `tunnel_status` has the detail; try again shortly."
             )
 
-        found = exposed.register(str(served), request_conversation(ctx))
+        owner = _owner(ctx)
+        previous = exposed.token_for(str(served), owner)
+        found = exposed.register(str(served), owner)
         url = tunnel.share_url_for(found.token)
         if url is None:
+            # **A token minted for a publish that failed is nobody's.**  Left in
+            # the map it was counted by `tunnel_status` and revocable only by
+            # guessing a token no caller was given.  A *reused* token is the
+            # owner's existing link and is left alone.
+            if found.token != previous:
+                exposed.revoke(found.token, owner)
             raise ToolError("the tunnel went away as the file was published.")
         return {"url": url, "token": found.token, "file": found.name}
 
@@ -517,14 +770,14 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             raise ToolError(
                 "no token was given — it is the last part of the share URL."
             )
-        outcome = exposed.revoke(wanted, request_conversation(ctx))
+        outcome = exposed.revoke(wanted, _owner(ctx))
         if outcome is Revoked.UNKNOWN:
             raise ToolError(f"no link with the token {wanted!r} is being served.")
         if outcome is Revoked.FOREIGN:
             raise ToolError(
                 f"the token {wanted!r} belongs to another conversation's link."
             )
-        logger.info("unexposed token=%s", wanted)
+        logger.info("unexposed one link")
         return {"token": wanted}
 
     # ── Not for the model ────────────────────────────────────────────────

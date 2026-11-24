@@ -19,9 +19,9 @@ noticing, because the loop builds its message from the result.  See
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from slife2.libs.turn.messages import Message, StreamChatResult, ToolSpec, Usage
 
@@ -56,6 +56,12 @@ class Chunk:
     #: — reasoning is collapsed by default — and because a caller that does not
     #: want to pay for thinking must be able to ignore it wholesale.
     thinking: str = ""
+    #: Completed provider reasoning blocks/items, opaque to this build and
+    #: carried onward for the adapter that must replay them.  Not a display
+    #: field — `slife2.libs.model.wire` does not encode it — so a dropped chunk
+    #: cannot lose something the conversation needs; the builder keeps them from
+    #: here, and `StreamChatResult.reasoning` is the authoritative copy.
+    reasoning: tuple[dict[str, Any], ...] = ()
     tool_call_deltas: tuple[ToolCallDelta, ...] = ()
     usage: Usage | None = None
 
@@ -84,8 +90,21 @@ class Streamer(Protocol):
 
     Implemented once per wire protocol — in `openai_server`,
     `openai_responses_server` and `anthropic_server`.  It is a plain callable
-    returning an async iterator, so a test can substitute a scripted one
+    returning an async generator, so a test can substitute a scripted one
     without any of the SDK being involved.
+
+    **The generator's `aclose` is part of the contract.**  `stream_chat_impl`
+    closes the stream on every way out of the call, so an interrupted turn
+    releases the SDK response and the provider pool's lease deterministically
+    instead of leaving the provider generating on an abandoned connection.
+
+    `tool_choice` names the one tool this call must use; empty leaves the choice
+    to the model.  `thinking` overrides the model's configured `thinking` for
+    this call only (`"enabled"` / `"disabled"`); empty uses the config.
+    `temperature` overrides the configured sampling for this call only; `None`
+    uses the config.  All three are per-call facts — the decision tools are the
+    one caller that sets them — and a wire that cannot express one raises rather
+    than ignoring it.
     """
 
     def __call__(
@@ -94,7 +113,11 @@ class Streamer(Protocol):
         messages: list[Message],
         tools: list[ToolSpec],
         model: str,
-    ) -> AsyncIterator[ProviderEvent]: ...
+        *,
+        tool_choice: str = "",
+        thinking: str = "",
+        temperature: float | None = None,
+    ) -> AsyncGenerator[ProviderEvent]: ...
 
 
 @dataclass

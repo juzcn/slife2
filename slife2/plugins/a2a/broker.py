@@ -49,6 +49,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import A2ASettings
@@ -56,6 +57,7 @@ from slife2.libs.host.paths import runtime_dir
 from slife2.libs.host.runtime import (
     ServerRecord,
     clear_record,
+    endpoint_key,
     pid_alive,
     read_record,
     same_process,
@@ -172,8 +174,18 @@ def log_url(settings: A2ASettings) -> str:
 
 
 def _write_config(settings: A2ASettings) -> Path:
-    """The mosquitto config for this address, written where the daemons live."""
-    path = runtime_dir() / "mosquitto.conf"
+    """The mosquitto config for this address, written where the daemons live.
+
+    **One file per broker address.**  A single `mosquitto.conf` was shared by
+    every address while the start lock is keyed by endpoint, so two brokers
+    with different ports starting in the same wave overwrote one another's
+    config: one child could read the other's `listener`, and the pid→address
+    records then pointed at the wrong broker.  The file's name is the same
+    endpoint digest the log and the record use, so one address is one file.
+    """
+    directory = runtime_dir() / "brokers"
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{endpoint_key(log_url(settings))}.conf"
     path.write_text(
         _CONFIG.format(port=settings.broker_port, host=settings.broker_host),
         encoding="utf-8",
@@ -409,6 +421,23 @@ def stop(
     clear_record(url)
     logger.info("a2a_broker_stopped address=%s pid=%d", settings.address, record.pid)
     return f"stopped {MOSQUITTO} on {settings.address}"
+
+
+def stop_url(url: str) -> str:
+    """Stop the broker a record's `mqtt://` URL names.
+
+    For the last client's take-down, whose config may not name the broker at
+    all: the record is the machine's evidence that slife2 started one, and the
+    URL carries the address `stop` needs.  Everything else is `stop`'s — the
+    ownership proof and the sentence it returns.
+    """
+    parts = urlsplit(url)
+    return stop(
+        A2ASettings(
+            broker_host=parts.hostname or "",
+            broker_port=parts.port or 1883,
+        )
+    )
 
 
 def stop_failed(said: str) -> bool:

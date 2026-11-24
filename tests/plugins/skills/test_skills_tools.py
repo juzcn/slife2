@@ -10,6 +10,7 @@ the truth about whether anybody wants it.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
 from slife2.libs.plugin.protocol import LIST_SOURCES
+from slife2.plugins.skills import playbooks
 from slife2.plugins.skills.playbooks import USE_TOOL
 from slife2.plugins.skills.server import build_server
 from tests.fakes import config_file
@@ -28,10 +30,11 @@ pytestmark = pytest.mark.unit
 #: A config the loader accepts.  On disk, because two of these tools write it.
 CONFIG = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SKILLS_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         context_window: 100000
@@ -41,7 +44,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 
@@ -349,6 +351,41 @@ async def test_replacing_a_skill_leaves_no_half_written_one(
     assert (isolated_runtime / "skills" / "one" / "scripts" / "new.py").is_file()
 
 
+@pytest.mark.asyncio
+async def test_a_skill_parked_by_an_interrupted_swap_is_recovered(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The old copy is the skill when the live directory is gone.**
+
+    The swap is two renames: live → `.name.replacing`, then staged → live.  A
+    process killed between them leaves the only copy in the parked directory.
+    The next write used to delete that directory before looking, so the playbook
+    it was about to replace — the only one left — was destroyed.  This is that
+    state, and a renamed-in write that fails afterwards: the old body must still
+    be the installed skill.
+    """
+    folder = skill(isolated_runtime, "one", body="The old body.")
+    parked = isolated_runtime / "skills" / ".one.replacing"
+    os.rename(folder, parked)
+    assert not folder.exists()
+
+    real_rename = os.rename
+
+    def fail_the_swap(source: Any, target: Any) -> None:
+        # The recovery's rename (`.one.replacing` → live) is allowed; the final
+        # swap of the staged directory is the one that "crashes".
+        if Path(source).name == ".one.installing" and Path(target) == folder:
+            raise OSError("simulated stop between the swap's two renames")
+        real_rename(source, target)
+
+    monkeypatch.setattr(playbooks.os, "rename", fail_the_swap)
+    with pytest.raises(OSError):
+        playbooks.install("one", files(manifest("one", body="The new body.")))
+
+    assert folder.is_dir(), "the parked copy was not recovered"
+    assert "The old body." in (folder / "SKILL.md").read_text(encoding="utf-8")
+
+
 # --- removing and switching ---------------------------------------------------
 
 
@@ -370,7 +407,7 @@ async def test_removing_a_skill_takes_the_folder_and_its_entry(
     """
     config_on_disk(
         isolated_runtime,
-        CONFIG + "skills:\n  one:\n    env:\n      SOME_KEY: ${SOME_KEY:-x}\n",
+        CONFIG + "skills:\n  one:\n    env:\n      SOME_KEY: x\n",
     )
     skill(isolated_runtime, "one")
 
@@ -399,7 +436,7 @@ async def test_removing_by_the_header_name_removes_its_directory(
     """
     config_on_disk(
         isolated_runtime,
-        CONFIG + "skills:\n  the-name:\n    env:\n      SOME_KEY: ${SOME_KEY:-x}\n",
+        CONFIG + "skills:\n  the-name:\n    env:\n      SOME_KEY: x\n",
     )
     folder = isolated_runtime / "skills" / "the-folder"
     folder.mkdir(parents=True)
@@ -740,3 +777,36 @@ async def test_an_edit_cannot_write_outside_the_skill_either(
     assert (isolated_runtime / "skills" / "search" / "SKILL.md").read_text(
         encoding="utf-8"
     ) == before
+
+
+@pytest.mark.asyncio
+async def test_a_reinstall_by_the_header_name_replaces_its_directory(
+    isolated_runtime: Path,
+) -> None:
+    """**A skill answers to two names, and a replacement must respect both.**
+
+    `skill_list` prints the frontmatter `name:`, while the folder may be called
+    something else.  Installing under the caller's string created a second
+    directory — `find` kept returning the first, so `skill_use` served the OLD
+    document and the catalogue kept the old row while the call reported success.
+    """
+    config_on_disk(isolated_runtime)
+    folder = isolated_runtime / "skills" / "the-folder"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(manifest("the-name", body="old"), encoding="utf-8")
+
+    async with Client(build_server(load())) as client:
+        answer = await ask(
+            client,
+            "skill_set",
+            name="the-name",
+            files=files(manifest("the-name", body="new")),
+        )
+
+    assert answer == {"name": "the-name", "state": "on", "files": 1}
+    assert not (isolated_runtime / "skills" / "the-name").exists()
+    found = playbooks.find("the-name")
+    assert found is not None and found.directory.name == "the-folder"
+    assert "new" in (isolated_runtime / "skills" / "the-folder" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )

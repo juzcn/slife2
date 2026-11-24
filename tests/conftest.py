@@ -60,12 +60,15 @@ from slife2.libs.turn import tokens
 #:     `tools.db` behind for the next run to find.  `test_a_turn_over_the_real_stack`
 #:     asks for this one back (`real_dialer`): the servers its launcher probes
 #:     are its own, started on ports it picked.
-#:   * `agent_task_server` — the hub, the context store and the model for a
-#:     task's own turn.  A forgotten `backend=` is a live, paid call.
+#:   * `turn.runtime` — the hub, the context store and the model for a turn,
+#:     for the agent server and the agent-task server alike.  A forgotten
+#:     `backend=` or client is a live, paid call.
 #:   * `schedule_server` — the agent-task plugin it dispatches a run to.
-#:   * `server.server` — the same three, for a turn of the agent's own, which is
-#:     the one leak that would *write* to a developer's real conversation.
-#:   * `context_server` — the model its discriminator needs to choose a context.
+#:   * `agent.core` / `agent.membership` — the cabinet and the subagent
+#:     network, the peers a turn of the agent's own reaches directly; the leak
+#:     that would *write* to a developer's real conversation goes through the
+#:     runtime.
+#:   * `context_server` — the model its decision needs to choose a context.
 #:   * `llm.client` — `open_backend`, which is how anything above reaches a
 #:     model server at all.
 #:   * `embedder` — the embeddings endpoint, the other paid address.
@@ -77,9 +80,11 @@ from slife2.libs.turn import tokens
 _DIALERS: dict[str, tuple[str, ...]] = {
     "slife2.libs.harness.handover": ("open_server",),
     "slife2.libs.host.launcher": ("open_server",),
-    "slife2.plugins.agent_task.server": ("open_server", "open_backend"),
+    "slife2.libs.turn.runtime": ("open_server", "open_backend"),
     "slife2.plugins.schedule.server": ("open_server",),
-    "slife2.plugins.agent.server": ("open_server", "open_backend"),
+    "slife2.plugins.agent.server": ("open_server",),
+    "slife2.plugins.agent.core": ("open_server",),
+    "slife2.plugins.agent.membership": ("open_server",),
     "slife2.plugins.context.server": ("open_server",),
     "slife2.clients.model": ("open_server",),
     "slife2.clients.embedder": ("open_server",),
@@ -239,21 +244,17 @@ def clean_registered_secrets():
 
 @pytest.fixture(autouse=True)
 def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the suite off the network, and off a vocabulary load per worker.
+    """Keep the suite on the fallback: no vocabulary parse per worker.
 
-    `slife2.libs.turn.tokens` sizes a conversation with `tiktoken`'s `o200k_base` when it
-    can get it, and getting it means a few megabytes fetched over the network
-    the first time anybody asks — once per *process*, which under `-n auto` is
-    once per worker, from a cold cache: a dozen simultaneous downloads to answer
-    a question about a turn's size.
-
-    The suite's own rule is that nothing in it needs the network (README,
-    "Tests"), and a test run is not the place to discover whether this machine
-    has one.  So the resolver is pinned to "no vocabulary", which makes every
-    test that sizes a turn use the script fallback — a branch that has to work
-    anyway, since a machine with no network is supported rather than broken.
-    `tests/libs/turn/test_tokens.py` puts the real one back by asking for the
-    `real_tokenizer` fixture, and skips where there is genuinely none.
+    `slife2.libs.turn.tokens` sizes a conversation with `tiktoken`'s `o200k_base`
+    when it can read the bundled vocabulary, and reading it is a few megabytes
+    parsed per *process* — under `-n auto`, once per worker, for a question most
+    tests never ask.  So the resolver is pinned to "no vocabulary" here, which
+    makes every test that sizes a turn use the script fallback — a branch that
+    has to work anyway, since a machine with a broken install is supported
+    rather than broken.  `tests/libs/turn/test_tokens.py` puts the real one back
+    by asking for the `real_tokenizer` fixture, and the bundle is part of the
+    package, so that fixture does not reach the network either.
     """
     monkeypatch.setattr(tokens, "_openai_encoding", lambda: None)
 
@@ -262,7 +263,7 @@ def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
 def english_window() -> None:
     """Pin the window's language to English, whatever locale this machine is in.
 
-    `slife2.tui.i18n` resolves the language from the OS at import, and a
+    `slife2.libs.harness.i18n` resolves the language from the OS at import, and a
     contributor's Chinese Windows answers `zh` — which would flip every string
     the TUI draws and turn the suite's English assertions (`"Arguments"`,
     `"restored 3 turns"`, `"running"`, `"Switched to "` …) red for a reason that
@@ -275,7 +276,7 @@ def english_window() -> None:
     switches language (`tests/tui/test_i18n.py`) cannot leak into the next one
     in either direction.
     """
-    from slife2.tui.i18n import set_language
+    from slife2.libs.harness.i18n import set_language
 
     set_language("en")
 
@@ -296,10 +297,11 @@ def tokenizer_resolver():
 def real_tokenizer(monkeypatch: pytest.MonkeyPatch, tokenizer_resolver) -> None:
     """Undo `no_tokenizer_download`, for the tests that are *about* the tokenizer.
 
-    Skips rather than fails when the vocabulary cannot be had: the point of the
-    fallback is that this machine is supported, so a machine without `tiktoken`'s
-    vocabulary is a machine that runs the rest of the suite, not a red one.
+    The vocabulary ships with the package, so this does not reach the network;
+    a checkout whose bundle is missing skips with the packaging defect named
+    rather than fetching to cover it.
     """
+    bundled = tokens._BUNDLED_CACHE / tokens._CACHE_KEY
+    if not bundled.is_file():
+        pytest.skip(f"the bundled o200k_base vocabulary is missing: {bundled}")
     monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
-    if tokenizer_resolver() is None:
-        pytest.skip("no o200k_base vocabulary on this machine")

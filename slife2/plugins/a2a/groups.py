@@ -45,7 +45,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
@@ -56,6 +55,7 @@ from slife2.libs.host import statefile
 from slife2.libs.host.config import REMOTE, Net
 from slife2.libs.host.paths import agent_dir
 from slife2.plugins.a2a.inbound_store import iso_now
+from slife2.plugins.a2a.states import CONTROL_RE
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,6 @@ MAX_GID = 64
 #: Group names additionally refuse ``:``; member names are allowed to have one
 #: because the channel parser only splits the group off.
 _TOPIC_FORBIDDEN = frozenset("/+#")
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class GroupError(ValueError):
@@ -131,6 +130,16 @@ def valid_member_name(name: object) -> bool:
     return _valid_name(name, MAX_MEMBER_NAME, extra="")
 
 
+def unaddressable(name: object) -> GroupError:
+    """The refusal a name that is not a member name gets.
+
+    One sentence for every gate that checks one — the roster a `group_set`
+    asks for and the mesh's fan-out — because the model reads the same claim
+    about the same name whichever gate refused it.
+    """
+    return GroupError(f"{name!r} is not a member name this network can address.")
+
+
 def valid_group_name(name: object) -> bool:
     """Whether *name* can be a group name.
 
@@ -148,7 +157,7 @@ def _valid_name(name: object, limit: int, *, extra: str) -> bool:
         return False
     if not name or name != name.strip() or len(name) > limit:
         return False
-    if _CONTROL_RE.search(name):
+    if CONTROL_RE.search(name):
         return False
     if any(character in name for character in _TOPIC_FORBIDDEN):
         return False
@@ -164,7 +173,7 @@ def clean_members(owner: str, members: Iterable[str]) -> tuple[str, ...]:
     sorted.
     """
     if not valid_member_name(owner):
-        raise GroupError(f"{owner!r} is not a member name this network can address.")
+        raise unaddressable(owner)
     found: list[str] = [owner]
     seen = {owner}
     for raw in members:
@@ -172,7 +181,7 @@ def clean_members(owner: str, members: Iterable[str]) -> tuple[str, ...]:
             raise GroupError(f"{raw!r} is not a member name.")
         name = raw.strip()
         if not valid_member_name(name):
-            raise GroupError(f"{name!r} is not a member name this network can address.")
+            raise unaddressable(name)
         if name in seen:
             continue
         seen.add(name)
@@ -260,6 +269,28 @@ class EventResult:
     changed: bool = False
 
 
+def _roster(owner: str, raw_members: object) -> tuple[str, ...] | None:
+    """One event's or one file's member list, or `None` when it is not one.
+
+    **One validation for the two readers** — the wire parser and the groups
+    file.  They had copies whose checks were ordered differently: the parser
+    refused more than `MAX_MEMBERS` *raw* entries before de-duplicating, the
+    loader de-duplicated first.  A 65-entry roster reducing to 64 therefore
+    loaded and was dropped again on the same roster sent as a `group_set`.
+    """
+    if not isinstance(raw_members, list) or not raw_members:
+        return None
+    members: list[str] = []
+    for raw in raw_members:
+        if not isinstance(raw, str) or not valid_member_name(raw):
+            return None
+        if raw not in members:
+            members.append(raw)
+    if owner not in members or len(members) > MAX_MEMBERS:
+        return None
+    return tuple(members)
+
+
 def parse_event(data: Mapping[str, Any]) -> GroupEvent | None:
     """Validate one raw event payload, or answer ``None``.
 
@@ -286,17 +317,8 @@ def parse_event(data: Mapping[str, Any]) -> GroupEvent | None:
         return None
     if not isinstance(gid, str) or not gid or len(gid) > MAX_GID:
         return None
-    if not isinstance(raw_members, list) or not raw_members:
-        return None
-    if len(raw_members) > MAX_MEMBERS:
-        return None
-    members: list[str] = []
-    for raw in raw_members:
-        if not isinstance(raw, str) or not valid_member_name(raw):
-            return None
-        if raw not in members:
-            members.append(raw)
-    if owner not in members:
+    members = _roster(owner, raw_members)
+    if members is None:
         return None
     if kind == GROUP_MESSAGE:
         if not isinstance(text, str) or not text:
@@ -323,7 +345,7 @@ def parse_event(data: Mapping[str, Any]) -> GroupEvent | None:
         group=group,
         owner=owner,
         gid=gid,
-        members=tuple(members),
+        members=members,
         text=text,
     )
 
@@ -681,22 +703,15 @@ def _group_from_yaml(name: object, entry: object) -> Group | None:
         return None
     if not isinstance(gid, str) or not gid or len(gid) > MAX_GID:
         return None
-    if not isinstance(raw_members, list) or not raw_members:
-        return None
-    members: list[str] = []
-    for raw in raw_members:
-        if not isinstance(raw, str) or not valid_member_name(raw):
-            return None
-        if raw not in members:
-            members.append(raw)
-    if owner not in members or len(members) > MAX_MEMBERS:
+    members = _roster(owner, raw_members)
+    if members is None:
         return None
     if not isinstance(updated, str):
         updated = ""
     return Group(
         name=name,
         owner=owner,
-        members=tuple(members),
+        members=members,
         gid=gid,
         updated=updated,
     )

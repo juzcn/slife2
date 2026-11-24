@@ -52,9 +52,9 @@ did; a run the scheduler could not start or follow is `failed` too; and a run a
 stopped process left `pending` is closed by the next start's sweep — `missed` if
 it never started, `failed` if it had.  The poll also records the newest fire
 each task missed while nothing was running — and **nothing is announced**: a
-note handed over would be a second thing said to a conversation, and it is
-deferred rather than half-built (SDD §14.2).  The ledger is where the answer is
-and `schedule_runs` is how it is read.
+note handed over would be a second thing said to a conversation.  The ledger is
+where the answer is and `schedule_runs` is how it is read; the shipped
+`AGENTS.md` tells the model to look.
 """
 
 from __future__ import annotations
@@ -64,9 +64,10 @@ import contextlib
 import logging
 import re
 import sqlite3
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastmcp import Client, Context, FastMCP
@@ -83,8 +84,10 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.host.paths import home_key, in_home, schedule_dbs
+from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL, conversation_meta
 from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
     agent_reader,
     close_server,
     house_server,
@@ -92,16 +95,17 @@ from slife2.libs.plugin.protocol import (
     serve_plugin,
     tool_payload,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     AGENT_TASK_LIST,
     AGENT_TASK_START,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     FINISHED as TASK_FINISHED,
 )
-from slife2.plugins.agent_task.server import (
+from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
+from slife2.libs.store.db import StaleSchema
 from slife2.plugins.schedule import expressions
 from slife2.plugins.schedule.store import (
     FAILED,
@@ -119,6 +123,11 @@ from slife2.plugins.schedule.store import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Ledger files this process has already reported as older than this build's
+#: columns.  The clock opens every ledger every pass, and the sentence is worth
+#: saying once; `ledgers` is the only reader that walks them all.
+_stale_reported: set[Path] = set()
 
 SERVER_NAME = SCHEDULE_SERVER_NAME
 
@@ -163,27 +172,9 @@ RUNS_MAX = 200
 #: is therefore a page rather than a wall for the same reason the run listing
 #: is — a model that has scheduled for a year is a model whose `schedule_list`
 #: would otherwise be truncated by the harness and read back through `dump_read`
-#: or `dump_grep` (`tool_result.tokens`).
+#: or `dump_grep` (`tool_result.bytes`).
 TASKS_LIMIT = 50
 TASKS_MAX = 200
-
-
-def page_of(limit: int, offset: int, default: int, cap: int) -> tuple[int, int]:
-    """One listing's page size and where it starts, from what a model asked.
-
-    **A limit that is not a positive number means "nobody said"**, and it is
-    "unset" rather than "no bound": a *negative* must not reach SQLite, where
-    `LIMIT -1` means **no limit at all** — so a model passing `-1` would walk
-    past the ceiling these tools exist to keep, and the ceiling is the answer to
-    a model asking for ten thousand rows.  A negative `offset` is folded to the
-    first page for the same reason: it is nothing but a way to be out of range.
-
-    One function because the two listings of this section are one shape — the
-    numbers they answer with are the numbers the page was cut to, and a caller
-    paging by `offset` cannot compute its next page from a number the tool
-    interpreted differently than it reported.
-    """
-    return (min(limit, cap) if limit > 0 else default), max(0, int(offset))
 
 
 # ── the clock's decision ─────────────────────────────────────────────────────
@@ -224,20 +215,23 @@ class RunLocks:
 
     **A ledger is one file per agent, and this one process serves every agent
     and every home** — so a maker and its subagent, a turn and its own
-    background task, are all callers of the same run.  Every one of the three
+    background task, are all callers of the same run.  Every one of the
     operations that changes a run is a read, a decision and a write with a peer
     call between them (`fire`'s `record → window check → dispatch`,
     `schedule_run_now`'s `reopen → dispatch`, `schedule_run_skip`'s
-    `find → settle`).  Two callers in that window both see "no task yet" and
-    both dispatch: the second start is refused by the agent-task plugin (one
-    name, one running task), and the refusal settles the *first* call's run
-    `failed` while the work goes on.  The ledger then says the run did not
-    happen while its answer is on its way.
+    `find → settle`, the sweep's `dispatching → ask → settle/attach`).  Two
+    callers in that window both see "no task yet" and both dispatch: the second
+    start is refused by the agent-task plugin (one name, one running task), and
+    the refusal settles the *first* call's run `failed` while the work goes on.
+    The ledger then says the run did not happen while its answer is on its way.
 
     **Keyed by the task and not by the run**, because an empty `due_at` is
     "decide one now" and the moment it resolves to is what the operation is
-    computing.  The map is bounded by the schedule tasks anybody has named —
-    a handful — not by fires, which are unbounded.
+    computing.  **The table holds only what is in use**: an entry is leased
+    while a caller holds or waits for it and dropped when the last lease is
+    given back, so a task name that existed once and was removed does not keep
+    an `asyncio.Lock` for the process's life.  A fresh lock for a name nobody
+    holds is indistinguishable from the old one — nobody can be inside it.
 
     **The store's own writes are still guarded one level down** (`advance`,
     `settle`, `reopen`, `attach` are compare-and-sets): this lock is what makes
@@ -247,6 +241,9 @@ class RunLocks:
 
     def __init__(self) -> None:
         self._locks: dict[tuple[str, str, str], asyncio.Lock] = {}
+        #: How many callers hold or are waiting for each lock.  Zero is
+        #: "nobody", and that is when both entries go.
+        self._leases: dict[tuple[str, str, str], int] = {}
 
     def for_task(self, store: ScheduleStore, name: str) -> asyncio.Lock:
         """This task's lock, made on the first ask.
@@ -254,6 +251,9 @@ class RunLocks:
         The key is `home_key`'s canonical spelling rather than the caller's: a
         tool call and a poll resolve the same ledger through two spellings of
         one directory, and two locks for one task is the race this class is.
+
+        **A direct caller keeps the entry** — there is no lease to give back —
+        so production goes through `held`, which leases and prunes.
         """
         key = (home_key(store.home), store.agent, name)
         found = self._locks.get(key)
@@ -262,6 +262,34 @@ class RunLocks:
             self._locks[key] = found
         return found
 
+    def _lease(
+        self, store: ScheduleStore, name: str
+    ) -> tuple[tuple[str, str, str], asyncio.Lock]:
+        """Take one lease on this task's lock, making it if nobody holds it."""
+        key = (home_key(store.home), store.agent, name)
+        found = self._locks.get(key)
+        if found is None:
+            found = asyncio.Lock()
+            self._locks[key] = found
+        self._leases[key] = self._leases.get(key, 0) + 1
+        return key, found
+
+    def _release(self, key: tuple[str, str, str]) -> None:
+        """Give one lease back; the last one drops the entry.
+
+        **Safe because a lease is taken before the wait.**  A caller waiting on
+        the lock has already leased, so the last holder's release always leaves
+        the waiter counted; only when nobody holds and nobody waits does the
+        lock go, and a new caller then builds a fresh one — which cannot be in
+        use, because there was nobody to use it.
+        """
+        held = self._leases.get(key, 0) - 1
+        if held > 0:
+            self._leases[key] = held
+            return
+        self._leases.pop(key, None)
+        self._locks.pop(key, None)
+
     @staticmethod
     @contextlib.asynccontextmanager
     async def held(
@@ -269,15 +297,20 @@ class RunLocks:
     ) -> AsyncIterator[None]:
         """Hold this task's lock, or nothing when the caller has no registry.
 
-        A caller with no registry is a test's direct `poll_once`; production
-        builds the registry in `build_server`, which is the one place that owns
-        the process's state.
+        A caller with no registry is a test's direct `poll_once`/`sweep_once`;
+        production builds the registry in `build_server`, which is the one place
+        that owns the process's state, and hands it to the fires, the tool calls
+        and the dispatch resolution alike — they are the same decisions.
         """
         if locks is None:
             yield
             return
-        async with locks.for_task(store, name):
-            yield
+        key, lock = locks._lease(store, name)
+        try:
+            async with lock:
+                yield
+        finally:
+            locks._release(key)
 
 
 # ── the ledgers ──────────────────────────────────────────────────────────────
@@ -308,12 +341,25 @@ def ledgers() -> list[ScheduleStore]:
     A broad `except Exception` would make a bug in `adopt` — or a schema this
     build wrote and then cannot read — look like an operator's damaged file, and
     the skip is the one shape that hides the clock's own defect.  A `TypeError`
-    is the clock's and propagates; SQLite's and the filesystem's are the file's.
+    is the clock's and propagates; SQLite's, the filesystem's and a stale
+    ledger's are the file's.
     """
     found: list[ScheduleStore] = []
     for ledger in schedule_dbs():
         try:
             store = ScheduleStore.adopt(ledger.path, ledger.home)
+        except StaleSchema:
+            # **Said once per file, and skipped every pass.**  The clock walks
+            # every ledger every poll, and a sentence per pass is a log that
+            # buries the operator's one action — deleting the file.
+            if ledger.path not in _stale_reported:
+                _stale_reported.add(ledger.path)
+                logger.error(
+                    "%s predates this build's schedule columns, so nothing in "
+                    "it will be fired until it is deleted",
+                    ledger.path,
+                )
+            continue
         except (OSError, sqlite3.DatabaseError):
             logger.error(
                 "%s could not be opened, so nothing in it will be fired until "
@@ -440,6 +486,31 @@ async def tasks_server(
     )
 
 
+def agent_task_name(task_name: str, due_at: str) -> str:
+    """The name one run's work is started under: the task, and the run.
+
+    **The agent-task plugin files a task by its name, and this plugin starts one
+    task per run** — so the name has to say *which* run, or two overlapping runs
+    of one schedule task are two tasks the ledger cannot tell apart.  `reconcile`
+    looks a run up by the id it was handed, and a shared id would answer both
+    runs with whichever task the registry held last.
+
+    **`due_at` is the run's identity in this ledger** (`UNIQUE(task_id, due_at)`)
+    and its own spelling is what the row holds, so the name is derived from a
+    fact already written down rather than minted and kept beside it.  It also
+    means a retry of the same run lands on the same name — the agent-task
+    plugin's "already running" refusal is still the backstop for a second
+    dispatch of one run.
+
+    **The whole timestamp, offset included.**  The ledger's two runs either side
+    of a daylight-saving change can share a wall-clock reading
+    (`2026-10-25T01:30:00+01:00` and `2026-10-25T01:30:00+00:00` are different
+    instants), so trimming the offset or the seconds would make them one name.
+    """
+
+    return f"{task_name}@{due_at}"
+
+
 async def dispatch(
     config: Config,
     store: ScheduleStore,
@@ -456,6 +527,10 @@ async def dispatch(
     would leave the id in a conversation and the run's fate to that model's
     memory (SDD §9.4).
 
+    **The task is named after the run** (`agent_task_name`), not only after the
+    schedule task: the name is the agent-task plugin's id and registry key, so
+    two runs sharing one name is one name answering for both endings.
+
     The work is an ordinary agent task: it runs as the agent, on the agent's own
     context, with the agent's prompt and tools, and its answer is delivered back
     to the conversation by `slife2-agent-task` — this plugin never hands the
@@ -471,6 +546,24 @@ async def dispatch(
     # something to record the failure against — and so that the anchor moves
     # whether or not the work ever starts.
     store.record(task, due_at)
+    # **And it says the call was reached before it is made.**  The start is a
+    # peer round trip whose answer is written down afterwards, so a process
+    # that stops inside it leaves a row with no task and no way to tell "never
+    # started" from "may be running".  This marker is that distinction; the
+    # startup sweep resolves the marked ones by name (`_resolve_dispatching`).
+    #
+    # **The claim is checked.**  `record` is insert-or-nothing, so the row may
+    # already be settled (`missed`, `ran`, `failed`) or in flight; starting the
+    # peer task anyway ran work the ledger said had ended, and `attach` could
+    # not write it down.  The compare-and-set is the decision: a claim this
+    # call did not win is not a run it may start.
+    if not store.begin_dispatch(task.name, due_at):
+        current = store.run(task.name, due_at)
+        state = current.status if current is not None else "gone"
+        raise ToolError(
+            f"the run of {task.name!r} due at {due_at!r} is already {state}; "
+            "it was not started again."
+        )
     # **Opening the peer is part of the dispatch.**  A `tasks_server` call sits
     # outside the `try` at the caller's peril: a failure to reach the agent-task
     # plugin — a port that is not listening, a peer that answers as somebody else
@@ -485,7 +578,10 @@ async def dispatch(
         client, owned = await tasks_server(config, tasks_client)
         answer = await client.call_tool(
             AGENT_TASK_START,
-            {"name": task.name, "description": task.description},
+            {
+                "name": agent_task_name(task.name, due_at),
+                "description": task.description,
+            },
             # The identity rides in `_meta` because a task is *an agent's*, and
             # this process serves every agent: without it the peer would have to
             # guess whose loop to start, and would refuse with its own
@@ -501,7 +597,21 @@ async def dispatch(
     finally:
         if owned and client is not None:
             await close_server(client)
-    payload = tool_payload(answer)
+    try:
+        payload = tool_payload(answer)
+    except UnreadableAnswer as exc:
+        # **An answer that cannot be read is a task whose ending cannot be
+        # followed**, the same state the missing-id arm below settles.  Letting
+        # the raise escape would leave the run `pending` with no way to ask
+        # about it, so it is closed with the reason and the asking turn is told.
+        reason = (
+            "the agent task was started, but its answer could not be read, so "
+            f"its ending cannot be followed ({exc})"
+        )
+        store.settle(task.name, due_at, FAILED, error=reason)
+        raise ToolError(
+            f"the run of {task.name!r} due at {due_at} could not be followed: {reason}"
+        ) from exc
     started = str(payload.get("task_id") or "")
     if not started:
         # **A task whose id cannot be read is a run the ledger cannot follow.**
@@ -540,6 +650,30 @@ async def dispatch(
         "scheduled run of %s started for %s as %s", task.name, store.agent, started
     )
     return attached
+
+
+def _settle_from_task(store: ScheduleStore, run: Run, found: Mapping[str, Any]) -> None:
+    """Close one run from the agent task's own ending.
+
+    **One mapping for the two paths that read it** — the poll's reconcile and
+    the startup sweep's dispatch resolution.  It was written out twice, so a new
+    task status or a change to which field carries the ending had to be made in
+    both, or one path closed a run differently from the other.
+    """
+    if found["status"] == TASK_FINISHED:
+        store.settle(
+            run.name,
+            run.due_at,
+            RAN,
+            when=str(found.get("finished_at") or ""),
+        )
+    else:
+        store.settle(
+            run.name,
+            run.due_at,
+            FAILED,
+            error=f"the background task ended as {found['status']}",
+        )
 
 
 async def reconcile(config: Config, *, tasks_client: Client | None = None) -> list[str]:
@@ -616,20 +750,8 @@ async def _reconcile_one(
             )
         elif found["status"] == TASK_RUNNING:
             continue
-        elif found["status"] == TASK_FINISHED:
-            store.settle(
-                run.name,
-                run.due_at,
-                RAN,
-                when=str(found.get("finished_at") or ""),
-            )
         else:
-            store.settle(
-                run.name,
-                run.due_at,
-                FAILED,
-                error=f"the background task ended as {found['status']}",
-            )
+            _settle_from_task(store, run, found)
         did.append(f"{store.agent}: {run.name} due {run.due_at} closed")
     return did
 
@@ -684,20 +806,23 @@ async def poll_once(
     """
     did: list[str] = []
     # **Before the fires, not after them.**  A run whose task has finished but
-    # whose row is still `pending` is settled first; otherwise the next fire of
-    # the same task starts a new agent task under the same name, and
-    # `agent-task:<name>` — the id both runs then carry — names only the newer
-    # one.  The old run would be settled from the new task's ending, or stay
-    # pending for its lifetime.  Asking after a just-started task would only
-    # record `running`, so nothing is lost by asking before starting.
+    # whose row is still `pending` is settled first.  The ids no longer alias —
+    # each run's task is named after its due time (`agent_task_name`) — but a
+    # finished predecessor would stay `pending` for another pass, and the
+    # agent-task registry keeps only the most recently ended tasks: one evicted
+    # before it is settled is a run the ledger can only close `failed`.  Asking
+    # after a just-started task would only record `running`, so nothing is lost
+    # by asking before starting.
     did.extend(await reconcile(config, tasks_client=tasks_client))
     for store in ledgers():
-        # **One bad ledger is one ledger skipped, not a pass abandoned.**  A row
-        # with a hand-edited, non-ISO anchor makes `due` raise out of `moment_of`;
-        # without this guard that raise would take the whole pass with it, and
-        # the next pass would hit the same row — so every *other* agent's tasks
-        # would quietly stop firing while the clock looked healthy.  The ledger is
-        # named and skipped; the rest of this pass carries on.
+        # **One bad ledger is one ledger skipped, not a pass abandoned.**  A
+        # failure the per-task repair below cannot answer — a damaged cron
+        # expression, a store read that raises — would otherwise take the whole
+        # pass with it, and the next pass would hit the same row, so every
+        # *other* agent's tasks would quietly stop firing while the clock looked
+        # healthy.  The ledger is named and skipped; the rest of this pass
+        # carries on.  A hand-edited anchor is not one of these: it is repaired
+        # per task, below, and its siblings fire.
         #
         # **And the pass runs in the ledger's own home.**  This process serves
         # every home on the machine (`schedule_dbs` walks them all), while the
@@ -720,7 +845,45 @@ async def poll_once(
                     # the record-and-dispatch would otherwise start the same run
                     # a second time.
                     async with RunLocks.held(locks, store, task.name):
-                        verdict = due(task, reference)
+                        # **The definition is re-read under the lock.**  The
+                        # snapshot was taken once for the whole pass, and a
+                        # `schedule_set` that switched the task off or re-croned
+                        # it while the pass walked its other ledgers would
+                        # otherwise fire one run on the definition it replaced.
+                        current = store.task(task.name)
+                        if current is None or not current.enabled:
+                            continue
+                        task = current
+                        try:
+                            verdict = due(task, reference)
+                        except expressions.ScheduleError:
+                            # A cron or zone that will not read is the file's
+                            # damage, not an anchor to repair — it goes to the
+                            # per-ledger guard, which names the file and skips it.
+                            raise
+                        except ValueError:
+                            # **A hand-edited anchor is repaired here, where the
+                            # fire can reach it.**  `due` parses the anchor before
+                            # it asks cron anything, so a `last_due` that is not a
+                            # time raises *upstream* of `record` — the one place
+                            # the ledger's own repair (`advance`'s
+                            # `julianday(last_due) IS NULL` branch) runs from.  Left
+                            # to the per-ledger guard it skipped every task of this
+                            # agent on every pass, for ever.  So the poll asks for
+                            # the repair itself: the anchor becomes this moment
+                            # (SDD §9.4, Appendix C), this task is skipped for the
+                            # pass, and its siblings — and every other ledger —
+                            # carry on.  The next pass reads a whole anchor.
+                            store.advance(task, now())
+                            logger.warning(
+                                "%s: task %r has an anchor that is not a time "
+                                "(%r); it was reset to this pass's moment and is "
+                                "considered again on the next pass",
+                                store.path,
+                                task.name,
+                                task.last_due or task.created_at,
+                            )
+                            continue
                         if verdict is None:
                             continue
                         kind, due_at = verdict
@@ -756,32 +919,190 @@ async def poll_once(
     return did
 
 
-async def sweep_once() -> list[str]:
-    """Close what a stopped process left open, and say nothing about it.
+async def _resolve_dispatching(
+    config: Config,
+    store: ScheduleStore,
+    tasks_client: Client | None,
+    locks: RunLocks | None = None,
+) -> int:
+    """Resolve the runs a stopped process left inside a dispatch.
+
+    **By name, because the name is the run.**  `agent_task_name` spells the
+    schedule task and its due time together, and a due time is unique per task
+    (`UNIQUE(task_id, due_at)`), so a task carrying that name is this run's
+    task and no other's.  A running one is adopted (`attach`), an ended one
+    closes the run with its own ending, and one the peer does not hold is
+    `failed` — the work may have happened and the ledger cannot say, which is
+    exactly what `failed` means here.  `missed` is not an option: the start call
+    was reached.
+
+    **Each run is resolved under its task's lock, and re-read there**
+    (`RunLocks`).  A live dispatch holds that same lock from its record through
+    its attach, so a marker still on the row under the lock cannot belong to a
+    dispatch in progress — it is a stopped process's, and the peer's answer
+    about it is final.  The re-read is the other half: the snapshot and the
+    peer's list were taken before the lock, and a `schedule_run_now` landing in
+    that window may have reopened and dispatched this very run — a list fetched
+    before it says "nothing" about a task that now exists, and settling the run
+    `failed` on that list would close it while its work runs and delivers.  A
+    run that is no longer a marked `pending` is left to the decision that owns
+    it.
+
+    The peer is asked once for the whole ledger, in the ledger's own home, for
+    the reason `_reconcile_one` gives: a task is an agent's in a home, and a
+    shared clock asking in its own home reads another home's registry.
+    """
+    waiting = store.dispatching()
+    if not waiting:
+        return 0
+    with in_home(store.home):
+        listed = await _tasks_of(config, store.agent, tasks_client)
+    by_name = {str(row.get("name") or ""): row for row in listed.values()}
+    resolved = 0
+    for run in waiting:
+        async with RunLocks.held(locks, store, run.name):
+            # **The row as it is under the lock, not as the snapshot held it.**
+            # A `pending` with no task id is exactly the marked state: the only
+            # write that clears the marker without settling the run or putting
+            # an id on it is `reopen`, and a `schedule_run_now` that reopened it
+            # dispatches it before giving the lock back — so a run that moved
+            # since the snapshot is settled, in flight, or gone, and each of
+            # those is a decision this resolution must not overwrite.
+            current = store.run(run.name, run.due_at)
+            if current is None or current.status != PENDING or current.agent_task_id:
+                continue
+            found = by_name.get(agent_task_name(run.name, run.due_at))
+            if found is None:
+                store.settle(
+                    run.name,
+                    run.due_at,
+                    FAILED,
+                    error=(
+                        "the process stopped while this run was being dispatched, "
+                        "and the agent-task plugin holds no task for it"
+                    ),
+                )
+            elif found["status"] == TASK_RUNNING:
+                # The work is being done: put its id on the row and let the next
+                # poll's reconcile close it from the task's own ending.
+                store.attach(run.name, run.due_at, str(found["task_id"]))
+            else:
+                _settle_from_task(store, run, found)
+            resolved += 1
+    return resolved
+
+
+async def sweep_once(
+    config: Config,
+    *,
+    tasks_client: Client | None = None,
+    locks: RunLocks | None = None,
+) -> list[str]:
+    """Close what a stopped process left open, and resolve its dispatches.
 
     The ledger half of "tasks fire only while slife2 is running".  A `pending`
     run is one that was written and whose process died before anything closed
-    it: one with no task was never started and is **missed**, and one that names
-    a task started but had its ending lost and is **failed**.  Recording which
-    is what lets an agent that looks decide whether to run it again.  Nothing
-    else is settled here: a `missed` or `failed` run from before is still a
-    decision, and a decision is not this process's to make.
+    it: one with no task was never started and is **missed**, one that names a
+    task started but had its ending lost and is **failed**, and one marked as
+    dispatching was inside the start call and is resolved against the agent-task
+    plugin by name (`_resolve_dispatching`).  Recording which is what lets an
+    agent that looks decide whether to run it again.  Nothing else is settled
+    here: a `missed` or `failed` run from before is still a decision, and a
+    decision is not this process's to make.
 
-    **Nothing is announced.**  A note to the window would announce one, and it
-    is deferred rather than half-built (SDD §14.2) because the ledger already
-    holds the answer and `schedule_runs` is how it is read — which is what
-    makes "did it run?" a question with an answer rather than a message nobody
-    asked for.
+    **The dispatch resolution holds the same per-task locks the fires and the
+    tool calls do** (`locks`, `RunLocks`): a `schedule_run_now` that reopens and
+    dispatches a marked run while the peer is being asked must not have its
+    now-in-flight run settled `failed` by a list fetched before it started.
+
+    **Nothing is announced.**  A note to the window would announce one, and the
+    shipped `AGENTS.md` tells the model to read the ledger instead:
+    `schedule_runs` holds the answer, which is what makes "did it run?" a
+    question with an answer rather than a message nobody asked for.
     """
     did: list[str] = []
     for store in ledgers():
         try:
-            failed = store.sweep()
+            closed = store.sweep()
         except Exception:  # noqa: BLE001 - one bad ledger must not stop the rest
             logger.exception("%s: this ledger was skipped for this sweep", store.path)
             continue
-        if failed:
-            did.append(f"{store.agent}: {failed} run(s) never settled")
+        if closed:
+            did.append(f"{store.agent}: {closed} run(s) never settled")
+        try:
+            resolved = await _resolve_dispatching(config, store, tasks_client, locks)
+        except Exception as exc:  # noqa: BLE001 - a peer that is not there
+            # **The resolution is remembered, and retried.**  Nothing is
+            # settled: this says nothing about the runs, only about this
+            # process's view of them — and the peer it could not reach is one
+            # that may answer a moment later.  The marker is stale by
+            # construction (the process that wrote it is gone), so a later pass
+            # may finish the job; leaving it to the next *restart* left the run
+            # `pending` for the life of this process, invisible to `reconcile`
+            # because it has no task id.
+            _unresolved_dispatches.add(store.path)
+            logger.warning(
+                "%s: the runs left in a stopped dispatch were not checked: %s",
+                store.agent,
+                exc,
+            )
+            continue
+        # It answered: whatever this ledger had outstanding is resolved now.
+        _unresolved_dispatches.discard(store.path)
+        if resolved:
+            did.append(
+                f"{store.agent}: {resolved} run(s) resolved from a stopped dispatch"
+            )
+    return did
+
+
+#: Ledgers whose startup dispatch resolution could not reach the agent-task
+#: plugin, kept until one pass gets an answer.  **Only a marker that was already
+#: there when the sweep ran belongs here** — a dispatch started by this process
+#: after that point is live work, and a list fetched mid-dispatch says nothing
+#: about a task that is about to exist (`_resolve_dispatching`).  Keyed by path
+#: rather than by store, because a ledger is the same file on every pass.
+_unresolved_dispatches: set[Path] = set()
+
+
+async def retry_stale_dispatches(
+    config: Config,
+    *,
+    tasks_client: Client | None = None,
+    locks: RunLocks | None = None,
+) -> list[str]:
+    """Resolve the startup dispatches a peer was not answering for.
+
+    The startup sweep asks the agent-task plugin once; a launcher starts the
+    plugins in one wave, so that peer can still be binding its port when the
+    sweep runs.  Without a retry the marked run stayed `pending` for the life of
+    the process: `reconcile` cannot see it (it has no task id), and the only
+    other resolution was another restart.  Each pass asks again until an answer
+    arrives, and only for the ledgers the sweep could not resolve.
+
+    The resolution holds the same per-task locks as the sweep's (`locks`,
+    `RunLocks`), for the reason `_resolve_dispatching` gives: a retry runs while
+    the process is live, so a marked run may be one a `schedule_run_now` is
+    reopening and dispatching in the same window.
+    """
+    did: list[str] = []
+    if not _unresolved_dispatches:
+        return did
+    for store in ledgers():
+        if store.path not in _unresolved_dispatches:
+            continue
+        try:
+            resolved = await _resolve_dispatching(config, store, tasks_client, locks)
+        except Exception as exc:  # noqa: BLE001 - the peer is still not there
+            logger.debug(
+                "%s: the stopped dispatch is still unresolved: %s", store.agent, exc
+            )
+            continue
+        _unresolved_dispatches.discard(store.path)
+        if resolved:
+            did.append(
+                f"{store.agent}: {resolved} run(s) resolved from a stopped dispatch"
+            )
     return did
 
 
@@ -807,9 +1128,15 @@ async def poll_forever(
     row on one agent into every agent's tasks going quiet until the process
     restarted, which is the opposite of what one shared clock is for.  Only a
     cancellation ends the loop.
+
+    **The startup sweep's one unanswered ask is retried on every pass**
+    (`retry_stale_dispatches`): the launcher starts this plugin in the same wave
+    as the agent-task plugin, so the peer can be binding its port when the sweep
+    runs, and a marked run left unresolved would stay `pending` until another
+    restart.  The retry asks only about ledgers the sweep could not resolve.
     """
     try:
-        for line in await sweep_once():
+        for line in await sweep_once(config(), tasks_client=tasks_client, locks=locks):
             logger.info("%s", line)
     except asyncio.CancelledError:
         # The ordinary way this ends.  Re-raised because the sweep of a
@@ -823,6 +1150,14 @@ async def poll_forever(
     while True:
         await asyncio.sleep(_T.timeouts.pacing.schedule_poll)
         try:
+            # **A startup resolution the peer was not up for is retried.**
+            # Before `poll_once`, so a run whose dispatch was unresolved is
+            # adopted or closed on the first pass the agent-task plugin answers,
+            # rather than waiting for the process to be restarted.
+            for line in await retry_stale_dispatches(
+                config(), tasks_client=tasks_client, locks=locks
+            ):
+                logger.info("%s", line)
             for line in await poll_once(
                 config(),
                 window_client=window_client,
@@ -840,7 +1175,6 @@ async def poll_forever(
 
 
 def build_server(
-    config: Config,
     *,
     window_client: Client | None = None,
     tasks_client: Client | None = None,
@@ -887,13 +1221,20 @@ def build_server(
             )
         return found
 
-    def row(task: Task, reference: datetime | None = None) -> dict[str, Any]:
+    def row(
+        task: Task, reference: datetime | None = None, *, shorten: bool = True
+    ) -> dict[str, Any]:
         """A task as a tool answers it, with when it next comes due.
 
         The next fire is computed rather than stored, because it is a fact about
         the expression and the clock rather than about anything this system wrote
         down — a stored one would be a second answer to keep in step with the
         task, and the one that goes stale after an edit.
+
+        `shorten=False` is `schedule_set`'s: a listing cuts the description
+        because a row is a line, but the answer to writing a task is the task —
+        a model that copies the returned row back into another whole-task write
+        was silently losing the tail past 120 characters.
         """
         answered = task.row()
         try:
@@ -908,7 +1249,8 @@ def build_server(
             # listing that fails entirely over one bad row is worse than one that
             # says so in that row.
             answered["next_run"] = f"unreachable: {exc}"
-        answered["description"] = task.description[:DESCRIPTION_CHARS]
+        if shorten:
+            answered["description"] = task.description[:DESCRIPTION_CHARS]
         return answered
 
     @asynccontextmanager
@@ -997,11 +1339,16 @@ def build_server(
             expressions.zone(timezone)
         except expressions.ScheduleError as exc:
             raise ToolError(str(exc)) from exc
-        task = store_for(agent).put_task(
-            name, description, cron, timezone, enabled=enabled
-        )
+        store = store_for(agent)
+        # **Under the task's lock, for the poll's sake.**  A fire reads this
+        # task's definition and starts its work; a write landing between the
+        # pass's snapshot and its fire must be ordered against that decision,
+        # or the run fires once on the definition the caller just replaced.
+        # `schedule_remove` takes the same lock for the same reason.
+        async with RunLocks.held(locks, store, name):
+            task = store.put_task(name, description, cron, timezone, enabled=enabled)
         logger.info("scheduled task %s written for %s", name, agent)
-        return row(task)
+        return row(task, shorten=False)
 
     @mcp.tool(name=SCHEDULE_REMOVE, meta=FOR_THE_MODEL)
     async def schedule_remove(ctx: Context, name: str) -> dict[str, Any]:
@@ -1051,7 +1398,7 @@ def build_server(
         """
         agent = agent_of(ctx)
         store = store_for(agent)
-        bounded, skipped = page_of(limit, offset, TASKS_LIMIT, TASKS_MAX)
+        bounded, skipped = page_window(limit, offset, unset=TASKS_LIMIT, cap=TASKS_MAX)
         found, total = store.tasks(limit=bounded, offset=skipped)
         return {
             "tasks": [row(task) for task in found],
@@ -1097,7 +1444,7 @@ def build_server(
             raise ToolError(
                 f"{wanted!r} is not a run state; they are {', '.join(STATUSES)}."
             )
-        bounded, skipped = page_of(limit, offset, RUNS_LIMIT, RUNS_MAX)
+        bounded, skipped = page_window(limit, offset, unset=RUNS_LIMIT, cap=RUNS_MAX)
         found, total = store.runs(name.strip(), wanted, bounded, skipped)
         return {
             "runs": [run.row() for run in found],
@@ -1142,6 +1489,12 @@ def build_server(
         agent = agent_of(ctx)
         store = store_for(agent)
         name = name.strip()
+        # **The address is read now, not when this server was built.**  The
+        # clock reads `live()` on every pass for exactly this reason: an edited
+        # file can move `servers.agent-task`, and a manual run that kept
+        # dialling the old address would fail while the clock's fires succeeded
+        # (or the reverse after a partial restart).
+        live_config = live()
         # **One decision at a time for this task** (`RunLocks`).  Everything
         # below is the run's state, and the same three steps are reached by a
         # maker, its subagent, the poll's fire and the model's own call.
@@ -1151,11 +1504,13 @@ def build_server(
         async with RunLocks.held(locks, store, name):
             task = task_of(store, name)
             # **A finished run of this task is settled before another starts.**
-            # `agent_task_start` names a task after the schedule task, and that
-            # name is its id, so a still-`pending` predecessor would share the
-            # id with this run.  The poll does the same before its fires; this
-            # is the manual path, and it owes the same order.
-            await _reconcile_one(config, store, tasks_client=tasks_client)
+            # The run's task is named after its due time now, so a predecessor
+            # and this run no longer share an id — but a finished predecessor
+            # left `pending` would go on looking in flight, and the agent-task
+            # registry forgets ended tasks past its cap.  The poll does the same
+            # before its fires; this is the manual path, and it owes the same
+            # order.
+            await _reconcile_one(live_config, store, tasks_client=tasks_client)
             stamp = due_at.strip()
             if stamp:
                 stamp = _key_of(store, task.name, stamp)
@@ -1182,7 +1537,9 @@ def build_server(
                 )
                 return found.row()
             return (
-                await dispatch(config, store, task, stamp, tasks_client=tasks_client)
+                await dispatch(
+                    live_config, store, task, stamp, tasks_client=tasks_client
+                )
             ).row()
 
     @mcp.tool(name=SCHEDULE_RUN_SKIP, meta=FOR_THE_MODEL)
@@ -1269,6 +1626,14 @@ def _key_of(store: ScheduleStore, name: str, stamp: str) -> str:
     already matches would break a run written on the other side of a
     daylight-saving change: the row says `-05:00`, the machine now says `-04:00`,
     and the run stops being findable under its own due time.
+
+    **And the last try is the instant itself** (`ScheduleStore.key_at`).  The
+    normalized spelling carries *today's* offset, so a run written before a
+    fall-back — whose key carries the old one — matches neither string even
+    when the model hands back that very instant in another spelling.  The
+    moment is the run's identity; the string is only its key, so the lookup
+    that remains compares the moments (`julianday`) and answers with the key
+    the row actually holds.
     """
     if store.run(name, stamp) is not None:
         return stamp
@@ -1278,6 +1643,9 @@ def _key_of(store: ScheduleStore, name: str, stamp: str) -> str:
         raise ToolError(str(exc)) from exc
     if spelled != stamp and store.run(name, spelled) is not None:
         return spelled
+    found = store.key_at(name, spelled)
+    if found is not None:
+        return found
     raise ToolError(
         f"{name!r} has no run due at {stamp!r}; {SCHEDULE_RUNS} lists what it has."
     )
@@ -1304,7 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda _config: build_server(),
         logger=logger,
         note=lambda _config: "the clock",
     )

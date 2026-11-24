@@ -74,6 +74,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.helpers.timeouts as _T
+from slife2.libs.harness import notes
 from slife2.libs.harness.handover import hand_over, note_to_window
 from slife2.libs.host import statefile
 from slife2.libs.host.config import WECHAT_SERVER_NAME, Config
@@ -81,9 +82,14 @@ from slife2.libs.host.paths import agent_dir, home_key, in_home, known_homes
 from slife2.libs.host.paths import home as home_dir
 from slife2.libs.plugin.audience import FOR_THE_MODEL, unaddressed
 from slife2.libs.plugin.protocol import agent_or_blank, house_server, serve_plugin
+from slife2.libs.plugin.vocabulary import (
+    WECHAT_CHANNEL,
+)
+from slife2.libs.plugin.vocabulary import (
+    WECHAT_MARKER as MARKER_PREFIX,
+)
 from slife2.plugins.wechat import ilink
 from slife2.plugins.wechat.ilink import Http, IlinkClient
-from slife2.tui import notes
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +99,7 @@ SERVER_NAME = WECHAT_SERVER_NAME
 #: starts it under and the hub connects to it by.  It owns no section of its
 #: own: the only thing written down about it is an address, and a login is
 #: scanned rather than configured (`slife2.plugins.wechat.ilink`).
-CONFIG_KEY = "wechat"
+CONFIG_KEY = WECHAT_CHANNEL
 
 INSTRUCTIONS = (
     "WeChat, over the iLink bridge: a login per agent, the messages that arrive "
@@ -103,21 +109,16 @@ INSTRUCTIONS = (
 )
 
 # ── Cadence ─────────────────────────────────────────────────────────────
-# A number is read from the global timeouts registry (`pacing.wechat_*`) at
-# call time, so a test can patch it.  Each value was arrived at against the live
-# bridge, and nothing here changes the bridge.
+# The poll's schedule is `pacing.wechat_retry` in the global timeouts registry,
+# read at call time so a test can patch it.  Each value was arrived at against
+# the live bridge, and nothing here changes the bridge.
 
-#: How long to wait between polls.  The call itself blocks until the bridge has
-#: something to say, so this is the pause *after* an answer, not the latency.
-#: The ceiling a failing link backs off to, and the factor it grows by.  A link
-#: that is down must not be re-polled every three seconds forever.
-BACKOFF_FACTOR = 1.5
-#: How long a message that has already been seen is read as the bridge
-#: re-serving it rather than as somebody typing the same thing twice.
-#: How many messages one person's burst may have in flight before this process
-#: stops handing them over.  A bound rather than a queue: `send_message` blocks
-#: until its turn is done, so these are turns, and sixteen of them is somebody
-#: flooding a conversation rather than talking to it.
+#: How many hand-overs one session may have in flight before this process
+#: stops handing messages over.  A bound rather than a queue: a hand-over is
+#: the window's `submit`, which returns when the words are written to its
+#: stream — not when the turn they become is done — so these are short-lived
+#: delivery calls, and sixteen at once is somebody flooding a conversation
+#: rather than talking to it.
 MAX_INFLIGHT = 16
 
 #: The login's filename inside one agent's directory.  **Not `wechat_<agent>`**:
@@ -137,11 +138,9 @@ AGENT_KEY = "agent"
 QR_MAX_ATTEMPTS = 3
 
 
-#: What the marker opens with.  A constant because the marker is *read* as well
-#: as written: stored text carries it into a transcript, and the window takes it
-#: back off by this string (:func:`strip_marker`) rather than by a second copy of
-#: the spelling that could drift from this one.
-MARKER_PREFIX = "[Wechat:"
+# What the marker opens with is `slife2.libs.plugin.vocabulary`'s, imported as
+# this module's `MARKER_PREFIX`: the writer and the window's strip share one
+# spelling, and a reader of either does not load the other's process.
 
 
 def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
@@ -166,9 +165,9 @@ def marker(peer_wechat_id: str, context_token: str | None = None) -> str:
 
 #  Taking the marker back off is `slife2.libs.harness.markers.strip`, which is the shape and
 #  not the name: the window hands in every marker it knows about and this
-#  module's is one of them, exactly as `slife2.plugins.agent_task.server`'s is.  It
-#  lives there rather than here because there are two writers now, and a
-#  function per marker would be two things to keep in step.
+#  module's is one of them, exactly as an agent task's is.  It lives there
+#  rather than here because there are two writers now, and a function per
+#  marker would be two things to keep in step.
 
 
 def render_qr(content: str) -> str:
@@ -286,7 +285,8 @@ class Session:
         #: One typing keep-alive per conversation, so a second message from the
         #: same person does not start a second refresher.
         self.typing: dict[str, asyncio.Task[None]] = {}
-        #: Turns this session has handed to the agent and is waiting on.
+        #: Hand-overs this session has spawned and is waiting on — delivery
+        #: calls, not the turns they become (`MAX_INFLIGHT`).
         self.inflight: set[asyncio.Task[None]] = set()
         #: The last cursor written to the file, so it is written on change only.
         self.persisted: str = ""
@@ -439,7 +439,7 @@ def format_link_line(state: str) -> str:
 
     **`Wechat` is the name here**, where a peer's line carries the peer's own —
     a channel coming up is the same news as an agent coming up, so
-    `slife2.tui.notes` spells both and this cannot drift from `⚡ jill online`.
+    `slife2.libs.harness.notes` spells both and this cannot drift from `⚡ jill online`.
     The capital is the bubble's (`slife2.tui.widgets.channel_prefix`), not the
     config key's: `Wechat> ` is what this channel is called on screen, and a
     line about the same channel should call it the same thing.
@@ -574,7 +574,7 @@ class Wechat:
         self._spawn_in_home(root, self._resume(self.session(agent, _home_key(root))))
 
     async def close(self) -> None:
-        """Take down every loop, keep-alive and in-flight turn."""
+        """Take down every loop, keep-alive and in-flight hand-over."""
         cancelled: list[asyncio.Task[Any]] = []
         for session in self._sessions.values():
             cancelled.extend(
@@ -860,11 +860,12 @@ class Wechat:
         raising, so what is left here is the cadence and the queue.
         """
         client = session.client
-        backoff = _T.timeouts.pacing.wechat_poll
+        policy = _T.timeouts.pacing.wechat_retry
+        backoff = _T.Backoff(policy)
         logger.info(
             "wechat %s: polling every %.1fs",
             session.agent,
-            _T.timeouts.pacing.wechat_poll,
+            policy.base,
         )
         while client.is_logged_in and not client.auth_failed:
             # **First, before the poll blocks on the bridge**: this is where a
@@ -884,12 +885,13 @@ class Wechat:
             except Exception as exc:  # noqa: BLE001 — the loop's job is to keep going
                 client.last_error = str(exc)
                 logger.warning("wechat %s: poll failed: %s", session.agent, exc)
-            backoff = (
-                min(backoff * BACKOFF_FACTOR, _T.timeouts.pacing.wechat_backoff_max)
-                if client.last_error
-                else _T.timeouts.pacing.wechat_poll
-            )
-            await asyncio.sleep(backoff)
+            if client.last_error:
+                await asyncio.sleep(backoff.failed())
+            else:
+                # The attempt succeeded, which is the one event that clears a
+                # run; the pause is the bridge's own cadence again.
+                backoff.succeeded()
+                await asyncio.sleep(policy.base)
         # The loop ended because the link did — a token the far end refused, or
         # an account that expired — and a link that dies on its own is the one
         # transition nobody asked about, so it is said here.  A *deliberate* end
@@ -943,12 +945,13 @@ class Wechat:
         """Give one message to the agent as a turn of its own.
 
         **A task, not an await** — and that is the difference between polling
-        and not.  `send_message` returns when its turn is *finished*, and a turn
-        is a model thinking: awaiting it here would stop watching the login for
-        the whole of every reply, so a second message sent mid-turn would sit at
-        the bridge instead of being folded into the turn that is already
-        running.  The agent server serialises one key's turns itself, so
-        handing them all over at once is exactly what it expects.
+        and not.  A hand-over returns when the window has taken the words, not
+        when the turn they become is done — but it can wait seconds for a
+        window that is attaching (`hand_over`'s retry patience), and awaiting
+        it here would stop watching the login for that whole wait.  The window
+        folds a message into the turn already running at its next iteration
+        boundary, so handing them over as they arrive is exactly what it
+        expects.
         """
         if len(session.inflight) >= MAX_INFLIGHT:
             # Said rather than dropped quietly: this is somebody's message, and
@@ -1111,6 +1114,34 @@ class Wechat:
 
     # ── The QR login ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _connected_login() -> dict[str, Any]:
+        """`wechat_login`'s answer when there is nothing to scan.
+
+        One shape for the three ways this call finds a login already in hand:
+        the saved one at the top, the scan that landed during the fetch, and
+        the scan that landed while a failed fetch was raising.
+        """
+        return {"state": "connected", "qr": "", "qr_url": "", "seconds_left": 0}
+
+    def _scan_landed_during_fetch(self, session: Session) -> bool:
+        """Whether the replaced watch confirmed its code while this login fetched.
+
+        **The replaced watch keeps polling through the fetch**, and a person
+        scanning the code already on their screen is exactly what that window is
+        for.  `_confirmed` adopts the token and finishes without an await between
+        its reads and its writes, so a logged-in client here is a login already
+        in hand — not a state this call may reset to `waiting` and replace with
+        a code nobody needs.  Cancelling the watch is then only tidying: it has
+        either finished or has no token to find.
+        """
+        client = session.client
+        if not (client.is_logged_in and not client.auth_failed):
+            return False
+        self._cancel(session.qr_task)
+        session.qr_task = None
+        return True
+
     def _remember_code(self, session: Session, content: str) -> str:
         """Draw *content* and keep it on the session, where a status can hand it out.
 
@@ -1147,7 +1178,7 @@ class Wechat:
         await self.ready(session)
         client = session.client
         if client.is_logged_in and not client.auth_failed:
-            return {"state": "connected", "qr": "", "qr_url": "", "seconds_left": 0}
+            return self._connected_login()
         if client.auth_failed:
             # A token the far end refused is not a session to build on; drop it
             # and let the scan replace it, rather than refusing the login.
@@ -1165,12 +1196,23 @@ class Wechat:
         try:
             data = await client.fetch_qrcode(ilink.BASE_URL)
         except Exception as exc:  # noqa: BLE001 — a failure the model reads
+            # **A failed fetch is not a failed login if the scan landed.**  The
+            # replaced watch may have confirmed while this call was out; the
+            # token is the answer then, and the fetch's failure is moot.
+            if self._scan_landed_during_fetch(session):
+                return self._connected_login()
             session.qr_state = ""
             logger.warning("wechat %s: QR fetch failed: %s", session.agent, exc)
             raise ToolError(
                 f"the login QR could not be fetched ({exc}); "
                 f"call `wechat_login` again in a moment."
             ) from exc
+        # **The fetch is the race window**, because the replaced watch polls
+        # through it.  A token here is the login this call was asked to start,
+        # already made; resetting the state to `waiting` below would hide it
+        # behind a code nobody has to scan.
+        if self._scan_landed_during_fetch(session):
+            return self._connected_login()
         qrcode = str(data.get("qrcode") or "")
         if not qrcode:
             session.qr_state = ""
@@ -1318,7 +1360,7 @@ class Wechat:
         token: str,
         base_url: str,
     ) -> None:
-        """The scan worked: adopt the token, save it, and start watching."""
+        """The scan worked: adopt the token, start watching, and save it."""
         owner = str(status.get("ilink_user_id") or "")
         await session.client.start(
             token,
@@ -1330,14 +1372,32 @@ class Wechat:
             session.client.last_contact = {"from_id": owner, "context_token": ""}
         session.client.clear_session_faults()
         saved = session.client.get_session_dict()
-        save_session(session.agent, saved)
         session.saved_at = float(saved["saved_at"])
         session.persisted = ""
         session.heard_from = False
         # The note a failed restore left is stale the moment a login works.
         session.restore_note = ""
         session.qr_state = "confirmed"
+        # **The loop starts whether or not the file lands.**  The token is
+        # already the client's, so a save that raised here used to leave a
+        # login nothing polls: `ready` short-circuits on `is_logged_in`, no
+        # later call starts the loop, and `status` answered `connected` with
+        # `polling` false and an empty error — a zombie nobody could see the
+        # cause of.  The file is the login's record for the *next* start, not
+        # a condition of this one; `_persist` writes it again on the next
+        # cursor move (SDD Appendix C).
         self.watch(session)
+        try:
+            save_session(session.agent, saved)
+        except OSError as exc:
+            logger.warning(
+                "wechat %s: the login could not be saved to %s: %s — it is "
+                "live in this process and the next cursor write saves it "
+                "again; a restart before the file lands needs a new scan",
+                session.agent,
+                session_path(session.agent),
+                exc,
+            )
         logger.info("wechat %s: logged in", session.agent)
 
     # ── The tools ────────────────────────────────────────────────────────
@@ -1369,6 +1429,20 @@ class Wechat:
         that knows a refusal is a `ToolError` rather than an answer.
         """
         return unaddressed("WeChat login to act on", "the login")
+
+    def caller(self, ctx: Context) -> str:
+        """The agent a model's call is on behalf of — or the refusal.
+
+        **One guard for the four tools**, because they are one rule: a shared
+        process cannot guess whose login a call means, so a call that names no
+        conversation is refused rather than answered about somebody else's.
+        The four bodies each spelled the read-and-raise out, which is four
+        chances for one of them to answer differently.
+        """
+        agent = self.who(ctx)
+        if not agent:
+            raise ToolError(self.unaddressed())
+        return agent
 
     async def status(self, session: Session) -> dict[str, Any]:
         """`wechat_check_status`: the link, why it is not working when it is
@@ -1657,9 +1731,7 @@ def build_server(
             which is a machine that cannot draw one), and `seconds_left`, how
             long the code lasts.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.login(plugin.session(agent))
 
     @mcp.tool(name="wechat_check_status", meta=FOR_THE_MODEL)
@@ -1683,9 +1755,7 @@ def build_server(
             `heard_from` is whether they wrote to you — false means nobody has,
             and that peer is the account this login belongs to.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.status(plugin.session(agent))
 
     @mcp.tool(name="wechat_send_message", meta=FOR_THE_MODEL)
@@ -1711,9 +1781,7 @@ def build_server(
         Returns:
             `sent` — true, because a send that did not land raises.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.send(
             plugin.session(agent), peer_wechat_id, context_token, text
         )
@@ -1731,9 +1799,7 @@ def build_server(
             file is gone. When it is not, `login_file` says where it is, so a
             person can remove it by hand.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.logout(plugin.session(agent))
 
     return mcp

@@ -20,6 +20,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
+import re
 import socket
 import sqlite3
 from collections import deque
@@ -39,6 +41,7 @@ from fakes import (
     StubEmbedder,
     a_home,
     keep_the_context,
+    plugin_transports,
     text_turn,
 )
 from fastmcp import Client, Context, FastMCP
@@ -56,10 +59,18 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.host.paths import agents_dir, subagent_dirs, subagent_file
 from slife2.libs.model.base import Chunk, Stream
-from slife2.libs.plugin.audience import conversation_meta
+from slife2.libs.plugin.audience import (
+    FOR_THE_MODEL,
+    TURN,
+    conversation_key,
+    conversation_meta,
+)
+from slife2.libs.plugin.vocabulary import NOTHING_WAITING
 from slife2.libs.store.db import TurnStore
-from slife2.libs.turn import attachments
+from slife2.libs.turn import attachments, plan
 from slife2.libs.turn.context import (
+    LIVE_REPLY,
+    RECALL_REPLY,
     TURN_PREFIX,
     TURN_PROMPT_PREFIX,
     TURN_SUFFIX,
@@ -76,8 +87,9 @@ from slife2.libs.turn.events import (
     TurnFinished,
     decode,
 )
+from slife2.libs.turn.loop import DENIED
 from slife2.libs.turn.messages import StreamChatResult, ToolCall, Usage
-from slife2.libs.turn.tools import INTERRUPTED
+from slife2.libs.turn.tools import CHECK_NEW_INPUT, CONTEXT_REBUILD, INTERRUPTED
 from slife2.libs.turn.watch import (
     Closed,
     Snapshot,
@@ -86,10 +98,11 @@ from slife2.libs.turn.watch import (
 from slife2.libs.turn.watch import (
     decode as decode_watch,
 )
+from slife2.plugins.agent.core import Conversations
 from slife2.plugins.agent.server import (
     ATTACH_IMAGE,
+    SUBAGENT_CREATE,
     SUBAGENT_REMOVE,
-    SUBAGENT_SET,
     Pending,
     ProgressObserver,
     _remove_tree,
@@ -236,12 +249,6 @@ async def send(
         )
 
 
-async def reset(server: FastMCP, *, agent: str = DEFAULT_AGENT, subagent: str = ""):
-    """Forget a conversation."""
-    async with Client(server) as client:
-        return await client.call_tool("reset", {"agent": agent, "subagent": subagent})
-
-
 async def attach(
     server: FastMCP, sources: list[str], *, agent: str = DEFAULT_AGENT
 ) -> dict[str, Any]:
@@ -254,6 +261,28 @@ async def attach(
     async with Client(server) as client:
         result = await client.call_tool(
             ATTACH_IMAGE, {"sources": sources}, meta=conversation_meta(agent)
+        )
+    return result.data
+
+
+async def write_plan(
+    server: FastMCP,
+    items: list[dict[str, str]],
+    *,
+    agent: str = DEFAULT_AGENT,
+    subagent: str = "",
+) -> dict[str, Any]:
+    """Call `plan_write` the way the model does, and answer its JSON.
+
+    The caller's identity rides in `_meta`, exactly as it does when the loop
+    makes the call on the model's behalf; a refusal raises out of `call_tool`,
+    which is what the tests about a refused plan read.
+    """
+    async with Client(server) as client:
+        result = await client.call_tool(
+            plan.PLAN_WRITE,
+            {"items": items},
+            meta=conversation_meta(agent, subagent),
         )
     return result.data
 
@@ -278,6 +307,35 @@ async def wait_for_streams(backend: FakeBackend, wanted: int = 1) -> None:
     )
 
 
+#: The live-id footnote the view writes on the messages the model did not write.
+LIVE_ID_RE = re.compile(r'\s*\[MESSAGE:\{"id": "[^"]+"\}\]')
+
+
+def without_id(content: Any) -> Any:
+    """One message's content with the live-id footnote taken off.
+
+    The view writes it on the person's messages and the tool results
+    (`[MESSAGE:{"id": …}]`) — never on an assistant message, whose content is
+    what the model said — the same way a rebuilt turn carries its `[TURN:]`
+    footnote.  An assertion about what a message *says* strips it: it is the
+    id, not the words.
+    """
+    if isinstance(content, str):
+        return LIVE_ID_RE.sub("", content)
+    if isinstance(content, list):
+        out: list[Any] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = LIVE_ID_RE.sub("", str(part.get("text", "")))
+                if not text.strip():
+                    continue
+                out.append({**part, "text": text})
+            else:
+                out.append(part)
+        return out
+    return content
+
+
 def without_prompt(content: Any) -> Any:
     """One message's content with the per-turn prompt marker taken off the front.
 
@@ -291,17 +349,17 @@ def without_prompt(content: Any) -> Any:
     an attachment has.
     """
     if isinstance(content, str):
-        return strip_marker(content, TURN_PROMPT_PREFIX)
+        return without_id(strip_marker(content, TURN_PROMPT_PREFIX))
     if isinstance(content, list) and content and content[0].get("type") == "text":
         text = str(content[0].get("text", ""))
         stripped = strip_marker(text, TURN_PROMPT_PREFIX)
         if stripped != text:
-            return (
+            return without_id(
                 content[1:]
                 if not stripped
                 else [{**content[0], "text": stripped}, *content[1:]]
             )
-    return content
+    return without_id(content)
 
 
 def without_footnote(content: Any) -> Any:
@@ -348,8 +406,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
 
     An id a server mints is an id a caller has to keep, and keeping it is where
     every lifetime problem starts.  A conversation is started by the first
-    message that names it, so sending *is* opening — and what is left is one verb
-    and one way to start over.
+    message that names it, so sending *is* opening — and what is left is one
+    verb.
 
     `_check_new_input` is not a verb a caller has any use for: it is the name a
     message that arrives mid-turn is delivered under, and it is declared here
@@ -385,6 +443,8 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
     # business — this is about which names it serves, and what they are.
     assert sorted(t.name for t in tools) == [
         "_check_new_input",
+        "_context_rebuild",
+        "_turn_compact",
         "answer_approval",
         "attach_image",
         "cancel_async",
@@ -394,14 +454,21 @@ async def test_the_server_exposes_its_own_tools(context, hub) -> None:
         "model_remove",
         "model_set",
         "model_switch",
-        "reset",
+        "plan_write",
         "send_message",
+        "subagent_create",
         "subagent_remove",
-        "subagent_set",
         "subagents",
         "transcript",
         "watch",
     ]
+    # **The model's own call takes the decision's schema.**  The rebuild and
+    # the compaction are tools the model may call with a selection, and the
+    # automatic decision answers to the same `parameters`; one shape, both
+    # paths.
+    by_name = {tool.name: tool for tool in tools}
+    assert by_name["_context_rebuild"].input_schema == RECALL_REPLY
+    assert by_name["_turn_compact"].input_schema == LIVE_REPLY
 
 
 @pytest.mark.asyncio
@@ -486,7 +553,7 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
     everything" is the only thing that can be said about them.
 
     A rebuild that decides to keep everything rebuilds nothing at all, and the
-    fixture's discriminator answers `{}` — which *is* that case — so
+    fixture's decision model answers `{}` — which *is* that case — so
     `messages_from_turns` is never reached and the annotation is the only thing
     that can be putting a footnote here.  That is what makes this a test of the
     annotation rather than of the rebuild's renderer.
@@ -538,17 +605,19 @@ async def test_a_turn_in_memory_carries_its_own_footnote(context, hub) -> None:
 
 
 @pytest.mark.asyncio
-async def test_each_turn_opens_with_its_own_clock_and_context_figure(
-    context, hub
-) -> None:
+async def test_each_turn_opens_with_its_own_clock_and_plan(context, hub) -> None:
     """**The prompt marker is for the turn running, and the row never sees it.**
 
-    `[TURN-PROMPT:{…}]` carries the clock and the status bar's context figure.
-    It is added after the recall and removed before the save, so the first call
-    sees it on the current message, the next call sees the first turn as the row
-    holds it — words and the `[TURN:]` footnote, no prompt marker — and the
-    stored rows are the person's words only.  That is also what keeps it out of
-    search, recall and a later rebuild.
+    `[TURN-PROMPT:{…}]` carries the clock and the plan.  It is added before the
+    turn and removed before the save, so the first call sees it on the current
+    message, the next call sees the first turn as the row holds it — words and
+    the `[TURN:]` footnote, no prompt marker — and the stored rows are the
+    person's words only.  That is also what keeps it out of search, recall and a
+    later rebuild.
+
+    **No context figure**: the last measured call is the previous turn's, and
+    the rebuild changes the list before this turn's first call.  The turn's own
+    estimate is `_context_rebuild`'s report.
     """
     backend = FakeBackend(
         ScriptedTurn(
@@ -582,8 +651,8 @@ async def test_each_turn_opens_with_its_own_clock_and_context_figure(
     end = first.index("] ")
     facts = json.loads(first[len(TURN_PROMPT_PREFIX) : end])
     assert datetime.fromisoformat(facts["now"])  # a real clock reading
-    assert facts["token-usage"] == "0 (0.0%)", "no turn had run before this one"
-    assert first[end + 2 :] == "one"
+    assert "token-usage" not in facts, "the stale pre-rebuild figure is gone"
+    assert without_id(first[end + 2 :]) == "one"
 
     previous, current = as_sent[1]
     assert TURN_PROMPT_PREFIX not in previous
@@ -591,8 +660,8 @@ async def test_each_turn_opens_with_its_own_clock_and_context_figure(
     assert current.startswith(TURN_PROMPT_PREFIX)
     end = current.index("] ")
     second = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
-    assert second["token-usage"] == "140,127 (14.0%)", "the status bar's figure"
-    assert current[end + 2 :] == "two"
+    assert "token-usage" not in second
+    assert without_id(current[end + 2 :]) == "two"
 
     # ...and the record holds no marker.
     async with Client(server) as client:
@@ -609,7 +678,7 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
 
     A subagent owns its conversation, and its turns are written to its own
     store — so the newest turn in its live list has to be as addressable as its
-    maker's.  Without the footnote the discriminator cannot name the turn it was
+    maker's.  Without the footnote the decision cannot name the turn it was
     just given, and a keep-list silently drops it.  The second half of the key
     is the half that used to decide this; the annotation must not read it.
     """
@@ -640,6 +709,7 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     server = build_server(base, context_client=context, hub_client=hub, backend=backend)
     inbound = f"{LOCAL_AGENT.channel}:{DEFAULT_AGENT}"
 
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher", channel=inbound)
     await send(server, "two", subagent="researcher", channel=inbound)
 
@@ -656,6 +726,99 @@ async def test_a_subagents_turn_in_memory_carries_its_own_footnote(
     assert footnote["channel"] == inbound
     assert footnote["begin"], "a turn that cannot say when it happened"
     assert as_sent[1][2] == "user:two", "and the newest turn has none yet"
+
+
+PLAN_ITEMS = [
+    {"text": "read the config", "status": plan.DONE},
+    {"text": "write the tool", "status": plan.ACTIVE},
+    {"text": "run the tests", "status": plan.PENDING},
+]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_is_replayed_at_the_start_of_every_turn_and_never_stored(
+    context, hub
+) -> None:
+    """**The plan is the half of the prompt a rebuild cannot decide.**
+
+    It rides `[TURN-PROMPT:{…}]`, which is added after the recall and stripped
+    before the save — so the model reads it on every turn, the row keeps the
+    person's words only, and nothing about it depends on whether the turn that
+    wrote it is still in the context.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="first")),
+        ScriptedTurn(result=StreamChatResult(text="second")),
+    )
+    # Snapshotted at call time, because the marker is removed before the save:
+    # a later read of `backend.calls` sees the cleaned message.
+    as_sent: list[list[str]] = []
+    inner = backend.stream
+
+    def stream(messages, tools):
+        as_sent.append([str(m.content) for m in messages if m.role == "user"])
+        return inner(messages, tools)
+
+    backend.stream = stream  # type: ignore[method-assign]
+    server = build_server(
+        default_config(), context_client=context, hub_client=hub, backend=backend
+    )
+
+    written = await write_plan(server, PLAN_ITEMS)
+    assert written["done"] == 1
+    assert written["total"] == len(PLAN_ITEMS)
+
+    await send(server, "one")
+    await send(server, "two")
+
+    for call, words in ((as_sent[0], "one"), (as_sent[1], "two")):
+        current = call[-1]
+        end = current.index("] ")
+        facts = json.loads(current[len(TURN_PROMPT_PREFIX) : end])
+        assert facts["plan"] == PLAN_ITEMS
+        assert without_id(current[end + 2 :]) == words
+    assert TURN_PROMPT_PREFIX not in as_sent[1][0], "the first turn's lead is gone"
+
+    # The stored row is the person's words; the plan is the conversation's own
+    # file, answered beside the turns the window opens with.
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    assert answer.data["plan"] == PLAN_ITEMS
+    assert answer.data["turns"][0]["messages"][0]["content"] == "one"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_plan_leaves_the_previous_one_standing(context, hub) -> None:
+    """A tool that says no must not change the file it was asked to replace."""
+    server = build_server(
+        default_config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(),
+    )
+    await write_plan(server, PLAN_ITEMS)
+
+    with pytest.raises(ToolError, match="status"):
+        await write_plan(server, [{"text": "one", "status": "doing"}])
+
+    async with Client(server) as client:
+        answer = await client.call_tool("transcript", {"agent": DEFAULT_AGENT})
+    assert answer.data["plan"] == PLAN_ITEMS
+
+
+@pytest.mark.asyncio
+async def test_a_plan_without_a_conversation_is_refused(context, hub) -> None:
+    """The shared process cannot guess whose plan a call means."""
+    server = build_server(
+        default_config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(),
+    )
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="did not say"):
+            await client.call_tool(plan.PLAN_WRITE, {"items": []})
 
 
 @pytest.mark.asyncio
@@ -704,10 +867,10 @@ async def test_a_window_that_has_never_run_reads_nothing(context, hub) -> None:
 class UnreadableStore:
     """A context plugin answering with the shapes this build refuses.
 
-    `_adopt`, `rebuild_into` and `transcript` read the store's answers as things
-    they must be able to trust, and a store this build started never returns one
-    it cannot read — so a test of the refusals hands in the shape a *daemon from
-    another build* does, by name.
+    The turn runtime's `restore`/`rebuild` and this server's `transcript` read
+    the store's answers as things they must be able to trust, and a store this
+    build started never returns one it cannot read — so a test of the refusals
+    hands in the shape a *daemon from another build* does, by name.
     """
 
     def __init__(self, **answers: dict[str, Any]) -> None:
@@ -715,35 +878,6 @@ class UnreadableStore:
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         return SimpleNamespace(data=self.answers[name])
-
-
-class ParkedRestore:
-    """The real context store, with `restore` answering only when told to.
-
-    The window `adopt_maker` walks into is one store round trip wide, and a test
-    that hoped to land inside it would pass for the wrong reason whichever way it
-    went — so the round trip is held open instead, and *when* each of the two
-    restores lands is a fact.  `entered` counts them, `arrived` is set by the
-    first, and each waits on its own event of `release`.
-
-    Real underneath rather than a stub: what is under test is which loop's
-    `restore` gets to replace which list, and a store answering a made-up list
-    would say nothing about that.
-    """
-
-    def __init__(self, inner: Client) -> None:
-        self.inner = inner
-        self.entered = 0
-        self.arrived = asyncio.Event()
-        self.release = [asyncio.Event(), asyncio.Event()]
-
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        if name == "restore":
-            mine = self.entered
-            self.entered += 1
-            self.arrived.set()
-            await self.release[mine].wait()
-        return await self.inner.call_tool(name, arguments)
 
 
 @pytest.mark.asyncio
@@ -765,30 +899,6 @@ async def test_a_store_answer_without_turn_ids_is_refused_rather_than_adopted(
     )
 
     with pytest.raises(ToolError, match="turn-id list"):
-        await send(server, "hi", agent="jack")
-
-
-@pytest.mark.asyncio
-async def test_a_rebuild_that_carried_no_counts_is_refused_rather_than_drawn_as_zero(
-    hub,
-) -> None:
-    """`kept`/`recalled` were read as `int(payload.get(...) or 0)`.
-
-    A reply that replaced the context list but omitted the two counts drew
-    `[kept 0, recalled 0]` — a note reporting a decision nobody made, since the
-    discriminator *was* paid and did decide.  The answer is refused the way a
-    shape `_adopt` cannot read is, naming the payload (SDD Appendix C: a
-    failure is not a verdict).
-    """
-    store = UnreadableStore(
-        restore={"messages": [], "turn_ids": [], "turns": []},
-        rebuild={"messages": [], "turn_ids": []},
-    )
-    server = build_server(
-        config(), context_client=store, hub_client=hub, backend=answering("x")
-    )
-
-    with pytest.raises(ToolError, match="counts"):
         await send(server, "hi", agent="jack")
 
 
@@ -848,7 +958,7 @@ async def test_a_turn_leaves_one_line_saying_what_it_cost(
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=tool_then_answer()
     )
-    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
         await send(server, "what is 6*7?")
 
     lines = [
@@ -863,6 +973,38 @@ async def test_a_turn_leaves_one_line_saying_what_it_cost(
     assert "stop=stop" in line
     assert "iterations=2" in line
     assert "elapsed=" in line
+
+
+@pytest.mark.asyncio
+async def test_every_turn_has_its_own_token(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The value that joins one turn's lines across processes.**
+
+    The stored id is a rowid: it exists only once the row lands, and a cancelled
+    turn often never gets one.  The token is minted before the turn's first step
+    and travels in every hop's `_meta`, so the context store's and the model
+    backend's lines can be read as this turn's.  Two turns of one conversation
+    therefore must not share a token.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=FakeBackend(text_turn("one"), text_turn("two")),
+    )
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
+        await send(server, "one")
+        await send(server, "two")
+
+    tokens = [
+        record_.getMessage().split("token=")[1].split()[0]
+        for record_ in caplog.records
+        if record_.getMessage().startswith("turn_done ")
+    ]
+    assert len(tokens) == 2, caplog.text
+    assert tokens[0] != tokens[1], "two turns, two tokens"
+    assert all(len(token) == 32 for token in tokens), tokens
 
 
 @pytest.mark.asyncio
@@ -1009,6 +1151,7 @@ async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
     )
 
     await send(server, "one", agent="jack")
+    await create_subagent(server, "helper", agent="jack")
     await send(server, "two", agent="jack", subagent="helper")
 
     # The worker was not told what the agent's own conversation said...
@@ -1023,31 +1166,6 @@ async def test_a_subagent_is_a_conversation_of_its_own(context, hub) -> None:
 
 
 # --- an unknown loop ---------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_reset_starts_the_conversation_over(context, hub) -> None:
-    """The one lifecycle verb left, and it is the caller's to ask for.
-
-    Idempotent, because a caller that had nothing to forget is already in the
-    state it asked for.
-    """
-    backend = FakeBackend(
-        ScriptedTurn(result=StreamChatResult(text="first")),
-        ScriptedTurn(result=StreamChatResult(text="second")),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    assert (await reset(server)).data["reset"]
-    # Nothing to forget the second time, and not an error.
-    assert not (await reset(server)).data["reset"]
-
-    await send(server, "two")
-    # The new conversation opened with its system prompt and nothing else.
-    assert prompts_seen(backend, 1) == ["user:two"]
 
 
 @pytest.mark.asyncio
@@ -1146,7 +1264,11 @@ async def test_a_message_sent_to_a_busy_loop_waits_and_then_runs(context, hub) -
 
 
 def wired(
-    backend: FakeBackend, context: Client, config: Any = None
+    backend: FakeBackend,
+    context: Client,
+    config: Any = None,
+    *,
+    cabinet_client: Client | None = None,
 ) -> tuple[Client, FastMCP]:
     """A hub and an agent that can reach each other, which takes a holder.
 
@@ -1181,6 +1303,7 @@ def wired(
         config,
         context_client=context,
         hub_client=hub_client,
+        cabinet_client=cabinet_client,
         backend=backend,
     )
     holder["agent"] = server
@@ -1246,6 +1369,49 @@ async def test_a_message_sent_to_a_busy_loop_is_folded_into_the_running_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_call_from_another_turn_cannot_use_this_turns_live_loop(
+    context,
+) -> None:
+    """**The conversation id does not name a turn; the token does.**
+
+    An agent task stands in for the same agent or subagent, so its calls carry
+    the same `(agent, subagent)` — but its list is its own, in its own process,
+    and the agent server's live loop is the *other* turn on that id.  A call
+    that names a different turn is answered by the tool's honest no: the cut-in
+    has nothing to hand over, and the image tool attaches nothing.  The message
+    queued for the running turn is still folded by the turn it belongs to, which
+    is what proves the foreign call did not take it.
+    """
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.2  # timeouts: the value this test is built around, not a budget
+        ),
+        text_turn("It is 42, and yes to that too."),
+    )
+    hub_client, server = wired(backend, context)
+    foreign = {**conversation_meta(DEFAULT_AGENT), TURN: "a-task's-own-turn"}
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        await asyncio.sleep(0.05)
+        async with Client(server) as other:
+            nothing = await other.call_tool(CHECK_NEW_INPUT, {}, meta=foreign)
+            with pytest.raises(ToolError, match="not this conversation's running one"):
+                await other.call_tool(
+                    ATTACH_IMAGE,
+                    {"sources": ["data:image/png;base64,AAAA"]},
+                    meta=foreign,
+                )
+        one, two = await asyncio.gather(first, second)
+
+    assert nothing.data == NOTHING_WAITING
+    assert two.data["injected"] is True, "the running turn still folded its own message"
+    assert one.data["text"] == two.data["text"]
+
+
+@pytest.mark.asyncio
 async def test_a_cut_in_says_where_it_came_from_and_which_submission_it_drew(
     context,
 ) -> None:
@@ -1291,29 +1457,123 @@ async def test_a_cut_in_says_where_it_came_from_and_which_submission_it_drew(
             await asyncio.sleep(0.05)
             await asyncio.gather(first, second)
 
-    cut_ins = [event for event in seen if isinstance(event, MessageCutIn)]
+    cut_ins = [
+        event for event in seen if isinstance(event, MessageCutIn) and event.channel
+    ]
     assert cut_ins == [
         MessageCutIn(text="two", channel="wechat", receipt="window-7"),
     ]
 
 
 @pytest.mark.asyncio
-async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
+async def test_a_cancelled_turn_still_delivered_the_cut_in_it_folded(context) -> None:
+    """**A recorded cut-in is delivered even when its absorbing turn was cancelled.**
+
+    The turn folds "two" in at its boundary — the pair completes and goes into
+    the repair — and is cancelled in the next stream.  Its `result` is `None`
+    because it produced no answer, but the pair is in the row the cancelled turn
+    still records.  A parked caller that ran its own turn on the empty `result`
+    would put "two" in the conversation twice and have the model answer it
+    twice; the reply therefore says it was injected, with empty text: delivered,
+    not answered.
+    """
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn(
+            "never finished",
+            delay=0.4,  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("third answer"),
+    )
+    hub_client, server = wired(backend, context)
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(send(server, "two"))
+        await asyncio.sleep(0.05)
+        # The second stream is the one after the fold: the cut-in pair is in
+        # the turn when the interruption lands.
+        await wait_for_streams(backend, 2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        answer = await second
+        # And the conversation the next turn runs on holds it exactly once.
+        await send(server, "three")
+
+    assert answer.data["injected"] is True
+    assert answer.data["text"] == "", "there was no answer to repeat"
+    assert prompts_seen(backend, 2).count("tool:two") == 1, (
+        "the cut-in appears in the conversation twice"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cut_in_whose_pair_never_landed_runs_its_own_turn(context) -> None:
+    """**A take is not a delivery.**  The pair is written after the fit.
+
+    The message is popped and marked taken at the tool call, and the loop then
+    awaits `_fit` — here the cabinet writing the dump for a large paste — before
+    it appends the assistant/tool pair.  A turn cancelled in that window leaves
+    the message in no record at all, so its parked sender must run its own turn;
+    answering it `injected` with empty text would tell it the conversation holds
+    words it never got.  `delivered` is therefore set by the commit
+    (`folded_message`), not by the take.
+    """
+    stub = FastMCP("cabinet-stub")
+    entered = asyncio.Event()
+
+    @stub.tool
+    async def dump_save(call: str, output: str, tool: str) -> dict[str, Any]:
+        entered.set()
+        await asyncio.Event().wait()  # the fit goes on until the turn is cancelled
+        return {"path": "dumps/never.md", "size": len(output)}
+
+    backend = FakeBackend(
+        asks_for_a_tool(
+            delay=0.1  # timeouts: the value this test is built around, not a budget
+        ),  # timeouts: the value this test is built around, not a budget
+        text_turn("second answer"),
+    )
+    async with Client(stub) as cabinet_stub:
+        hub_client, server = wired(backend, context, cabinet_client=cabinet_stub)
+        async with hub_client:
+            first = asyncio.create_task(send(server, "one"))
+            await wait_for_streams(backend)
+            # Over `tool_result.bytes`, so the fit is the cabinet's call.
+            second = asyncio.create_task(send(server, "two " * 20_000))
+            await asyncio.wait_for(entered.wait(), 5)
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            answer = await second
+
+    assert answer.data["injected"] is False, (
+        "a take whose pair never landed is not delivery"
+    )
+    assert answer.data["text"] == "second answer"
+    prompts = prompts_seen(backend, 1)
+    assert any(one.startswith("user:two two") for one in prompts), prompts
+    assert not any(one.startswith("tool:") and "two two" in one for one in prompts), (
+        "the swallowed cut-in was written as a pair too"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_failed_still_delivered_the_cut_in_it_folded(
     context,
 ) -> None:
-    """A turn that produced no answer answered for nothing it was handed.
+    """A failure records the fold too, so it is delivery and not a turn to run.
 
     The absorbing turn raises here — a provider 500 on its second call — so
-    there is no repair (only a cancellation truncates) and the pair stays in that
-    turn's record.  What must not follow is the folded message being counted as
-    answered: its `result` is written only by a turn that produced one, so its
-    sender runs its own turn and gets its own answer.
-
-    This is the case that decides how the handoff is asked.  A design that
-    inferred "it was absorbed" from the message having left the queue would see
-    the empty `result` and answer this caller out of whatever the last turn
-    happened to leave behind — a wrong answer rather than a missing one, and
-    nothing downstream could tell.
+    there is no repair, but the pair is already complete and the failed turn's
+    row keeps it.  The sender is told it was injected with no text; running its
+    own turn because `result` is empty would write the same prompt into the
+    conversation a second time.  Only a record that was *refused*, and whose
+    messages were rolled back, leaves the message owing itself a turn.
     """
 
     class FailsOnTheSecondCall(FakeBackend):
@@ -1342,8 +1602,8 @@ async def test_a_turn_that_failed_leaves_the_folded_message_its_own_turn(
             await first
         answer = await second
 
-    assert answer.data["injected"] is False
-    assert answer.data["text"] == "second answer"
+    assert answer.data["injected"] is True
+    assert answer.data["text"] == ""
 
 
 @pytest.mark.asyncio
@@ -1460,7 +1720,7 @@ async def test_an_interrupted_turn_keeps_the_tool_batch_it_finished(
 
     sent = [m for m in backend.calls[2][0] if m.role != "system"]
     assert [m.role for m in sent] == ["user", "assistant", "tool", "user"]
-    assert sent[1].content == "checking"
+    assert without_id(sent[1].content) == "checking"
     assert sent[1].tool_calls[0].id == "c1"
     assert sent[1].tool_calls[0].name == "skill_list"
     assert sent[2].tool_call_id == "c1"
@@ -1550,7 +1810,7 @@ async def test_a_cancelled_turn_records_the_calls_that_completed(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    with caplog.at_level("INFO", logger="slife2.plugins.agent.server"):
+    with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
         interrupted = asyncio.create_task(send(server, "one"))
         # The first call answered and its tool ran; the cut lands in the second
         # call's stream.
@@ -1633,6 +1893,53 @@ async def test_a_turn_whose_model_call_failed_is_still_recorded(
     assert turn_failed_error(stored[1]["content"]) == (
         "RuntimeError: the provider answered 500"
     )
+
+
+@pytest.mark.asyncio(loop_scope="function")
+async def test_a_turn_whose_model_answered_nothing_is_a_failed_turn(
+    hub, tmp_path, monkeypatch
+) -> None:
+    """**An empty answer is a failure, not a verdict.**
+
+    The model call returned a *readable* result with no text and no tool call —
+    the shape a provider that legitimately stops without saying anything
+    produces, and the shape a call that produced nothing has too.  The wire
+    check cannot tell them apart, and the turn's product is its answer, so the
+    loop fails the turn (SDD §5.1).  What this pins is the whole ending: the
+    caller is told, the conversation keeps the user's message, and the row ends
+    with the harness's `[TURN-FAILED:…]` note rather than an empty assistant
+    message that later requests would carry and providers would reject.
+    """
+    from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
+    from slife2.plugins.context.server import build_server as build_context
+
+    monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
+
+    backend = FakeBackend(
+        ScriptedTurn(result=StreamChatResult(text="", stop_reason="stop"))
+    )
+    async with Client(
+        build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
+    ) as context_client:
+        server = build_server(
+            config(), backend=backend, context_client=context_client, hub_client=hub
+        )
+        with pytest.raises(Exception, match="no text and no tool call"):
+            await send(server, "one")
+        # The write is detached so that a store which is also gone cannot
+        # replace the failure the caller needs to see; give it a moment.
+        await asyncio.sleep(0.5)
+
+    rows = (
+        sqlite3.connect(agent_dir(DEFAULT_AGENT) / "turns.db")
+        .execute("SELECT messages FROM turn ORDER BY rowid")
+        .fetchall()
+    )
+    assert len(rows) == 1, "the failed turn was not recorded"
+    stored = json.loads(rows[0][0])
+    assert [m["role"] for m in stored] == ["user", "assistant"]
+    assert stored[0]["content"] == "one"
+    assert "no text and no tool call" in (turn_failed_error(stored[1]["content"]) or "")
 
 
 DEAD_PLUGIN = "a plugin is not answering — peer-agent: MCPError: Connection closed"
@@ -1791,7 +2098,9 @@ async def test_a_turn_that_could_not_go_on_ends_with_the_harness_saying_so(
     seen = [m for m in backend.calls[0][0] if m.role != "system"]
     assert [m.role for m in seen] == ["user", "assistant", "user"]
     assert without_footnote(seen[0].content) == "one"
-    assert turn_failed_error(seen[1].content) == f"RuntimeError: {DEAD_PLUGIN}"
+    assert (
+        turn_failed_error(without_id(seen[1].content)) == f"RuntimeError: {DEAD_PLUGIN}"
+    )
 
 
 @pytest.mark.asyncio(loop_scope="function")
@@ -1818,9 +2127,9 @@ async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
             hub_client=FlakyHub(hub, DEAD_PLUGIN),
             backend=FakeBackend(),
         )
+        await create_subagent(server, "worker")
         with pytest.raises(Exception, match="not answering"):
             await send(server, "one", subagent="worker")
-
     rows = (
         sqlite3.connect(agent_dir(DEFAULT_AGENT, "worker") / "turns.db")
         .execute("SELECT messages FROM turn ORDER BY rowid")
@@ -1831,36 +2140,6 @@ async def test_a_subagents_failed_turn_is_recorded_in_its_own_store(
     assert [m["role"] for m in stored] == ["user", "assistant"]
     assert stored[0]["content"] == "one"
     assert turn_failed_error(stored[1]["content"]) == f"RuntimeError: {DEAD_PLUGIN}"
-
-
-@pytest.mark.asyncio(loop_scope="function")
-async def test_a_forks_failed_turn_is_kept_and_written_nowhere(context, hub) -> None:
-    """**A fork has no store, and that is not the same as having no conversation.**
-
-    Its turns are not recorded — a fork writes nothing down — but the message it
-    was given stays in the list its next turn runs on, and the failure reaches
-    the caller exactly as it does for a conversation with a log.  The store is
-    what a fork does not have, not the conversation; the error path is the same
-    on both sides of that line.
-    """
-    backend = FakeBackend(text_turn("the fork's"))
-    server = build_server(
-        config(),
-        context_client=context,
-        hub_client=FlakyHub(hub, DEAD_PLUGIN, times=1),
-        backend=backend,
-    )
-
-    await set_subagent(server, "researcher", fork=True)
-    with pytest.raises(Exception, match="not answering"):
-        await send(server, "one", subagent="researcher")
-    await send(server, "two", subagent="researcher")
-
-    assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
-    seen = [m for m in backend.calls[0][0] if m.role != "system"]
-    assert [m.role for m in seen] == ["user", "assistant", "user"]
-    assert without_footnote(seen[0].content) == "one"
-    assert turn_failed_error(seen[1].content) == f"RuntimeError: {DEAD_PLUGIN}"
 
 
 @pytest.mark.asyncio
@@ -1906,7 +2185,9 @@ async def test_a_turn_that_follows_an_unrecorded_one_keeps_it_in_the_context(
     backend = RefusesOnce(text_turn("second answer"), text_turn("third answer"))
     answers = iter(["{}", "{}", '{"recall": {"query": "one"}}'])
 
-    async def ask(agent, subagent, model, messages, prompt) -> str:
+    async def ask(
+        agent, subagent, model, messages, *, usage="", previous="", repair=""
+    ) -> str:
         return next(answers)
 
     async with Client(
@@ -1939,7 +2220,7 @@ async def test_a_failed_turn_is_annotated_when_the_next_turn_settles_its_id(
     and `annotate_turn` cannot run there.  The next turn waits for the write
     (`settle_record`) and is the first moment the id exists — so that is where
     the footnote belongs too.  An id that joins `turn_ids` without one is a turn
-    the discriminator can never name in a keep-list, which is the whole reason
+    the decision can never name in a keep-list, which is the whole reason
     the footnote exists.
 
     The spelling is checked against the row, not merely for being present: the
@@ -2030,7 +2311,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
     face of the same bug is `covered`/`turn_ids` left out of step with the list.
     """
     from slife2.libs.host.paths import DATA_ENV_VAR, agent_dir
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
     from slife2.plugins.context.server import build_server as build_context
 
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
@@ -2053,7 +2334,7 @@ async def test_a_cancelled_trim_keeps_the_completed_turn_it_follows(
             await release.wait()
         return {"unloaded": [], "text": ""}
 
-    monkeypatch.setattr(server_module, "unload_tools", slow_unload)
+    monkeypatch.setattr(runtime_module, "unload_tools", slow_unload)
 
     async with Client(
         build_context(config(), embedder=StubEmbedder(), ask=keep_the_context)
@@ -2122,6 +2403,33 @@ def test_two_identical_prompts_are_two_places_in_the_queue() -> None:
     assert list(queue) == [second], "the waiting caller lost its place"
 
 
+def test_a_folded_reply_with_no_answer_has_the_same_key_set() -> None:
+    """`_reply` promises one key set; the injected no-answer case must obey it.
+
+    The empty case was a second dict literal, so a key added to `_reply` left a
+    hole in the one reply a caller reads after a cancelled absorbing turn.
+    """
+    from slife2.libs.turn.loop import TurnResult
+    from slife2.plugins.agent import core as core_module
+
+    item = Pending(prompt="folded", images=[], channel="tui")
+    folded = core_module._injected_reply(item)
+    answered = core_module._reply(
+        TurnResult(
+            text="an answer",
+            usage=Usage(),
+            iterations=1,
+            stop_reason="stop",
+            last_usage=Usage(),
+        ),
+        model="local/small",
+        injected=False,
+        refused=[],
+    )
+
+    assert folded.keys() == answered.keys()
+
+
 @pytest.mark.asyncio(loop_scope="function")
 async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -> None:
     """A client the lifespan closed is also a client it forgot.
@@ -2135,7 +2443,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
     """
     from slife2.libs.host.config import CONTEXT_SERVER_NAME, TOOLHUB_SERVER_NAME
     from slife2.libs.host.paths import DATA_ENV_VAR
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
     from slife2.plugins.context.server import build_server as build_context
     from slife2.plugins.toolhub.server import build_server as build_hub
     from tests.fakes import plugin_transports
@@ -2164,7 +2472,7 @@ async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -
         await client.__aenter__()
         return client
 
-    monkeypatch.setattr(server_module, "open_server", open_ours)
+    monkeypatch.setattr(runtime_module, "open_server", open_ours)
     server = build_server(
         config(), backend=FakeBackend(text_turn("the answer"), text_turn("the answer"))
     )
@@ -2467,15 +2775,15 @@ async def test_a_trim_answer_naming_no_names_is_refused_rather_than_read_as_none
     """
     import logging
 
-    from slife2.plugins.agent import server as server_module
+    from slife2.libs.turn import runtime as runtime_module
 
     async def no_names(_client: Any) -> dict[str, Any]:
         # Every key but the one the trim acts on: the same silence an empty list
         # makes, from an answer that says nothing at all.
         return {"refused": [], "not_loaded": [], "text": "the list is fine"}
 
-    monkeypatch.setattr(server_module, "unload_tools", no_names)
-    caplog.set_level(logging.WARNING, logger="slife2.plugins.agent.server")
+    monkeypatch.setattr(runtime_module, "unload_tools", no_names)
+    caplog.set_level(logging.WARNING, logger="slife2.plugins.agent.core")
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=answering("done")
     )
@@ -2506,7 +2814,7 @@ async def test_opening_a_loop_fails_when_the_context_store_is_gone(
     `no_live_stack` guard refuses every dial a test did not inject, and a test
     that refuses its own subject asserts a sentence the product never wrote.
     """
-    real_dialer("slife2.plugins.agent.server")
+    real_dialer("slife2.libs.turn.runtime")
     base = default_config()
     cfg = replace(
         base,
@@ -2533,7 +2841,7 @@ async def test_images_reach_the_model_as_content_parts(context, hub, cabinet) ->
             "deepseek": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={
                     "deepseek-flash": ModelSettings(
                         model="deepseek-flash", input=("text", "image")
@@ -2587,7 +2895,7 @@ async def test_images_are_refused_by_a_model_that_cannot_read_them(
             "deepseek": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={"deepseek-flash": ModelSettings(model="deepseek-flash")},
             )
         },
@@ -2873,6 +3181,7 @@ async def test_an_interrupted_subagent_image_turn_claims_its_id(
         backend=backend,
     )
 
+    await create_subagent(server, "researcher")
     interrupted = asyncio.create_task(
         send(
             server,
@@ -2925,19 +3234,25 @@ def refusing_store() -> tuple[FastMCP, dict[str, Any]]:
         agent: str,
         messages: list[dict],
         turn_ids: list[int],
-        prompt: str,
         model: str,
         carried: int = 0,
         subagent: str = "",
-        expected: list[int] | None = None,
+        publish: bool = True,
+        context_tokens: int = 0,
+        prompt_window: int = 0,
+        selection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         return {
             "messages": messages,
             "turn_ids": turn_ids,
             "changed": False,
             "kept": len(turn_ids),
+            "in_hand": len(turn_ids),
+            "outside": 0,
             "recalled": 0,
+            "fitted": 0,
             "rerank": "",
+            "decision": "",
         }
 
     state = {"refuse_next": True, "next_id": 1}
@@ -2985,12 +3300,47 @@ async def test_a_refused_record_fails_the_turn_and_rolls_it_back(context, hub) -
             server = build_server(
                 config(), context_client=store, hub_client=hub, backend=backend
             )
+            if subagent:
+                await create_subagent(server, subagent)
             with pytest.raises(Exception, match="refuses the request"):
                 await send(server, "one", subagent=subagent)
             await send(server, "two", subagent=subagent)
             assert prompts_seen(backend, 1) == ["user:two"], (
                 f"the unrecorded turn was not rolled back for {subagent!r}"
             )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_record_logs_the_turn_as_failed(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The turn's one line must say what the caller is about to be told.**
+
+    The refusal branch raises from the `else` of the try/except that captures a
+    failure, so `failure` stayed `None`: the log said `stop=stop` about a turn
+    whose messages were rolled back and whose caller raised.
+    """
+    stub, _state = refusing_store()
+
+    async with Client(stub) as store:
+        server = build_server(
+            config(),
+            context_client=store,
+            hub_client=hub,
+            backend=FakeBackend(text_turn("first")),
+        )
+        with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
+            with pytest.raises(Exception, match="refuses the request"):
+                await send(server, "one")
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("turn_done ")
+    ]
+    assert len(lines) == 1, caplog.text
+    assert "stop=failed" in lines[0]
+    assert "refuses the request" in lines[0], "and the refusal's own words are there"
 
 
 @pytest.mark.asyncio
@@ -3072,7 +3422,7 @@ async def test_a_model_that_cannot_read_images_is_refused_by_name(context, hub) 
             "deepseek": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={"deepseek-flash": ModelSettings(model="deepseek-flash")},
             )
         },
@@ -3314,7 +3664,7 @@ async def test_a_missing_template_is_refused_at_load(tmp_path) -> None:
         "  local:\n"
         "    api: openai-completions\n"
         "    base_url: https://example.test/v1\n"
-        "    models: [{model: big}]\n"
+        "    models: [{model: big, context_window: 1000}]\n"
         "embeddings:\n"
         "  providers:\n"
         "    local:\n"
@@ -3408,11 +3758,11 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     await send_with_progress(server, "what is 6*7?", on_progress)
 
     kinds = [type(e).__name__ for e in seen]
-    # The context first, and that ordering is the point of the event: what the
-    # turn runs on is decided before the turn says anything, so a display that
-    # learned it last would be showing one turn's context under another turn's
-    # answer.
-    assert kinds[0] == "ContextChosen"
+    # The tool count comes first: it is what the request's list was, and the
+    # turn's rebuild is not in this hub's list (the plain fixture does not
+    # stand an agent server up as its source), so this turn opens no rebuild
+    # pair.  The tests that assert that pair give the hub an agent source.
+    assert kinds[0] == "ToolsCounted"
     assert "ToolsCounted" in kinds
     assert "TextDelta" in kinds
     assert "ToolCallStarted" in kinds
@@ -3433,6 +3783,72 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     finished = seen[-1]
     assert finished.text == "It is 42."  # type: ignore[union-attr]
     assert finished.iterations == 2  # type: ignore[union-attr]
+
+
+def failing_rebuild_agent(reached: list[str]) -> FastMCP:
+    """The agent source's `_context_rebuild`, failing before its body runs.
+
+    The hub's declaration is what makes the auto call; the body is never
+    reached, which is the transport failure the test below is about.
+    """
+    mcp = FastMCP("agent")
+
+    @mcp.tool(name=CONTEXT_REBUILD, meta=FOR_THE_MODEL)
+    async def context_rebuild(
+        ctx: Context,
+        keep: dict[str, Any] | None = None,
+        recall: dict[str, Any] | None = None,
+    ) -> str:
+        reached.append(CONTEXT_REBUILD)
+        raise ToolError("the context server is down")
+
+    return mcp
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_hop_that_fails_is_not_asked_again(context) -> None:
+    """**The turn's automatic rebuild is one attempt, not one per boundary.**
+
+    The flag used to be set by the tool's body, on the far side of the hub hop.
+    A hop that fails never reaches the body, so the next boundary asked again
+    and wrote an error pair per iteration.  This turn makes two model calls;
+    the stub counts the attempts and must see one.
+    """
+    from slife2.plugins.toolhub.server import build_server as build_hub
+
+    reached: list[str] = []
+    base = default_config()
+    hub_server = build_hub(
+        base,
+        transports=plugin_transports(
+            base, {"agent": lambda _settings: failing_rebuild_agent(reached)}
+        ),
+        embedder=StubEmbedder(),
+    )
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="",
+                tool_calls=(
+                    ToolCall(
+                        id="c1",
+                        name="tool_search",
+                        arguments={"sentences": ["anything"]},
+                    ),
+                ),
+                stop_reason="tool_calls",
+            )
+        ),
+        ScriptedTurn(result=StreamChatResult(text="done", stop_reason="stop")),
+    )
+    async with Client(hub_server) as hub_client:
+        server = build_server(
+            config(), context_client=context, hub_client=hub_client, backend=backend
+        )
+        result = await send(server, "one")
+
+    assert result.data["text"] == "done"
+    assert reached == [CONTEXT_REBUILD], f"one attempt for the turn (reached={reached})"
 
 
 @pytest.mark.asyncio
@@ -3503,15 +3919,15 @@ async def test_a_broken_observer_does_not_lose_the_message(
 ) -> None:
     """A UI that throws must not end a turn — the server's own events included.
 
-    `ContextChosen` is reported *before* the turn runs, so an exception from the
-    observer there lands before the prompt has been appended or recorded: it
-    propagates out of `send_message`, the caller is told the turn failed, and the
-    message is gone — nowhere in the conversation and nowhere in the log.  The
-    same observer failing on a `TextDelta` is swallowed by `AgentLoop._emit`,
-    which is the whole reason that seam exists; the two events the *server* raises
-    were the ones not routed through it.
+    The server's own `ToolsCounted` is reported *before* the turn runs, so an
+    exception from the observer there would land before the prompt has been
+    appended or recorded: it would propagate out of `send_message`, the caller
+    would be told the turn failed, and the message would be gone — nowhere in
+    the conversation and nowhere in the log.  `emit` is the seam that swallows
+    it, and the server raises its events through it for exactly this reason;
+    the same observer failing on a `TextDelta` is swallowed one layer down.
     """
-    from slife2.plugins.agent import server as server_module
+    from slife2.plugins.agent import core as core_module
 
     class Broken:
         """A context whose progress stream is closed: every report throws."""
@@ -3521,7 +3937,7 @@ async def test_a_broken_observer_does_not_lose_the_message(
         async def on_event(self, _event: TurnEvent) -> None:
             raise RuntimeError("the progress stream is closed")
 
-    monkeypatch.setattr(server_module, "ProgressObserver", Broken)
+    monkeypatch.setattr(core_module, "ProgressObserver", Broken)
 
     backend = FakeBackend(text_turn("the answer"))
     server = build_server(
@@ -3537,21 +3953,19 @@ async def test_a_broken_observer_does_not_lose_the_message(
 
 
 @pytest.mark.asyncio
-async def test_a_broken_observer_does_not_kill_an_approval_request(
-    context, hub, monkeypatch
+async def test_an_approval_request_that_cannot_be_written_refuses_the_call(
+    context, hub, monkeypatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The other server-side raise: the `_approve` request, from inside the turn.
+    """**A request nobody was told about is a call nobody may wait for.**
 
-    The request is announced to whoever is watching before the turn waits for the
-    answer, and a broken stream throws from that announcement.  Left to
-    propagate it would kill the very turn that is waiting for the answer — a tool
-    call the model is entitled to make, refused because a *display* failed —
-    where the same observer failing on a `TextDelta` is swallowed.  Routed through
-    `AgentLoop._emit`, the request is still registered in `loop.approvals`, so an
-    answer arriving by the ordinary route (`answer_approval`) is taken and the
-    turn runs on.
+    The request is announced to whoever is watching before the turn waits for
+    the answer, and a broken stream throws from that announcement.  Swallowing
+    the throw protected the turn but left it parked on a future no client saw:
+    the approval had no deadline, so that turn never ended.  The emission's
+    answer is read now — a request that could not be written, or one not
+    answered within `deliver.approval`, refuses the call and the turn runs on.
     """
-    from slife2.plugins.agent import server as server_module
+    from slife2.plugins.agent import core as core_module
 
     class Broken:
         def __init__(self, _ctx: Any, **_options: Any) -> None: ...
@@ -3559,7 +3973,8 @@ async def test_a_broken_observer_does_not_kill_an_approval_request(
         async def on_event(self, _event: TurnEvent) -> None:
             raise RuntimeError("the progress stream is closed")
 
-    monkeypatch.setattr(server_module, "ProgressObserver", Broken)
+    monkeypatch.setattr(core_module, "ProgressObserver", Broken)
+    caplog.set_level(logging.ERROR, logger="slife2.plugins.agent.core")
 
     backend = FakeBackend(
         ScriptedTurn(
@@ -3578,25 +3993,29 @@ async def test_a_broken_observer_does_not_kill_an_approval_request(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
-    turn = asyncio.create_task(send(server, "one", watched=True))
-    await wait_for_streams(backend)
-    # Answer the request the way a watching client does: a call of its own.  The
-    # announcement never reached anyone (the observer is broken), so the test
-    # polls for the future to exist — which is itself the claim, since it is the
-    # emit that threw before.
-    async with Client(server) as client:
-        for _ in range(500):
-            answer = await client.call_tool(
-                "answer_approval",
-                {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
-            )
-            if answer.data["answered"]:
-                break
-            await asyncio.sleep(0.01)
-        else:
-            pytest.fail("the approval request never reached the loop")
+    # **Bounded, because the way this fails is a turn that never ends.**  The
+    # turn is watched, so it asks; the stream is broken, so nobody can answer.
+    turn = await asyncio.wait_for(
+        send(server, "one", watched=True),
+        timeout=_T.timeouts.deliver.approval,  # timeouts: the defect was having no bound
+    )
+    assert turn.data["text"] == "done"
 
-    assert (await turn).data["text"] == "done"
+    # The model was told the call was refused, so the turn is a model's answer
+    # and not a hang; and nothing is left waiting for an answer that would now
+    # be late.
+    assert any(DENIED in line for line in prompts_seen(backend, 1)), (
+        "the unemitted approval did not refuse the call"
+    )
+    assert any(
+        "could not be written" in record.getMessage() for record in caplog.records
+    )
+    async with Client(server) as client:
+        answer = await client.call_tool(
+            "answer_approval",
+            {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
+        )
+    assert answer.data["answered"] is False, "a future was left waiting"
 
 
 @pytest.mark.asyncio
@@ -3772,20 +4191,19 @@ async def test_a_cancelled_turn_is_repaired_over_real_http(context, hub) -> None
 # --- subagents ---------------------------------------------------------------
 
 
-async def set_subagent(
+async def create_subagent(
     server: FastMCP,
     name: str,
     *,
     agent: str = DEFAULT_AGENT,
     model: str = "",
     role: str = "subagent",
-    fork: bool = False,
 ):
     """Name a subagent, with the caller's conversation id attached — as a turn does."""
     async with Client(server) as client:
         return await client.call_tool(
-            SUBAGENT_SET,
-            {"name": name, "model": model, "role": role, "fork": fork},
+            SUBAGENT_CREATE,
+            {"name": name, "model": model, "role": role},
             meta=conversation_meta(agent),
         )
 
@@ -3810,33 +4228,31 @@ def subagent_of(agent: str, name: str) -> Path:
 
 @pytest.mark.asyncio
 async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None:
-    """`subagent_set` makes a member: a directory, and the record that says so.
+    """`subagent_create` makes a member: a directory, and the record that says so.
 
     The record is what `subagent_remove` proves its blast radius with, and it
     holds the whole of what a subagent *is* — the model it runs on, the role it
-    was made for, whether it is a fork, and when it was made — which is the part
-    of an agent's identity that is neither its conversation nor its work, so it
-    is in the file rather than in a registry somewhere.  Which is also what makes
-    a subagent's settings as short-lived as the subagent: `subagent_remove`
-    deletes the directory, and there is nothing else holding them.
+    was made for, and when it was made — which is the part of an agent's
+    identity that is neither its conversation nor its work, so it is in the file
+    rather than in a registry somewhere.  Which is also what makes a subagent's
+    settings as short-lived as the subagent: `subagent_remove` deletes the
+    directory, and there is nothing else holding them.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    made = await set_subagent(
+    made = await create_subagent(
         server,
         "researcher",
         model="deepseek/deepseek-flash",
         role="code reviewer",
-        fork=True,
     )
 
     assert made.data["created"] is True
     assert made.data["name"] == "researcher"
     assert made.data["model"] == "deepseek/deepseek-flash"
     assert made.data["role"] == "code reviewer"
-    assert made.data["fork"] is True
     assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
     record = subagent_file(DEFAULT_AGENT, "researcher")
     assert record.is_file(), "the file is what makes the directory a subagent's"
@@ -3848,32 +4264,29 @@ async def test_a_subagent_is_a_directory_inside_its_makers(context, hub) -> None
         "name": "researcher",
         "model": "deepseek/deepseek-flash",
         "role": "code reviewer",
-        "fork": True,
     }
 
 
 @pytest.mark.asyncio
 async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> None:
-    """`set` rather than `add`: what a model may say twice without thinking.
+    """Creation is idempotent: what a model may say twice without thinking.
 
     What a second call changes is what the subagent *runs on* and what it is
     *for* — its model and its role, which are its settings.  What it does not
-    change is when it was made and whether it was made as a fork, and those two
-    are one answer rather than two rules: a fork's conversation is a copy
-    already taken, so a later call cannot re-decide what it is made of — the
-    same reason `created_at` is kept.  Removing it and naming it again is how a
-    maker asks for a different one.
+    change is when it was made: that is not a question a later call is
+    answering.  Removing it and naming it again is how a maker asks for a
+    different one.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
 
-    first = await set_subagent(server, "researcher", model="one/one", fork=True)
+    first = await create_subagent(server, "researcher", model="one/one")
     before = YAML(typ="safe").load(
         subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
     )
-    again = await set_subagent(
-        server, "researcher", model="two/two", role="code reviewer", fork=False
+    again = await create_subagent(
+        server, "researcher", model="two/two", role="code reviewer"
     )
     after = YAML(typ="safe").load(
         subagent_file(DEFAULT_AGENT, "researcher").read_text(encoding="utf-8")
@@ -3883,7 +4296,6 @@ async def test_naming_a_subagent_twice_is_the_same_subagent(context, hub) -> Non
     assert again.data["created"] is False, "the same subagent, not a second one"
     assert again.data["model"] == "two/two"
     assert again.data["role"] == "code reviewer"
-    assert again.data["fork"] is True, "made as a fork, and that is what it is"
     assert after["created_at"] == before["created_at"], "when it was made is kept"
     assert len(subagent_dirs(DEFAULT_AGENT)) == 1
 
@@ -3904,7 +4316,7 @@ async def test_a_subagent_cannot_make_a_subagent(context, hub) -> None:
     async with Client(server) as client:
         with pytest.raises(ToolError) as refused:
             await client.call_tool(
-                SUBAGENT_SET,
+                SUBAGENT_CREATE,
                 {"name": "deeper"},
                 meta=conversation_meta(DEFAULT_AGENT, "researcher"),
             )
@@ -3924,13 +4336,13 @@ async def test_the_cap_refuses_a_subagent_past_it(context, hub) -> None:
         backend=FakeBackend(),
     )
 
-    await set_subagent(server, "one")
+    await create_subagent(server, "one")
     with pytest.raises(ToolError) as refused:
-        await set_subagent(server, "two")
+        await create_subagent(server, "two")
 
     assert "max_running" in str(refused.value)
     # And naming the one that is already there is not a second subagent.
-    assert (await set_subagent(server, "one")).data["created"] is False
+    assert (await create_subagent(server, "one")).data["created"] is False
 
 
 @pytest.mark.asyncio
@@ -3949,23 +4361,55 @@ async def test_a_name_the_agent_already_uses_is_refused(context, hub) -> None:
     (cabinet / "note.md").write_text("mine", encoding="utf-8")
 
     with pytest.raises(ToolError) as refused:
-        await set_subagent(server, "cabinet")
+        await create_subagent(server, "cabinet")
 
     assert "not a subagent" in str(refused.value)
     assert (cabinet / "note.md").read_text(encoding="utf-8") == "mine"
+
+
+def test_a_name_being_removed_cannot_start_a_conversation() -> None:
+    """**The removal claim is the loops table's, and every path asks the same object.**
+
+    `Conversations` owns the claim: `start` refuses a claimed name, and
+    `refuse_removal` is the one reader every path that would touch the name
+    asks.  A second removal is refused by the claim itself rather than by a
+    separate check.
+    """
+    conversations = Conversations()
+    key = conversation_key(DEFAULT_AGENT, "researcher")
+    sentinel = SimpleNamespace()
+
+    with conversations.removal(key, subject=repr("researcher")):
+        with pytest.raises(ToolError) as taken:
+            with conversations.removal(key, subject=repr("researcher")):
+                pass
+        assert "already being removed" in str(taken.value)
+        with pytest.raises(ToolError) as starting:
+            conversations.start(
+                key,
+                subject="jack/researcher",
+                factory=lambda: pytest.fail("a claimed name started a loop"),
+            )
+        assert "being removed" in str(starting.value)
+        with pytest.raises(ToolError):
+            conversations.refuse_removal(key, subject="jack/researcher")
+
+    loop = conversations.start(key, subject="jack/researcher", factory=lambda: sentinel)
+    assert loop is sentinel
+    assert conversations.get(key) is sentinel
 
 
 @pytest.mark.asyncio
 async def test_removing_a_subagent_takes_its_directory_with_it(context, hub) -> None:
     """One directory, one operation — the whole reason the nesting exists.
 
-    Idempotent, and `reset`'s answer for the same question: a caller that wanted
-    something gone and finds it gone is in the state it asked for.
+    Idempotent: a caller that wanted something gone and finds it gone is in the
+    state it asked for.
     """
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
     (subagent_of(DEFAULT_AGENT, "researcher") / "work.txt").write_text(
         "something it made", encoding="utf-8"
     )
@@ -4001,16 +4445,23 @@ async def test_removing_something_that_is_not_a_subagent_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_removing_a_subagent_mid_turn_is_refused(
+async def test_removing_a_subagent_mid_turn_stops_the_turn_and_removes_it(
     context, hub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**A removal waits for the turn, then refuses rather than deleting under it.**
+    """**Removal is a forced cleanup, idle or mid-turn** (SDD §4.5.4).
 
-    The turn holds the conversation's lock and writes its store on the way out.
-    Deleting the directory while it runs lets that write recreate it — with no
-    `subagent.yaml`, so the name is blocked for `subagent_set` and untouchable
-    for `subagent_remove` for ever.  The wait is short: a turn parked on an
-    approval is one to come back to, not to wait out.
+    The turn holds the conversation's lock and writes its store on the way out,
+    so the directory cannot go until the turn has ended — but nothing in this
+    process could end it, and a wait-then-refuse made a mid-turn removal
+    impossible: the maker had no lever at all (`subagent_cancel_task` could not
+    reach a turn either).
+
+    **The network is the lever, and it is told first.**  `forget` drops the
+    member's session, which cancels the call that runs the turn — a subagent
+    has no window, so its turn *is* a call this process made.  The recorder
+    proves the order: the call arrives while the turn is still running.  A turn
+    that the clean stop does not reach is ended by cancelling its own handler —
+    this fake cancels nothing, so that is the path it leaves.
     """
     monkeypatch.setattr(_T.timeouts.grace, "turn", 0.05)
     backend = FakeBackend(
@@ -4020,24 +4471,42 @@ async def test_removing_a_subagent_mid_turn_is_refused(
             delay=0.2,  # timeouts: the value this test is built around, not a budget
         )
     )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await set_subagent(server, "researcher")
-    turn = asyncio.create_task(send(server, "one", subagent="researcher"))
-    for _ in range(200):
-        if backend.calls:
-            break
-        await asyncio.sleep(0.01)
+    #: Whether the turn was still running when the network was told.
+    seen: list[bool] = []
+    turn: asyncio.Task[Any] | None = None
+    mcp: FastMCP = FastMCP("mesh")
 
-    with pytest.raises(ToolError, match="still running a turn"):
-        await remove_subagent(server, "researcher")
+    @mcp.tool
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        seen.append(turn is None or not turn.done())
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
 
-    assert subagent_of(DEFAULT_AGENT, "researcher").exists(), "nothing was deleted"
-    await turn
-    done = await remove_subagent(server, "researcher")
-    assert done.data["removed"] is True
-    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+    base = default_config()
+    async with Client(mcp) as mesh:
+        server = build_server(
+            replace(
+                base,
+                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
+            ),
+            context_client=context,
+            hub_client=hub,
+            backend=backend,
+            mesh_client=mesh,
+        )
+        await create_subagent(server, "researcher")
+        turn = asyncio.create_task(send(server, "one", subagent="researcher"))
+        for _ in range(200):
+            if backend.calls:
+                break
+            await asyncio.sleep(0.01)
+
+        done = await remove_subagent(server, "researcher")
+        assert done.data["removed"] is True
+        assert seen and seen[0] is True, (
+            "the network was told after the turn ended, not as its stop"
+        )
+        await asyncio.gather(turn, return_exceptions=True)
+        assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
 
 
 @pytest.mark.asyncio
@@ -4055,6 +4524,7 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
         backend=FakeBackend(text_turn("hello from the subagent")),
     )
 
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
 
     own = subagent_of(DEFAULT_AGENT, "researcher") / "turns.db"
@@ -4063,6 +4533,35 @@ async def test_a_subagents_turns_are_recorded_in_its_own_store(context, hub) -> 
         "and not in the maker's — nobody said anything to the maker"
     )
     assert TurnStore(own).count() == 1
+
+
+@pytest.mark.asyncio
+async def test_a_message_to_a_removed_subagent_is_refused_and_recreates_nothing(
+    context, hub
+) -> None:
+    """**The record is the membership, and a message does not make one.**
+
+    `subagent_remove` deletes the directory.  Before this refusal, a message
+    addressed to the stale name started a conversation, and its save recreated
+    `subagents/<name>/turns.db` — with no `subagent.yaml`, which is the state
+    `subagent_create` refuses as "already a directory that is not a subagent" and
+    `subagent_remove` refuses as not one of yours: the name was blocked for both
+    until somebody cleaned the filesystem by hand.  The read path already
+    refuses to create the directory (`read_store_for`); this is the write half.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+    await create_subagent(server, "researcher")
+    await remove_subagent(server, "researcher")
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
+
+    with pytest.raises(ToolError, match="there is no subagent"):
+        await send(server, "one", subagent="researcher")
+
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists(), (
+        "the refused message recreated the directory"
+    )
 
 
 @pytest.mark.asyncio
@@ -4080,6 +4579,7 @@ async def test_a_subagent_is_told_its_own_name_whose_it_is_and_where_work_comes_
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
     await send(server, "two")
 
@@ -4115,6 +4615,7 @@ async def test_a_subagents_prompt_names_its_reply_tools_not_their_schema(
         config(), context_client=context, hub_client=hub, backend=backend
     )
 
+    await create_subagent(server, "researcher")
     await send(server, "one", subagent="researcher")
 
     prompt = backend.calls[0][0][0].content
@@ -4144,7 +4645,7 @@ def a_second_model():
             "other": ProviderSettings(
                 api="openai-completions",
                 base_url="https://example.test",
-                api_key_ref="${K:-x}",
+                api_key_ref="x",
                 models={"slow": ModelSettings(model="slow")},
             ),
         },
@@ -4167,7 +4668,8 @@ async def test_a_subagent_runs_on_the_model_its_own_file_names(context, hub) -> 
         hub_client=hub,
         backend=FakeBackend(text_turn("ok"), text_turn("ok")),
     )
-    await set_subagent(server, "researcher", model="other/slow")
+    await create_subagent(server, "researcher", model="other/slow")
+    await create_subagent(server, "helper")
 
     named = await send(server, "one", subagent="researcher")
     plain = await send(server, "one", subagent="helper")
@@ -4195,8 +4697,8 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
         hub_client=hub,
         backend=backend,
     )
-    await set_subagent(server, "researcher", role="code reviewer")
-    await set_subagent(server, "helper")
+    await create_subagent(server, "researcher", role="code reviewer")
+    await create_subagent(server, "helper")
 
     await send(server, "one", subagent="researcher")
     await send(server, "one")
@@ -4213,437 +4715,6 @@ async def test_a_subagents_prompt_is_its_own_and_says_what_it_is(
     assert record["role"] == "subagent", "the role a subagent is made with unnamed"
 
 
-@pytest.mark.asyncio
-async def test_a_fork_starts_from_a_copy_of_its_makers_conversation(
-    context, hub
-) -> None:
-    """`fork: true` is a subagent made of somebody else's conversation.
-
-    What it is handed is the maker's context as it stood when the fork's
-    first turn started — everything the maker had said and been told — and
-    `prompts_seen` is the request the fork's first turn actually sent, so the
-    claim is about the model call and not about a field somewhere.
-    """
-    backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-
-    assert prompts_seen(backend, 1) == [
-        "user:one",
-        "assistant:the maker's answer",
-        "user:two",
-    ]
-    head = backend.calls[1][0][0].content
-    assert head.startswith(
-        f"You are researcher, one of {DEFAULT_AGENT}'s subagents — your role is subagent."
-    )
-    # **A fork is not told that it is one** (the designer's call): the copy
-    # above is the whole of what makes it a fork, and explaining it earned less
-    # than it cost.
-    assert "fork" not in head.lower()
-    assert "copy" not in head.lower()
-
-
-@pytest.mark.asyncio
-async def test_a_fork_taken_from_a_maker_that_has_said_nothing(context, hub) -> None:
-    """The empty case, which is an ordinary one: a maker that is just starting.
-
-    Nothing is carried and nothing fails — the fork is handed an empty
-    conversation and runs on its own message, exactly as a subagent with no
-    history would.
-    """
-    backend = FakeBackend(text_turn("the fork's"))
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await set_subagent(server, "researcher", fork=True)
-    await send(server, "one", subagent="researcher")
-
-    assert prompts_seen(backend, 0) == ["user:one"]
-
-
-@pytest.mark.asyncio
-async def test_a_fork_writes_nothing_down(context, hub) -> None:
-    """Its turns are not recorded — not under its own key, and not under its maker's.
-
-    The maker's conversation is what a fork is *made of*, so writing the fork's
-    turns there would file one agent's work as another's history; and writing
-    them under the fork's own key would put a copy of a conversation nobody had
-    into a store whose whole job is to be that conversation's memory — and then
-    hand it back, on the next start, as the context to continue from.
-    """
-    backend = FakeBackend(text_turn("the maker's"), text_turn("the fork's"))
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-
-    assert not (subagent_of(DEFAULT_AGENT, "researcher") / "turns.db").exists()
-    assert TurnStore(agents_dir() / DEFAULT_AGENT / "turns.db").count() == 1, (
-        "the maker's own turn, and nothing the fork said"
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_fork_turn_is_not_rolled_back_by_the_next_message(
-    context, hub
-) -> None:
-    """A fork's `record` answers `None` because it has no log, not because it failed.
-
-    The turn's messages are the only copy a fork has, so treating that `None` as
-    a refused write and rolling the tail back deleted the user's message and the
-    completed tool batch — the work the cancellation path keeps on purpose.
-    """
-    backend = FakeBackend(
-        text_turn("the maker's"),
-        text_turn(
-            "never finished",
-            delay=0.4,  # timeouts: the value this test is built around, not a budget
-        ),  # timeouts: the value this test is built around, not a budget
-        text_turn("continued"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
-    interrupted = asyncio.create_task(send(server, "two", subagent="researcher"))
-    await wait_for_streams(backend, 2)
-    interrupted.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await interrupted
-
-    await send(server, "three", subagent="researcher")
-    assert "user:two" in prompts_seen(backend, 2), (
-        "the cancelled fork turn is still in its conversation"
-    )
-    assert "user:three" in prompts_seen(backend, 2)
-
-
-@pytest.mark.asyncio
-async def test_a_fork_does_not_outlive_its_session(context, hub) -> None:
-    """The next start removes the record; a subagent with a store is kept.
-
-    A fork is its conversation, and its conversation is in memory — so the
-    `subagent.yaml` a restart finds describes something that no longer exists.
-    Left there, the name would answer as a *new* fork of wherever its maker
-    stands now: a different subagent wearing the old one's name.  So the start
-    of a session ends the last one's forks, and frees their names.
-
-    A non-fork subagent is the contrast, and the reason this is about the record
-    rather than about tidiness: it owns a store, so a restart must keep it.
-    """
-    backend = FakeBackend(text_turn("the maker's"))
-    first = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await set_subagent(first, "researcher", fork=True)
-    await set_subagent(first, "writer")
-
-    assert subagent_of(DEFAULT_AGENT, "researcher").is_dir()
-    assert subagent_of(DEFAULT_AGENT, "writer").is_dir()
-
-    # A second server on the same home is a restart: its first session is where
-    # the previous one's forks end.
-    second = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await send(second, "one")
-
-    assert not subagent_of(DEFAULT_AGENT, "researcher").exists(), (
-        "a fork's record outlived the conversation it described"
-    )
-    assert subagent_of(DEFAULT_AGENT, "writer").is_dir(), (
-        "a subagent with a stored conversation is not a fork's to lose"
-    )
-
-    # And the name is free again rather than being a half-subagent that `set`
-    # would silently take for the old one.
-    remade = await set_subagent(second, "researcher", fork=True)
-    assert remade.data["created"] is True
-
-
-@pytest.mark.asyncio
-async def test_the_idle_sweep_does_not_forget_a_fork(context, hub, monkeypatch) -> None:
-    """A fork's own turns are the only copy, so an idle fork is not idle state.
-
-    For every other conversation the sweep only reclaims memory: the turns are
-    in its store, and the next message restores them.  A fork has no store, so
-    reaping it would not reclaim anything — it would lose the conversation and
-    hand the next message a fresh copy of whatever the maker has said since.
-    """
-    monkeypatch.setattr(_T.timeouts.pacing, "loop_idle", 0.0)
-    backend = FakeBackend(
-        text_turn("the maker's"),
-        text_turn("the fork's"),
-        text_turn("again"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-    await send(server, "three", subagent="researcher")
-
-    assert prompts_seen(backend, 2) == [
-        "user:one",
-        "assistant:the maker's",
-        "user:two",
-        "assistant:the fork's",
-        "user:three",
-    ], "the fork kept its own turn instead of starting again from its maker"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_is_a_copy_and_not_a_shared_conversation(context, hub) -> None:
-    """The maker moves on without it, and that is true in both directions.
-
-    A copy rather than the same list, and both halves matter: what the maker says
-    after the fork was made is not something the fork has read, and the fork's
-    own turns are not in the maker's conversation either.  Reading "share
-    everything with the agent that made you" as *one* conversation with two
-    readers is the reading this rejects, and it is rejected on what a fork is
-    for: its job is to answer *about* a conversation, which it cannot do from
-    inside it.
-    """
-    backend = FakeBackend(
-        text_turn("one"),
-        text_turn("forked"),
-        text_turn("three"),
-        text_turn("again"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-
-    await send(server, "one")
-    await set_subagent(server, "researcher", fork=True)
-    await send(server, "two", subagent="researcher")
-    await send(server, "three")
-    await send(server, "four", subagent="researcher")
-
-    assert prompts_seen(backend, 3) == [
-        "user:one",
-        "assistant:one",
-        "user:two",
-        "assistant:forked",
-        "user:four",
-    ], "the fork's copy, then its own turns, and nothing the maker said since"
-    assert prompts_seen(backend, 2) == [
-        "user:one",
-        "assistant:one",
-        "user:three",
-    ], "and the maker never saw what the fork said"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_is_taken_from_a_maker_that_is_mid_turn(context, hub) -> None:
-    """The copy ends at the last exchange that finished, and it has to.
-
-    A maker calls `subagent_set` *as* a tool call, so the conversation it is in
-    the middle of ends with an assistant message whose call has no result yet —
-    the one history every provider refuses (`trim_tools` records the same thing
-    about the same pair).  A copy taken then is a conversation nobody can be
-    sent, so what a fork is handed is the conversation up to the point its maker
-    can still be read from: the message it is answering (`two`) is in the copy,
-    and the half-finished exchange is not.
-
-    **The maker is parked on `_approve` rather than merely slow**, so that *when*
-    the fork is made is a fact this test knows instead of a race it hopes goes
-    one way — a race would leave the assertion below passing for the wrong
-    reason, since a maker that had not appended its call yet produces the same
-    expected list.
-    """
-    from slife2.libs.turn.events import ToolApprovalRequested
-
-    backend = FakeBackend(
-        text_turn("one"),
-        ScriptedTurn(
-            result=StreamChatResult(
-                text="checking",
-                tool_calls=(
-                    ToolCall(id="c1", name="skill_list", arguments={"_approve": True}),
-                ),
-                stop_reason="tool_calls",
-            ),
-            chunks=[Chunk(text="checking")],
-        ),
-        text_turn("the fork's"),
-        text_turn("done"),
-    )
-    server = build_server(
-        config(), context_client=context, hub_client=hub, backend=backend
-    )
-    await send(server, "one")
-
-    parked = asyncio.Event()
-
-    async def on_progress(_progress, _total, message):
-        if isinstance(decode(message or ""), ToolApprovalRequested):
-            parked.set()
-
-    async def maker():
-        async with Client(server) as client:
-            return await client.call_tool(
-                "send_message",
-                {"agent": DEFAULT_AGENT, "prompt": "two", "watched": True},
-                progress_handler=on_progress,
-            )
-
-    turn = asyncio.create_task(maker())
-    await asyncio.wait_for(parked.wait(), timeout=10)
-
-    await set_subagent(server, "researcher", fork=True)
-    # **Bounded, because the way this test fails is a deadlock.**  A fork that
-    # waits on the maker's lock waits out the maker's *whole turn*, and the
-    # maker here is parked on an approval this test cannot answer until after
-    # this line — so the regression is not a wrong value or an exception, it is
-    # a lane that never finishes.  A timeout is that deadlock saying so.
-    await asyncio.wait_for(
-        send(server, "three", subagent="researcher"),
-        timeout=10,  # timeouts: the value this test is built around, not a budget
-    )  # timeouts: the value this test is built around, not a budget
-
-    assert prompts_seen(backend, 2) == [
-        "user:one",
-        "assistant:one",
-        "user:two",
-        "user:three",
-    ], "the maker's half-finished exchange is not a history a model can be sent"
-
-    # And the maker's own turn is untouched by any of it: it was waiting for an
-    # answer to a question, and it gets one.
-    async with Client(server) as client:
-        await client.call_tool(
-            "answer_approval",
-            {"agent": DEFAULT_AGENT, "call_id": "c1", "approved": True},
-        )
-    assert (await turn).data["text"] == "done"
-
-
-@pytest.mark.asyncio
-async def test_a_fork_made_while_the_maker_is_live_keeps_its_message(
-    context, hub, monkeypatch
-) -> None:
-    """**The maker's conversation is read under the maker's lock.**
-
-    `adopt_maker` restores the maker's loop when the maker has not restored it
-    yet, and that is a state a live maker is in for one store round trip: the
-    loop is in `loops` from the moment `conversation` made it, and `send_message`
-    sets `restored` only once the store has answered.  A fork arriving in that
-    window ran the same `restore_into` as the maker — *not* under the maker's
-    lock, which the maker is holding — and two restores of one list are one
-    answer landing on top of the other: the fork's, arriving late, replaces a
-    list the maker has already appended its user message to.  The turn then
-    advances the orphaned list while `loop.messages` holds one that never saw it,
-    so `outcome.messages` comes out empty, nothing is recorded, and the fork is
-    handed a copy that never had the maker's message in it.
-
-    **Parked rather than raced.**  The maker's restore and the fork's are each
-    held open on an event, so *when* each lands is a fact this test knows instead
-    of a hope: the maker's is released first and its turn is proved running
-    before the fork's is let go.  With the lock the fork cannot be in its restore
-    at all until the maker's turn has ended, which is why the fork's copy is
-    taken from the live list — the maker's finished turn and all.
-    """
-    backend = FakeBackend(text_turn("the maker's answer"), text_turn("the fork's"))
-    store = ParkedRestore(context)
-    server = build_server(
-        config(), context_client=store, hub_client=hub, backend=backend
-    )
-
-    maker = asyncio.create_task(send(server, "one"))
-    await asyncio.wait_for(store.arrived.wait(), timeout=_T.timeouts.work.hub)
-    await set_subagent(server, "researcher", fork=True)
-    fork = asyncio.create_task(send(server, "two", subagent="researcher"))
-    # **Where the two builds part company.**  Without the lock the fork is in
-    # its own restore by now — the maker's is parked and holds nothing — and this
-    # wait sees two; with it the fork is parked on the maker's lock and is not in
-    # a restore at all.  Nothing below depends on which of those happened.
-    for _ in range(100):
-        if store.entered == 2:
-            break
-        await asyncio.sleep(0.01)
-    store.release[0].set()
-    # The maker's turn is running — its user message is appended and the model
-    # has been asked — which is the moment the fork's restore used to land on
-    # top of it.
-    await wait_for_streams(backend, 1)
-    store.release[1].set()
-
-    assert (await maker).data["text"] == "the maker's answer"
-    assert (await fork).data["text"] == "the fork's"
-    # The copy the fork runs on: the maker's whole finished turn, then its own
-    # message.  An empty copy is the fork having read a list the maker's own
-    # restore had just replaced.
-    assert prompts_seen(backend, 1) == [
-        "user:one",
-        "assistant:the maker's answer",
-        "user:two",
-    ]
-    # ...and the maker's turn is in its own log, which is the other half of the
-    # same damage: a turn that advanced an orphaned list records nothing.
-    assert TurnStore(agents_dir() / DEFAULT_AGENT / "turns.db").count() == 1
-
-
-def test_an_unfinished_exchange_is_what_a_copy_leaves_off() -> None:
-    """`settled_messages` directly, because it is a rule about message lists.
-
-    A turn in flight ends wherever it has got to, and a copy of a conversation is
-    a *request* — so the rule is stated over the shapes a list can have and not
-    over one path through the server.  What it must not do is cut into a finished
-    exchange: a tool round the model has already been told about is context, and
-    losing it would be a copy that knows less than the agent it was made from.
-    """
-    from slife2.libs.turn.messages import Message
-    from slife2.plugins.agent.server import settled_messages
-
-    head = Message(role="system", content="you are")
-    asked = Message(role="user", content="one")
-    called = Message(
-        role="assistant", content=None, tool_calls=[ToolCall(id="c1", name="t")]
-    )
-    answered = Message(role="tool", content="result", tool_call_id="c1")
-    spoke = Message(role="assistant", content="two")
-    both = Message(
-        role="assistant",
-        content=None,
-        tool_calls=[ToolCall(id="c1", name="t"), ToolCall(id="c2", name="t")],
-    )
-
-    assert settled_messages([]) == []
-    assert settled_messages([head, asked]) == [head, asked]
-
-    # The two shapes a turn in flight leaves: a call nobody has answered, and a
-    # batch that answered only the first of two.
-    assert settled_messages([head, asked, called]) == [head, asked]
-    assert settled_messages([head, asked, both, answered]) == [head, asked]
-
-    # And the shapes that are histories, all of which stay whole: an answer, a
-    # finished exchange, and the same exchange with the model still to speak.
-    whole = [head, asked, called, answered, spoke]
-    assert settled_messages(whole) == whole
-    assert settled_messages([head, asked, called, answered]) == [
-        head,
-        asked,
-        called,
-        answered,
-    ]
-    assert settled_messages(whole + [called]) == whole
-
-
 def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4656,28 +4727,29 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
     wait out a write that is still landing (milliseconds) and then, if it is
     still held, to say the file is open in another process and to ask again.
 
-    Refused as a whole rather than half-done: a removal that deleted most of a
-    subagent would leave something that is neither one nor a directory anybody
-    can finish removing.
+    **The record is removed last**, so the refused attempt leaves a directory
+    that is still a *subagent* — one a second `subagent_remove` can finish —
+    rather than a locked name no tool can own.
     """
-    import shutil
+    from slife2.plugins.agent import membership as membership_module
 
-    real_rmtree = shutil.rmtree
     directory = tmp_path / "subagents" / "researcher"
     directory.mkdir(parents=True)
     busy = directory / "turns.db"
     busy.write_bytes(b"")
+    record = directory / "subagent.yaml"
+    record.write_text("name: researcher\n", encoding="utf-8")
 
     def busy_error() -> PermissionError:
         return PermissionError(32, "The process cannot access the file", str(busy))
 
     attempts: list[int] = []
 
-    def always_held(path, *args, **kwargs):
+    def always_held(path):
         attempts.append(1)
         raise busy_error()
 
-    monkeypatch.setattr("slife2.plugins.agent.server.shutil.rmtree", always_held)
+    monkeypatch.setattr(membership_module, "_delete_file", always_held)
     monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 0.05)
     with pytest.raises(ToolError) as refused:
         _remove_tree(directory)
@@ -4688,23 +4760,25 @@ def test_a_removal_waits_for_a_file_and_then_says_so_in_words(
     assert "another process" in said and "Ask again" in said
     assert "WinError" not in said, "the OS's own words are not an answer"
     assert directory.exists(), "a refused removal leaves the directory alone"
+    assert record.exists(), "the record goes last, so the name is still a subagent"
 
     # A holder that lets go inside the budget is waited out rather than reported:
     # the first attempt finds the file busy, the second finds it free.
     monkeypatch.setattr(_T.timeouts.storage, "sqlite_busy", 5.0)
     calls: list[int] = []
 
-    def goes_quiet(path, *args, **kwargs):
+    def goes_quiet(path):
         calls.append(1)
         if len(calls) == 1:
             raise busy_error()
-        real_rmtree(path)
+        path.unlink(missing_ok=True)
 
-    monkeypatch.setattr("slife2.plugins.agent.server.shutil.rmtree", goes_quiet)
+    monkeypatch.setattr(membership_module, "_delete_file", goes_quiet)
     _remove_tree(directory)
 
     assert len(calls) == 2, "a holder that let go was not waited out"
     assert not directory.exists()
+    assert not record.exists()
 
 
 @pytest.mark.asyncio
@@ -4743,7 +4817,7 @@ async def test_removing_a_subagent_tells_the_network_before_it_deletes(
             backend=FakeBackend(),
             mesh_client=mesh,
         )
-        await set_subagent(server, "researcher")
+        await create_subagent(server, "researcher")
         directory = subagent_of(DEFAULT_AGENT, "researcher")
         assert directory.is_dir(), "nothing to remove, so nothing to tell"
 
@@ -4753,6 +4827,63 @@ async def test_removing_a_subagent_tells_the_network_before_it_deletes(
     assert told == [{"agent": DEFAULT_AGENT, "subagent": "researcher"}]
     assert still_there == [True], "the network was told after the files went"
     assert not directory.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_removal_claim_refuses_messages_and_creates_while_it_runs(
+    context, hub
+) -> None:
+    """**The claim is one invariant, tested at the wire.**
+
+    `subagent_remove` holds it from before its first await until the directory
+    is gone.  A message or a second `subagent_create` that names the subagent in
+    that window is refused by the loops table rather than racing the delete: a
+    turn would save into the directory the removal then deletes, and a create
+    would rewrite the record — or make the directory again — behind it.
+    """
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    mcp: FastMCP = FastMCP("mesh")
+
+    @mcp.tool
+    async def forget(agent: str, subagent: str = "") -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {"agent": agent, "subagent": subagent, "forgotten": True}
+
+    base = default_config()
+    async with Client(mcp) as mesh:
+        server = build_server(
+            replace(
+                base,
+                subagent=replace(base.subagent, network=A2ASettings(configured=True)),
+            ),
+            context_client=context,
+            hub_client=hub,
+            backend=FakeBackend(),
+            mesh_client=mesh,
+        )
+        await create_subagent(server, "researcher")
+        removing = asyncio.create_task(remove_subagent(server, "researcher"))
+        # The first step is the network notification, and it is where the
+        # removal waits — the claim is already held.
+        await entered.wait()
+
+        with pytest.raises(ToolError) as sent:
+            await send(server, "are you there?", subagent="researcher")
+        assert "being removed" in str(sent.value)
+
+        # A second create is the other path: without the claim it would rewrite
+        # the record the removal is about to delete, or make the directory again
+        # if the delete had already run.
+        with pytest.raises(ToolError) as made:
+            await create_subagent(server, "researcher")
+        assert "being removed" in str(made.value)
+
+        release.set()
+        assert (await removing).data["removed"] is True
+
+    assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
 
 
 @pytest.mark.asyncio
@@ -4770,7 +4901,7 @@ async def test_a_machine_with_no_subagent_network_removes_without_telling_anyone
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher")
+    await create_subagent(server, "researcher")
 
     assert (await remove_subagent(server, "researcher")).data["removed"] is True
     assert not subagent_of(DEFAULT_AGENT, "researcher").exists()
@@ -4850,8 +4981,8 @@ async def test_the_subagent_list_is_the_makers_directories(context, hub) -> None
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "researcher", role="code reviewer")
-    await set_subagent(server, "scout", model="deepseek/deepseek-flash")
+    await create_subagent(server, "researcher", role="code reviewer")
+    await create_subagent(server, "scout", model="deepseek/deepseek-flash")
 
     async with Client(server) as client:
         answer = await client.call_tool("subagents", {"agent": DEFAULT_AGENT})
@@ -4863,13 +4994,11 @@ async def test_the_subagent_list_is_the_makers_directories(context, hub) -> None
                 "name": "researcher",
                 "model": "",
                 "role": "code reviewer",
-                "fork": False,
             },
             {
                 "name": "scout",
                 "model": "deepseek/deepseek-flash",
                 "role": "subagent",
-                "fork": False,
             },
         ]
     }, "sorted, with the record's own facts"
@@ -4893,6 +5022,7 @@ async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
         hub_client=hub,
         backend=answering("hello back"),
     )
+    await create_subagent(server, "scout")
     await send(server, "hello", subagent="scout")
 
     async with watching(server, subagent="scout") as (frames, _):
@@ -4910,6 +5040,112 @@ async def test_a_watch_opens_with_the_history_and_not_a_replayed_turn(
 
 
 @pytest.mark.asyncio
+async def test_a_watch_does_not_replay_a_turn_whose_record_is_still_in_flight(
+    context, hub
+) -> None:
+    """**The store can have the row before the tap has its id.**
+
+    A turn's write commits the row and only then answers, and `recorded_turn`
+    is set from that answer.  A watcher whose snapshot read lands in between
+    used to see the turn in the snapshot *and* replay the tap — the same turn
+    drawn twice.  `Tap.writing` is the in-flight write, and the watcher waits
+    it out before deciding.
+    """
+
+    class Gated:
+        """The context client, with `remember` parked after its row is committed."""
+
+        def __init__(self, client: Client) -> None:
+            self.client = client
+            self.committed = asyncio.Event()
+            self.read = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def call_tool(self, name: str, arguments=None, **kwargs):
+            result = await self.client.call_tool(name, arguments, **kwargs)
+            if name == "remember":
+                self.committed.set()
+                await self.release.wait()
+            elif name == "restore":
+                self.read.set()
+            return result
+
+    gated = Gated(context)
+    server = build_server(
+        config(), context_client=gated, hub_client=hub, backend=answering("hello back")
+    )
+    await create_subagent(server, "scout")
+    turn = asyncio.create_task(send(server, "hello", subagent="scout"))
+    try:
+        await asyncio.wait_for(gated.committed.wait(), timeout=10)
+
+        frames: list[Any] = []
+        snapshot = asyncio.Event()
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ):
+            item = decode_watch(message or "")
+            if item is None:
+                return
+            frames.append(item)
+            if isinstance(item, Snapshot):
+                snapshot.set()
+
+        async with Client(server) as client:
+            watching = asyncio.create_task(
+                client.call_tool(
+                    "watch",
+                    {"agent": DEFAULT_AGENT, "subagent": "scout"},
+                    progress_handler=on_progress,
+                    timeout=None,
+                )
+            )
+            try:
+                # The snapshot has been read; the write is still parked, so the
+                # row is in the store and the tap does not have its id yet.
+                await asyncio.wait_for(gated.read.wait(), timeout=10)
+                await asyncio.sleep(0.05)
+                gated.release.set()
+                await asyncio.wait_for(snapshot.wait(), timeout=10)
+                await asyncio.sleep(0.05)
+                assert [type(item) for item in frames] == [Snapshot], (
+                    "the turn was replayed as well as snapshotted"
+                )
+                assert frames[0].turns, "the snapshot is the recorded turn"
+            finally:
+                if not watching.done():
+                    watching.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await watching
+    finally:
+        gated.release.set()
+        await turn
+
+
+@pytest.mark.asyncio
+async def test_a_watch_snapshot_carries_the_conversations_plan(context, hub) -> None:
+    """A plan is not a turn, so the snapshot's turns cannot supply it.
+
+    The watcher's first frame is the opening read a window gets, and a window
+    that opened beside it would draw this plan; a watcher without it would show
+    the same conversation without the strip.
+    """
+    server = build_server(
+        config(),
+        context_client=context,
+        hub_client=hub,
+        backend=answering("hello"),
+    )
+    await write_plan(server, PLAN_ITEMS)
+
+    async with watching(server) as (frames, _):
+        first = frames[0]
+        assert isinstance(first, Snapshot)
+        assert first.plan == PLAN_ITEMS
+
+
+@pytest.mark.asyncio
 async def test_a_watched_conversation_streams_its_next_turn(context, hub) -> None:
     """A watcher that is already attached sees a turn's whole vocabulary.
 
@@ -4922,6 +5158,8 @@ async def test_a_watched_conversation_streams_its_next_turn(context, hub) -> Non
         hub_client=hub,
         backend=FakeBackend(text_turn("hi")),
     )
+
+    await create_subagent(server, "scout")
 
     async with watching(server, subagent="scout") as (frames, _):
         await send(server, "hello", subagent="scout")
@@ -4950,6 +5188,7 @@ async def test_a_watch_that_joins_mid_turn_is_handed_the_turn_from_its_start(
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=backend
     )
+    await create_subagent(server, "scout")
     running = asyncio.create_task(send(server, "slow one", subagent="scout"))
     # The turn has reached the model, and has streamed at least one chunk by
     # the time the watch opens — so the replay has something to replay.
@@ -4980,7 +5219,7 @@ async def test_removing_a_subagent_ends_its_watch(context, hub) -> None:
     server = build_server(
         config(), context_client=context, hub_client=hub, backend=FakeBackend()
     )
-    await set_subagent(server, "scout")
+    await create_subagent(server, "scout")
 
     async with watching(server, subagent="scout") as (frames, task):
         await remove_subagent(server, "scout")

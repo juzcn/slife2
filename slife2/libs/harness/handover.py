@@ -28,8 +28,8 @@ gets the same patience, and none of them has to know why the window was away.
 **Three answers, and the middle one is why this is not a boolean.**  Everything a
 tool handler raises arrives at this end as a `ToolError` (`house_server` pins
 `mask_error_details=False`, which is what keeps the text), so the exception
-*type* cannot tell a refusal from a dropped stream — `slife2.plugins.tui.server.refused`
-has to be asked, and it is the module that writes the refusal that answers.  A
+*type* cannot tell a refusal from a dropped stream — `slife2.libs.plugin.vocabulary.refused`
+has to be asked, and the predicate answers for the sentence the window writes.  A
 refusal is the one failure that proves nothing was written, because the terminal
 looks its session up before it posts anything; everything else means the words
 may already be down the stream.  That distinction decides *what a retry is worth*
@@ -61,11 +61,31 @@ from fastmcp import Client
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import TUI_SERVER_NAME, Config
-from slife2.libs.plugin.protocol import close_server, open_server, tool_payload
-from slife2.plugins.tui import server as control
-from slife2.plugins.tui.server import NOTE
+from slife2.libs.plugin.protocol import (
+    UnreadableAnswer,
+    close_server,
+    open_server,
+    tool_payload,
+)
+from slife2.libs.plugin.vocabulary import ATTACHED, NOTE, SUBMIT, refused
 
 logger = logging.getLogger(__name__)
+
+
+def _classify(exc: Exception) -> bool | None:
+    """The answer a failed call leaves: provably unwritten, or unknown.
+
+    **The split between the three answers' last two, in one place.**  A refusal
+    proves nothing was written — the terminal looks its session up before it
+    posts anything — so it is `False`, the one result a caller may safely act
+    on by trying again or somewhere else.  Every other exception means the
+    words may already be down the stream: `None`, which no caller may repeat.
+    The exception's *type* cannot tell the two apart (everything a handler
+    raises arrives as a `ToolError`), so `refused` is asked — the module
+    docstring carries the whole argument.  Each call site keeps its own log
+    level and words.
+    """
+    return False if refused(exc) else None
 
 
 async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool | None:
@@ -77,16 +97,17 @@ async def submit_to(window: Client, agent: str, text: str, channel: str) -> bool
     """
     try:
         await window.call_tool(
-            "submit",
+            SUBMIT,
             {"agent": agent, "text": text, "channel": channel},
             timeout=_T.timeouts.transport.window,
         )
     except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-        if control.refused(exc):
+        answer = _classify(exc)
+        if answer is False:
             logger.info("no window is showing %s: %s", agent, exc)
-            return False
-        logger.warning("the hand-over to %s did not come back: %s", agent, exc)
-        return None
+        else:
+            logger.warning("the hand-over to %s did not come back: %s", agent, exc)
+        return answer
     return True
 
 
@@ -148,7 +169,7 @@ async def to_window(
         async with _peer(
             config.server("tui").url,
             name=TUI_SERVER_NAME,
-            fallback_tool="submit",
+            fallback_tool=SUBMIT,
             timeout=_T.timeouts.transport.window,
             client=client,
         ) as window:
@@ -196,11 +217,12 @@ async def note_to_window(
                     timeout=_T.timeouts.transport.window,
                 )
             except Exception as exc:  # noqa: BLE001 - three answers, and this is both
-                if control.refused(exc):
+                answer = _classify(exc)
+                if answer is False:
                     logger.debug("no window is showing %s: %s", agent, exc)
-                    return False
-                logger.debug("the note to %s did not come back: %s", agent, exc)
-                return None
+                else:
+                    logger.debug("the note to %s did not come back: %s", agent, exc)
+                return answer
             return True
     except Exception as exc:  # noqa: BLE001 - nothing written, because nothing reached
         logger.debug("no window for %s could be reached: %s", agent, exc)
@@ -224,7 +246,7 @@ async def window_attached(
     That is `hand_over`'s patience, spent here rather than at the call site: it
     is a fact about the window rather than about the work.
 
-    The question is `slife2.plugins.tui.server`'s `attached`, and it carries the
+    The question is the window plugin's `attached` tool, and it carries the
     ambient home like every call to one of our servers (`Peer`), so a ledger in
     another home is asked about that home's window.
     """
@@ -232,28 +254,39 @@ async def window_attached(
         async with _peer(
             config.server("tui").url,
             name=TUI_SERVER_NAME,
-            fallback_tool=control.ATTACHED,
+            fallback_tool=ATTACHED,
             timeout=_T.timeouts.transport.window,
             client=client,
         ) as window:
             for attempt in range(1, _T.timeouts.stream.handover + 1):
                 try:
                     answer = await window.call_tool(
-                        control.ATTACHED,
+                        ATTACHED,
                         {"agent": agent},
                         timeout=_T.timeouts.transport.window,
                     )
                 except Exception as exc:  # noqa: BLE001 - the third answer
                     logger.debug("the window for %s could not be asked: %s", agent, exc)
-                    return None
-                value = tool_payload(answer).get("attached")
-                if value is True:
-                    return True
-                if value is not False:
+                    return _classify(exc)
+                try:
+                    value = tool_payload(answer).get("attached")
+                except UnreadableAnswer as exc:
                     # A shape this build cannot read is not an answer; saying
                     # "no window" would turn a broken peer into a missed run.
                     logger.warning(
-                        "the window for %s answered an unreadable shape", agent
+                        "the window for %s answered an unreadable shape: %s",
+                        agent,
+                        exc,
+                    )
+                    return None
+                if value is True:
+                    return True
+                if value is not False:
+                    # A parsed answer without a boolean is the same "cannot
+                    # tell"; `None` and a missing key are not a claim about a
+                    # window this build did not ask.
+                    logger.warning(
+                        "the window for %s answered without `attached`", agent
                     )
                     return None
                 if attempt < _T.timeouts.stream.handover:
@@ -278,12 +311,26 @@ class DeliveryFailed(RuntimeError):
 
     It carries the agent and the reason, since those are what a caller logs or
     records — not the words, which are the conversation's business.
+
+    **`unknown` is the difference between "not delivered" and "cannot tell".**
+    A refusal proves nothing was written (`submit_to` saw the terminal answer),
+    while a call that did not come back may already have put the words in the
+    conversation.  Both are failures a caller must not carry on past, but a
+    caller that records an outcome must not record the second as the first: a
+    peer told `rejected` for a message its conversation took has been lied to,
+    and its later answer is refused because the task is already terminal.  So
+    the flag is here rather than a second exception type — the difference is one
+    fact about the same failure, not a different failure.
     """
 
-    def __init__(self, agent: str, reason: str) -> None:
+    def __init__(self, agent: str, reason: str, *, unknown: bool = False) -> None:
         super().__init__(f"{agent}'s conversation could not be reached: {reason}")
         self.agent = agent
         self.reason = reason
+        #: Whether the words may already be in the conversation.  True for a
+        #: call that did not come back; False for a refusal, which proves it
+        #: did not.
+        self.unknown = unknown
 
 
 async def hand_over(
@@ -322,11 +369,14 @@ async def hand_over(
             # come back says nothing either way — so this is not repeated, and
             # the count is logged rather than the words: the words are the
             # conversation's business and the log's line is only "this much of it
-            # went nowhere we can prove".
+            # went nowhere we can prove".  `unknown` carries the same fact to a
+            # caller that records an outcome: it is the one failure here that may
+            # have landed, so it must not be reported as a refusal.
             raise DeliveryFailed(
                 agent,
                 f"the hand-over did not come back, so it ({len(text)} characters) "
                 f"was not repeated",
+                unknown=True,
             )
         if attempt < _T.timeouts.stream.handover:
             await asyncio.sleep(_T.timeouts.pacing.reconnect)

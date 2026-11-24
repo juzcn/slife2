@@ -1,23 +1,25 @@
 """The facts the installer needs from inside the project.
 
-`seed` puts the shipped configuration and the model's guide (`AGENTS.md`)
-where slife2 will read them, without ever overwriting a file the user already
-has, and copies the bundled `skills/` and
-`jobs/` into the home **overwriting files of the same name** — the content
-update, and deliberately not the versioned-backup dance the old installer did:
-the bundle is the authority, and a person who edits a seeded file edits their
-copy.  `require` reads the *shipped* configuration with the project's own loader
+`seed` puts the shipped configuration, the model's guide (`AGENTS.md`) and the
+bundled `skills/` and `jobs/` where slife2 will read them, with **two update
+rules**: `slife2.yaml` is the operator's document and is never overwritten — a
+changed shipped copy is written beside it as `slife2-default.yaml` — while
+`AGENTS.md`, `skills/` and `jobs/` are the system's delivery and a reinstall
+replaces them.  `AGENTS.md` is the model's guide: a person may read it in the
+home, but editing it is not supported and there is no reference copy to merge.
+`require` reads the *shipped* configuration with the project's own loader
 and prints every external program it names, with the place that names it — and,
 for a `cli:` entry, the line that installs it.  The home's `slife2.yaml` is the
 server's file and may lag a release; it is never the installer's source of
 requirements.  The installer maps those names to packages and installs them;
-nothing here installs anything.  `secrets` reads the home's configuration for
-the credentials it cannot resolve, so the installer can say which
-`credstore set` commands would make it work.
+nothing here installs anything.  `secrets` reads the *shipped* configuration
+for the credentials it references, so the installer can say which
+`credstore set` commands would make it work — the same source as `require`, so
+a credential the release dropped stops being suggested.
 
     python install_helper.py seed --source <repo>/slife2.yaml --home <dir> [--dry-run]
     python install_helper.py require --source <repo> --home <dir>
-    python install_helper.py secrets --home <dir>
+    python install_helper.py secrets --source <repo>
 
 `seed` is stdlib-only and can run on any Python 3.  `require` and `secrets`
 import slife2, so they run with the project virtualenv's interpreter after
@@ -38,13 +40,14 @@ CONFIG_NAME = "slife2.yaml"
 #: name slife2 never reads: `find_config_path` looks for `slife2.yaml` only.
 REFERENCE_NAME = "slife2-default.yaml"
 
-#: The model's guide to its tools, seeded beside the configuration.  The name
-#: is `slife2.libs.host.paths.AGENTS_DOC`, repeated because `seed` is
+#: The model's guide to its tools, delivered beside the configuration.  The
+#: name is `slife2.libs.host.paths.AGENTS_DOC`, repeated because `seed` is
 #: stdlib-only and runs before the package is importable; the two spellings must
 #: stay one name, or the installer writes a file the prompt never finds.
+#:
+#: **The guide is the system's file, not the operator's**: a reinstall replaces
+#: it, as it replaces a bundled skill or job (`_seed_over`).
 AGENTS_NAME = "AGENTS.md"
-#: Its reference copy, for the configuration's reason.
-AGENTS_REFERENCE_NAME = "AGENTS-default.md"
 
 
 def _say(message: str) -> None:
@@ -72,9 +75,9 @@ def _seed_file(
     *reference_name* when it has one.  The second name is a reference for a
     person to compare and merge, not something slife2 reads.
 
-    Both files seeded this way — the configuration and the model's guide — are
-    documents a person edits, which is why neither is overwritten: the shipped
-    copy is advice, and the live file is theirs.
+    The configuration is the one document seeded this way: it is the operator's
+    file, so it is never overwritten — the shipped copy is advice, and the live
+    file is theirs.
     """
     if not source.is_file():
         _warn(
@@ -129,6 +132,71 @@ def _seed_file(
 #: Both are things a person or a model *uses*, not project source: `skills/`
 #: ships the playbooks and `jobs/` ships the code-defined tools.
 SEED_TREES = ("skills", "jobs")
+
+
+def _seed_over(
+    source: Path,
+    home: Path,
+    *,
+    name: str,
+    label: str,
+    dry_run: bool,
+) -> int:
+    """Copy the shipped *name* into *home*, replacing the home's copy.
+
+    **Overwrite is the whole update story**, the rule `seed_trees` follows: the
+    file is the system's delivery, not the operator's document.  `AGENTS.md` is
+    the model's guide, visible in the home so a person can read it, and a local
+    edit is unsupported — the next install replaces it.  There is no reference
+    copy, because there is nothing to merge.
+
+    A checkout's own file is already the live one, so seeding it beside itself
+    is a no-op.  A copy that fails is a warning, not a fatal install: the
+    configuration is in place, the home keeps whatever guide it had, and the
+    fix is to close whatever holds the file and run the installer again.
+    """
+    if not source.is_file():
+        _warn(
+            f"no shipped {name} at {source}; the home gets no {name}, and "
+            f"slife2 requires one.",
+            label,
+        )
+        return 0
+
+    try:
+        source = source.resolve()
+        home = home.resolve()
+        live = home / name
+        if source.parent == home:
+            _say(
+                f"{label}: checkout detected; {live} is the live file; nothing to seed."
+            )
+            return 0
+        shipped = source.read_bytes()
+        if live.is_file() and live.read_bytes() == shipped:
+            _say(f"{label}: {live} already matches the shipped {name}.")
+            return 0
+        existed = live.exists()
+        if dry_run:
+            verb = "overwrite" if existed else "create"
+            _say(f"{label}: would {verb} {live} from the shipped {name}.")
+            return 0
+        home.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, live)
+        if existed:
+            _say(f"{label}: overwrote {live} with the shipped {name}.")
+        else:
+            _say(f"{label}: created {live} from the shipped {name}.")
+        return 0
+    except OSError as exc:
+        print(
+            f"{label}: {exc}\n"
+            "  the configuration is in place and the install continues; only "
+            f"the shipped {name} could not be written. Close whatever holds the "
+            "file and run the installer again.",
+            file=sys.stderr,
+        )
+        return 0
 
 
 def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
@@ -188,15 +256,15 @@ def seed_trees(source: Path, home: Path, dry_run: bool) -> int:
 
 
 def seed(source: Path, home: Path, dry_run: bool) -> int:
-    """Place the shipped configuration and guide, and the bundled skills and jobs.
+    """Place the shipped documents, and the bundled skills and jobs.
 
-    One step, the same source root, and **two update rules in it**: the
-    documents a person edits (`slife2.yaml`, `AGENTS.md`) keep their own rule —
-    the live file is never overwritten, and a changed shipped one is written
-    beside it as a reference — while `skills/` and `jobs/` are copied over the
-    home with files of the same name replaced.  A checkout whose home is the
-    checkout itself is a no-op for all of them; a home pointed elsewhere from a
-    checkout gets the same seeding as an installed one.
+    One step, the same source root, and **two update rules in it**: `slife2.yaml`
+    is the operator's document — the live file is never overwritten, and a
+    changed shipped one is written beside it as a reference — while `AGENTS.md`,
+    `skills/` and `jobs/` are the system's delivery and are copied over the home
+    with files of the same name replaced.  A checkout whose home is the checkout
+    itself is a no-op for all of them; a home pointed elsewhere from a checkout
+    gets the same seeding as an installed one.
     """
     code = _seed_file(
         source,
@@ -208,16 +276,13 @@ def seed(source: Path, home: Path, dry_run: bool) -> int:
     )
     if code:
         return code
-    code = _seed_file(
+    _seed_over(
         source.parent / AGENTS_NAME,
         home,
         name=AGENTS_NAME,
-        reference_name=AGENTS_REFERENCE_NAME,
         label=AGENTS_NAME,
         dry_run=dry_run,
     )
-    if code:
-        return code
     return seed_trees(source.parent, home, dry_run)
 
 
@@ -262,7 +327,7 @@ def _add(
 #: The reference syntax `slife2.libs.host.config` resolves.  Kept here rather
 #: than imported: this reads the file before the project decides whether it is
 #: valid, and the loader's pattern is private.
-_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _record(found: dict[str, list[str]], name: str, origin: str) -> None:
@@ -280,18 +345,16 @@ def _references(value: object, path: str, found: dict[str, list[str]]) -> None:
         for index, item in enumerate(value):
             _references(item, f"{path}[{index}]", found)
     elif isinstance(value, str):
-        if value.startswith("keyring:"):
-            _record(found, value.removeprefix("keyring:"), path)
-            return
         for match in _REFERENCE.finditer(value):
-            # A `:-default` is a value, not a credential — the config supplies
-            # what to use when nothing is stored (`${SSH_BINARY:-ssh}`).
-            if match.group(2) is None:
-                _record(found, match.group(1), path)
+            _record(found, match.group(1), path)
 
 
-def secrets(home: Path) -> int:
-    """Print the credentials the configuration references, and where.
+def secrets(source: Path) -> int:
+    """Print the credentials the shipped configuration references, and where.
+
+    **The shipped configuration, not the home's**, for the reason `require`
+    reads it: the hints describe what the release being placed needs, and the
+    home's file may still name a credential this release dropped.
 
     **A hint, not a check.**  Whether a key is already in the environment or
     in credstore is deliberately not asked: resolving every reference would
@@ -301,7 +364,7 @@ def secrets(home: Path) -> int:
     One line per credential, in the order the file first names it:
     ``<credential><TAB><origin>, <origin>``.
     """
-    path = home / CONFIG_NAME
+    path = source / CONFIG_NAME
     if not path.is_file():
         _warn(f"no {CONFIG_NAME} at {path}; nothing to suggest.")
         return 0
@@ -446,14 +509,14 @@ def main(argv: list[str] | None = None) -> int:
     secrets_parser = commands.add_parser(
         "secrets", help="list the credentials the configuration references"
     )
-    secrets_parser.add_argument("--home", required=True)
+    secrets_parser.add_argument("--source", required=True)
 
     args = parser.parse_args(argv)
     if args.command == "seed":
         return seed(Path(args.source), Path(args.home), args.dry_run)
     if args.command == "require":
         return require(Path(args.source), Path(args.home))
-    return secrets(Path(args.home))
+    return secrets(Path(args.source))
 
 
 if __name__ == "__main__":

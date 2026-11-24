@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -17,22 +20,24 @@ from slife2.libs.host.paths import (
     DATA_ENV_VAR,
     RUNTIME_ENV_VAR,
     agent_dir,
+    agent_path,
     agents_dir,
     catalogue_db,
+    checkout_root,
     data_dir,
     home,
     homes_dir,
-    in_checkout,
     in_home,
     known_homes,
+    local_path,
     register_home,
+    replace_file,
     runtime_dir,
     schedule_dbs,
     skills_dir,
     subagent_file,
     subagent_path,
     turn_dbs,
-    work_dir,
 )
 
 pytestmark = pytest.mark.unit
@@ -48,7 +53,7 @@ def test_a_checkout_keeps_its_data_beside_itself(
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
 
-    assert in_checkout() is True
+    assert checkout_root() is not None
     assert data_dir() == tmp_path
 
 
@@ -71,7 +76,7 @@ def test_a_subdirectory_of_a_checkout_finds_the_checkout_root(
     monkeypatch.chdir(nested)
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
 
-    assert in_checkout() is True
+    assert checkout_root() is not None
     assert data_dir() == tmp_path
 
 
@@ -83,7 +88,7 @@ def test_an_installation_keeps_its_data_under_home(
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
     monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path / "home"))
 
-    assert in_checkout() is False
+    assert checkout_root() is None
     assert data_dir() == tmp_path / "home" / ".slife2"
 
 
@@ -98,7 +103,7 @@ def test_another_projects_pyproject_is_not_a_checkout(
         '[project]\nname = "something-else"\n', encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
-    assert in_checkout() is False
+    assert checkout_root() is None
 
 
 def test_a_config_alone_does_not_make_a_checkout(
@@ -107,7 +112,7 @@ def test_a_config_alone_does_not_make_a_checkout(
     """A production folder somebody put a `slife2.yaml` in is still production."""
     (tmp_path / "slife2.yaml").write_text("default: ''\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    assert in_checkout() is False
+    assert checkout_root() is None
 
 
 def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
@@ -115,10 +120,10 @@ def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
 ) -> None:
     """**A path that cannot be read is not a path that is not a checkout.**
 
-    `in_checkout` swallowed every `OSError` into False, so a `pyproject.toml`
-    that was there but unreadable — permissions, a racing delete — read as "not
-    a checkout" and sent the whole data directory to `~/.slife2` with nothing
-    said.  Only "no such file" now answers False.
+    The reader swallowed every `OSError` into "not a checkout", so a
+    `pyproject.toml` that was there but unreadable — permissions, a racing
+    delete — read as absent and sent the whole data directory to `~/.slife2`
+    with nothing said.  Only "no such file" now answers `None`.
     """
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "slife2"\n', encoding="utf-8"
@@ -134,7 +139,7 @@ def test_a_marker_that_cannot_be_read_is_not_a_missing_marker(
 
     monkeypatch.setattr(Path, "read_text", denied)
     with pytest.raises(PermissionError):
-        in_checkout()
+        checkout_root()
 
 
 def test_the_environment_overrides_both(
@@ -238,6 +243,59 @@ def test_a_subagents_directory_is_inside_its_parents(
     assert agent_dir("jack", "cabinet") != jack / "cabinet"
 
 
+def test_agent_path_answers_without_making_the_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A read must not create the conversation it is asking about.**
+
+    The plan, a transcript and a record are all read before they may exist; a
+    path builder that made the directory would turn a typo or a removed
+    subagent's stale name into a directory with no record — which
+    `subagent_create` then refuses for ever as "half-removed".
+    """
+    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
+
+    assert agent_path("jack") == tmp_path / "agents" / "jack"
+    assert agent_path("jack", "researcher") == (
+        tmp_path / "agents" / "jack" / "subagents" / "researcher"
+    )
+    assert not (tmp_path / "agents" / "jack").exists()
+    assert not (tmp_path / "agents" / "jack" / "subagents" / "researcher").exists()
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="drive-relative paths are a Windows spelling"
+)
+def test_a_drive_relative_path_is_resolved_in_the_home(tmp_path: Path) -> None:
+    """`C:foo` is not absolute; it is the caller's working directory on C:.
+
+    The daemon's current directory on a drive is a process-global fact it must
+    not lend to a caller, so a path that names the home's own drive is resolved
+    under the home — the model's working directory — rather than left for the
+    filesystem to place against whatever the daemon last used.
+    """
+    root = data_dir()
+    assert local_path(f"{root.drive}notes.txt") == root / "notes.txt"
+
+
+@pytest.mark.skipif(
+    os.name != "nt", reason="drive-relative paths are a Windows spelling"
+)
+def test_a_path_relative_to_another_drive_is_refused() -> None:
+    """There is no honest anchor for it, so it is refused rather than guessed."""
+    root = data_dir()
+    other = "D:" if root.drive.casefold() != "d:" else "C:"
+
+    with pytest.raises(ValueError, match="relative to drive"):
+        local_path(f"{other}notes.txt")
+
+
+def test_a_relative_path_is_resolved_in_the_caller_home(tmp_path: Path) -> None:
+    """The daemon's working directory is `runtime/`; the model's is the home."""
+    assert local_path("agents/jack/notes.txt") == home() / "agents/jack/notes.txt"
+    assert local_path(str(tmp_path / "absolute.txt")) == tmp_path / "absolute.txt"
+
+
 def test_a_subagent_stays_inside_its_parent(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -267,79 +325,13 @@ def test_a_subagent_stays_inside_its_parent(
     assert not (tmp_path / "agents" / "elsewhere").exists()
 
 
-def test_a_fork_shares_its_makers_work_directory(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A non-fork subagent owns its work; a fork is a copy and shares.
-
-    The cabinet and media are work products, so where they land follows the
-    conversation rather than the process: a persistent subagent has its own
-    directory, a fork has its maker's.  The record inside the subagent's
-    directory is what says which it is.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    jack = agent_dir("jack")
-    researcher = agent_dir("jack", "researcher")
-    record = subagent_file("jack", "researcher")
-
-    record.write_text("fork: false\n", encoding="utf-8")
-    assert work_dir("jack", "researcher") == researcher
-    assert work_dir("jack") == jack
-
-    record.write_text("fork: true\n", encoding="utf-8")
-    assert work_dir("jack", "researcher") == jack
-
-    record.unlink()
-    assert work_dir("jack", "researcher") == researcher, (
-        "a missing record is not a fork"
-    )
-
-
-def test_a_damaged_fork_record_is_named_not_silently_read(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """**A record that cannot be read is not a record that says "not a fork".**
-
-    The directory is the subagent's own either way, which is the safe answer
-    for a live subagent; what the warning adds is that a fork whose record was
-    lost would otherwise write into its own directory with nothing said.
-    """
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    researcher = agent_dir("jack", "researcher")
-    subagent_file("jack", "researcher").write_text(
-        "fork: [unclosed\n", encoding="utf-8"
-    )
-
-    with caplog.at_level("WARNING"):
-        assert work_dir("jack", "researcher") == researcher
-
-    assert any("not a fork" in one.getMessage() for one in caplog.records)
-
-
-def test_an_empty_fork_record_is_named_too(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """**A file that parsed to nothing is damage, not absence.**  A zero-byte
-    record loads as `None` and the old mapping check read it as "not a fork"
-    without a word — the one arm of the read that did not name what it found.
-    The answer stays the safe one; the warning is the trace."""
-    monkeypatch.setenv(DATA_ENV_VAR, str(tmp_path))
-    researcher = agent_dir("jack", "researcher")
-    subagent_file("jack", "researcher").write_text("", encoding="utf-8")
-
-    with caplog.at_level("WARNING"):
-        assert work_dir("jack", "researcher") == researcher
-
-    assert any("not a mapping" in one.getMessage() for one in caplog.records)
-
-
 def test_reading_a_subagent_record_does_not_create_the_subagent(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A read is a read.  `subagent_file` built its path through `agent_dir`.
 
     `agent_dir` mkdirs, so `send_message(subagent="reserch")` (a typo) created
-    `subagents/reserch/`; `subagent_set` then refused the name for ever as a
+    `subagents/reserch/`; `subagent_create` then refused the name for ever as a
     "half-removed" directory and `subagent_remove` would not delete it.  The
     writer creates its own parents (`statefile.write`).
     """
@@ -518,3 +510,37 @@ def test_turn_dbs_finds_the_conversations_and_not_the_ledgers(
     assert "jack/subagents/researcher/cabinet/turns.db" not in found, (
         "and neither is a name"
     )
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="a sharing violation is a Windows failure"
+)
+def test_a_swap_waits_out_a_reader_that_holds_the_destination(tmp_path) -> None:
+    """**A reader is not a reason to fail a swap.**
+
+    Windows refuses to rename onto a file another process has open, and every
+    reader in this codebase — a status line, a config load, a poll loop — holds
+    it that way for the length of one read.  The retry turns that transient
+    refusal into a wait; the file is still published whole, and nothing is left
+    beside it.
+    """
+    destination = tmp_path / "record.json"
+    destination.write_text("old", encoding="utf-8")
+    staged = tmp_path / "record.tmp"
+    staged.write_text("new", encoding="utf-8")
+
+    handle = destination.open("rb")
+
+    def release() -> None:
+        time.sleep(0.1)
+        handle.close()
+
+    reader = threading.Thread(target=release, daemon=True)
+    reader.start()
+    try:
+        replace_file(staged, destination)
+    finally:
+        reader.join(timeout=5)
+
+    assert destination.read_text(encoding="utf-8") == "new"
+    assert not staged.exists(), "the staged copy was published, not copied"

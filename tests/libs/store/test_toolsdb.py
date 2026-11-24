@@ -36,7 +36,7 @@ from slife2.libs.store.catalogue import (
     UNLOADED,
     ToolStore,
 )
-from slife2.libs.store.index import connect_to, fuse_ranked
+from slife2.libs.store.index import connect_to, connection_to, fuse_ranked
 from tests.fakes import StubEmbedder
 
 pytestmark = pytest.mark.unit
@@ -170,6 +170,32 @@ def test_a_name_belonging_to_another_source_is_refused(tmp_path) -> None:
     with pytest.raises(ValueError, match="already arxiv's tool"):
         merge(store, "other", "mcp", [tool("arxiv__search")])
     assert [row[0] for row in rows_in(store)] == ["arxiv__search"]
+
+
+def test_two_remote_names_that_sanitise_alike_are_refused(tmp_path) -> None:
+    """The catalogue's name is a row's identity, and sanitising can lose one.
+
+    A provider accepts only letters, digits, underscore and hyphen, so a
+    server's `read.file` and its `read_file` both become `fake__read_file`.
+    Keeping the first and warning would record one tool and make the one
+    advertised name run it — the second tool vanishes, and a model that read
+    about it calls something else.  That is the collision `sanitise` says the
+    catalogue refuses; a genuine repeat (one remote name listed twice) stays
+    the no-op it was.
+    """
+    store = store_at(tmp_path)
+
+    with pytest.raises(ValueError, match="both become"):
+        merge(
+            store,
+            "fake",
+            "mcp",
+            [
+                tool("fake__read_file", remote_name="read.file"),
+                tool("fake__read_file", remote_name="read_file"),
+            ],
+        )
+    assert rows_in(store) == [], "a refused listing records nothing"
 
 
 def test_a_name_claimed_between_the_plan_and_the_write_is_the_same_refusal(
@@ -534,6 +560,41 @@ def test_a_recreated_file_that_reuses_its_identity_is_still_rebuilt(
     with sqlite3.connect(path):
         pass  # what a connection to the deleted path leaves behind
     assert store.count() == 0, "the replacement is rebuilt despite the same pair"
+
+
+def test_a_catalogue_copied_over_the_live_path_is_rebuilt(tmp_path) -> None:
+    """**`cp` keeps the inode and the marker, so neither is an identity.**
+
+    A file from another build written over the live path presents the identity
+    pair this store recorded and the `application_id` it stamped — so the
+    file-identity check waved it through and every write its schema rejected
+    failed the tool list, one row at a time.  The `tool` table's shape is what
+    actually decides whether a write is accepted, so the open check reads it
+    too (`_holds_our_file`, `_tool_table`).
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    path = tmp_path / "tools.db"
+    row_before = store.count()
+    assert row_before == 1
+
+    # The copy: same file (so the same device/inode), same marker, an older
+    # schema, and a row in it.
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE tool")
+        connection.execute(
+            "CREATE TABLE tool (name TEXT PRIMARY KEY, description TEXT)"
+        )
+        connection.execute("INSERT INTO tool (name, description) VALUES ('old', 'x')")
+        connection.execute("PRAGMA application_id = 0x534C4632")
+
+    assert store.count() == 0, (
+        "the stale schema was served: a row the old table held was still there"
+    )
+    # The rebuild is whole: this build's columns are back, and a write the old
+    # CHECK would have refused lands.
+    merge(store, "arxiv", "mcp", [tool("arxiv__search")])
+    assert rows_in(store) == [("arxiv__search", STATUS_ENABLED, UNLOADED)]
 
 
 def test_a_catalogue_without_the_marker_is_adopted_rather_than_rebuilt(
@@ -1268,6 +1329,54 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
+def test_a_blank_keyword_list_does_not_throw_away_the_sentence(tmp_path) -> None:
+    """**One leg having no term is not the other being absent.**
+
+    `keywords: [""]` is a non-empty sequence with no search term in it, so the
+    keyword leg is absent while the meaning leg is not.  Reading the list as
+    "there is a keyword leg" raised `EmptyQuery` out of `match_expression` and
+    the sentence never ran — the cabinet's search already answers this way, and
+    the catalogue now does too.  With no sentence beside it there is nothing to
+    search with, and the refusal stands.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
+
+    found = asyncio.run(
+        store.search(keywords=[""], sentences=["papers"], embedder=EMBEDDER)
+    )
+    assert [row["name"] for row in found["results"]] == ["arxiv__search"]
+    with pytest.raises(textindex.EmptyQuery):
+        asyncio.run(store.search(keywords=[""], embedder=EMBEDDER))
+
+
+def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path) -> None:
+    """**A recorded index and a recorded identity are one fact.**
+
+    The table and its identity are written in one transaction, so a store that
+    records an index and has no table lost it outside a rebuild.  Answering that
+    search keyword-only is a failure read as a verdict; an *unrecorded* index is
+    the honest empty meaning leg, and this test pins the difference.
+    """
+    store = store_at(tmp_path)
+    merge(store, "browser", "mcp", [tool("browser__open", "open a page")])
+    with connection_to(store.path) as connection:
+        connection.execute("DROP TABLE tool_vec")
+
+    with pytest.raises(RuntimeError, match="records a vector index"):
+        asyncio.run(store.search(sentences=["open"], embedder=EMBEDDER))
+
+    # With the identity gone the same absence is a corpus nobody has indexed,
+    # and the search answers instead of failing — the keyword leg still answers,
+    # and `_meaning_of` has no table to read and contributes nothing.
+    with connection_to(store.path) as connection:
+        connection.execute("DELETE FROM meta WHERE key = 'vector_identity'")
+    answer = asyncio.run(
+        store.search(keywords=["open"], sentences=["open"], embedder=EMBEDDER)
+    )
+    assert [row["name"] for row in answer["results"]] == ["browser__open"]
+
+
 def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
     tmp_path,
 ) -> None:
@@ -1302,6 +1411,80 @@ def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(
     assert {"ours__held", "ours__waiting", "skill:alpha", "cli:alpha"} <= all_names
     assert "ours__held" not in only_names, "a tool already in the list is hidden"
     assert {"ours__waiting", "skill:alpha", "cli:alpha"} <= only_names
+
+
+def test_unloaded_only_filters_inside_the_semantic_leg(tmp_path) -> None:
+    """**The filter is part of the KNN, so its chunks take no place.**
+
+    `unloaded_only` is in the keyword leg's SQL and in `rows_in_order`, and a
+    `vec0` KNN cannot filter a column.  Filtering its answer afterwards let
+    every chunk of a loaded tool spend one of the `k` places and drop out, so
+    a sentences-only search whose nearest chunks all belonged to loaded tools
+    came back with an empty page — a confident "nothing matches" — although
+    unloaded tools existed beyond them.  The rowid restriction keeps the
+    chunks of rejected rows out of the ranking entirely.
+    """
+    store = store_at(tmp_path)
+    # Paragraphs, so every chunk of the long document carries the query's word
+    # and the loaded tools are the strictly nearest ones; a single paragraph
+    # would be packed into fewer, unevenly-similar chunks.
+    loaded = "\n\n".join(["工具 工具 工具"] * 400)
+    merge(
+        store,
+        "ours",
+        "plugin",
+        [tool("ours__held", loaded), tool("ours__held2", loaded)],
+    )
+    merge(store, "other", "plugin", [tool("ours__free", "trump")])
+    store.set_load("ours__held", LOADED)
+    store.set_load("ours__held2", LOADED)
+
+    page = asyncio.run(
+        store.search(sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True)
+    )
+
+    assert [row["name"] for row in page["results"]] == ["ours__free"]
+
+
+def test_a_filtered_search_stays_under_the_knn_ceiling(tmp_path) -> None:
+    """**`k` is a multiple of the page, not the page plus the rejected corpus.**
+
+    `sqlite-vec` refuses a `k` above 4096.  Widening the semantic leg by every
+    chunk its filters rejected grew with the corpus, so a filtered sentences
+    search over a large index raised instead of answering.  The rejected
+    chunks are kept out of the KNN's ranking, so `k` stays bounded by the page.
+    """
+    import sqlite_vec
+
+    store = store_at(tmp_path)
+    merge(
+        store,
+        "ours",
+        "plugin",
+        [tool("ours__held", "工具")],
+    )
+    merge(store, "other", "plugin", [tool("ours__free", "trump")])
+    store.set_load("ours__held", LOADED)
+    # More chunks than the extension's ceiling, on the row the filter rejects.
+    with store._connect(write=True) as connection:
+        for index in range(4097):
+            row = connection.execute(
+                "INSERT INTO tool_chunk (name, chunk_index) VALUES ('ours__held', ?)",
+                (100 + index,),
+            )
+            connection.execute(
+                "INSERT INTO tool_vec (rowid, embedding) VALUES (?, ?)",
+                (
+                    row.lastrowid,
+                    sqlite_vec.serialize_float32([1.0, 0.0, 0.0, 0.0, 0.0]),
+                ),
+            )
+
+    page = asyncio.run(
+        store.search(sentences=["工具"], embedder=EMBEDDER, limit=1, unloaded_only=True)
+    )
+
+    assert [row["name"] for row in page["results"]] == ["ours__free"]
 
 
 def test_the_keyword_index_is_rebuilt_when_its_field_list_moves(tmp_path) -> None:
@@ -1750,3 +1933,19 @@ def test_a_job_that_did_not_load_keeps_its_row_and_cannot_be_injected(
 
     assert rows_in(store) == [("job__broken", STATUS_ERROR, UNLOADED)]
     assert store.injectable(["job"])["tools"] == []
+
+
+def test_a_page_with_no_size_is_the_default_page_not_one_row(tmp_path) -> None:
+    """`limit <= 0` is "nobody said", and the answer is the default page.
+
+    The browse used to hand-roll the window; `page_window` is the one rule
+    every listing uses, and a caller that names no size must not get the
+    smallest legal page (one row) — `DEFAULT_TOOL_PAGE` is the convention.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool(f"arxiv__t{i}") for i in range(25)])
+    for asked in (0, -1):
+        page = store.page(limit=asked)
+        assert page["limit"] == DEFAULT_TOOL_PAGE
+        assert len(page["tools"]) == DEFAULT_TOOL_PAGE
+        assert page["total"] == 25

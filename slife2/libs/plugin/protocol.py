@@ -89,13 +89,16 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 
 import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
+import slife2.libs.host.config as config
 from slife2 import __version__
 from slife2.helpers.proactor import tolerate_reset_on_close
 from slife2.libs.host.config import (
+    LOOPBACK_BOUNDARY,
     Config,
     ConfigError,
     ServerSettings,
     find_config_path,
+    is_loopback_host,
     load,
 )
 from slife2.libs.host.paths import (
@@ -108,9 +111,9 @@ from slife2.libs.host.runtime import (
     ServerRecord,
     clear_record,
     pid_alive,
+    process_start_token,
     read_record,
     record_lock,
-    same_process,
     tcp_listening,
     write_record,
 )
@@ -118,14 +121,24 @@ from slife2.libs.host.secrets import masked, masked_obj
 from slife2.libs.plugin.audience import (
     FOREIGN_HOME,
     ConversationId,
+    conversation_of,
     foreign_home,
     request_conversation,
     request_home,
+    request_meta,
+    turn_of,
     unaddressed,
     with_home,
+    with_turn,
 )
 
 logger = logging.getLogger(__name__)
+
+#: The remedy every build-conflict refusal names, whichever side found it —
+#: the launcher's stale record on the port, or this module's probe of a server
+#: that answers with an earlier build.  One clause, because it is one command
+#: the operator runs, and two spellings would be two claims about the fix.
+DOWN_HINT = "stop it with `slife2 down` and start again"
 
 #: The tool a plugin serves when it holds **sources** of its own — the ones it
 #: connects to on the operator's behalf, and the ones that are not tools at all.
@@ -154,35 +167,36 @@ LIST_SOURCES = "list_sources"
 #: caller's identity is forwarded on through, exactly as the hub forwards it.
 CALL_SOURCE = "call_source"
 
-#: The two source names the *documents* are filed under — a playbook's rows and
-#: a command's.  A source is a name and not a process, so these are not the
-#: plugins' own names (`skills-server` serves, `skills` is what its rows are
-#: filed under), and they are contract rather than any one plugin's business
-#: for the same reason `LIST_SOURCES` is: the hub merges under them, the two
-#: declaring plugins write them, and the family plugins that hold *other*
-#: people's servers refuse a name that would collide with one.  Three copies of
-#: `"cli"` and a test to hold them together is what this replaces.
-SKILLS_SOURCE = "skills"
-CLI_SOURCE = "cli"
-
-#: The source name the **jobs** are filed under — code the model wrote in the
-#: home's `jobs/` folder, each file becoming a tool named `job__<name>`.  It is
-#: a source rather than a set of plugin tools because the hub must re-read the
-#: folder as the model changes it, and `list_sources` is the one answer the hub
-#: refreshes before every search; and it is a *function* source, so its rows are
-#: callable, unlike the two document sources above.
-JOB_SOURCE = "job"
+#: The three source names the *documents* are filed under — a playbook's rows,
+#: a command's, and the jobs folder's code.  A source is a name and not a
+#: process, so these are not the plugins' own names (`skills-server` serves,
+#: `skills` is what its rows are filed under), and they are contract rather than
+#: any one plugin's business for the same reason `LIST_SOURCES` is: the hub
+#: merges under them, the declaring plugins write them, the family plugins that
+#: hold *other* people's servers refuse a name that would collide with one, and
+#: the loader refuses an `mcp:`/`rest-api:` entry under one because it would
+#: shadow the document source.  **Defined in `slife2.libs.host.config`** — the
+#: loader cannot import this module (this one imports it) — and re-exported here
+#: so every caller still has one spelling.
+SKILLS_SOURCE = config.SKILLS_SOURCE
+CLI_SOURCE = config.CLI_SOURCE
+JOB_SOURCE = config.JOB_SOURCE
 
 
 def describe(conversation: ConversationId) -> str:
     """A conversation id as one readable token, for a log line.
 
+    **The trace's spelling, not a second one.**  `slife2.helpers.logcontext.describe`
+    writes the prefix every log record inside a turn carries; message subjects
+    and the a2a lines go through this function, and the two used to be copies —
+    a change to how a conversation is named for logs could move one surface and
+    not the other.
+
     `jack` rather than `jack/` for an agent's own conversation, because that is
     what a person calls it — and the worker form keeps the slash, so the two are
     never confusable in a log.
     """
-    agent, subagent = conversation
-    return f"{agent}/{subagent}" if subagent else agent
+    return logcontext.describe(*conversation)
 
 
 def close_names(name: str, known: Iterable[str], *, limit: int = 3) -> list[str]:
@@ -318,15 +332,25 @@ def agent_or_blank(ctx: Any) -> str:
 
 
 class TraceMiddleware(Middleware):
-    """Name the conversation a tool call names, for every line it writes.
+    """Name the conversation and turn a tool call serves, for every line it writes.
 
-    **The arguments are the one place a call says which conversation it is
-    about.**  Every tool that has one takes `agent`, and most take `subagent`; a
-    call that names neither (`now`, a catalogue read) is about the machine and
-    keeps whatever trace its caller set (`slife2.helpers.logcontext.tracing`).
-    The a2a send tools are the one place `agent` is the *recipient* rather than
-    the caller: their lines are about the message to that agent, which is the
-    question a reader of those lines is asking.
+    **The conversation is in the arguments, or in `_meta`.**  A management tool
+    takes `agent` and most take `subagent`; a model-facing tool carries its
+    conversation in `_meta` instead (`conversation_reader`), so arguments are
+    read first and `_meta` answers when they name nobody.  A call that names
+    neither anywhere (`now`, a catalogue read) is about the machine and keeps
+    whatever trace its caller set (`slife2.helpers.logcontext.tracing`).  The
+    a2a send tools are the one place `agent` is the *recipient* rather than the
+    caller: their lines are about the message to that agent, which is the
+    question a reader of those lines is asking — and arguments-first keeps it
+    that way.
+
+    **The turn is in `_meta`.**  One process serves every turn of every
+    conversation, so a call cannot infer the turn from its connection, and it is
+    not something a model writes — the caller's harness attaches it
+    (`slife2.libs.plugin.audience.TURN`).  Reading it here puts it on the same
+    records as the conversation, which is what joins one turn's lines across
+    processes (`slife2.helpers.logcontext`).
 
     Registered outermost in `house_server`, so the conversation is in hand
     before the masking middleware rebuilds the tool list and before the handler
@@ -348,7 +372,12 @@ class TraceMiddleware(Middleware):
         if isinstance(arguments, dict):
             agent = str(arguments.get("agent") or "")
             subagent = str(arguments.get("subagent") or "")
-        with logcontext.tracing(agent, subagent):
+        meta = request_meta(getattr(context, "fastmcp_context", None))
+        if not agent:
+            named = conversation_of(meta)
+            if named is not None:
+                agent, subagent = named
+        with logcontext.tracing(agent, subagent), logcontext.turning(turn_of(meta)):
             return await call_next(context)
 
 
@@ -437,14 +466,19 @@ def house_server(
 ) -> FastMCP:
     """A FastMCP server with this project's conventions applied.
 
-    One convention is a constructor option, and it is worth stating rather than
-    defaulting:
+    Two conventions are constructor options, and they are worth stating rather
+    than defaulting:
 
     * ``mask_error_details=False`` — FastMCP's default replaces an exception's
       message with a generic one.  Every server here listens on loopback and
       serves its own operator, so the detail is worth more than the tidiness:
       "model not found" and "the API key did not resolve" are the two things a
       user actually has to act on, and both arrive as exceptions.
+    * ``version=__version__`` — the build this server came from.  The
+      handshake's ``server_info.version`` is what :func:`identifies` compares
+      before a client believes a server is one of ours, and FastMCP's own
+      default is *its* version, which is the same for every build of this
+      system and says nothing about the tool signatures behind the name.
 
     ``stateless_http`` and ``json_response`` are *not* here: they are
     ``mcp.run(...)`` options rather than constructor options, and :func:`serve`
@@ -466,6 +500,7 @@ def house_server(
     mcp: FastMCP = FastMCP(
         name,
         instructions=instructions or None,
+        version=__version__,
         lifespan=lifespan,
         mask_error_details=False,
     )
@@ -493,6 +528,15 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
     here against the installed client, `Client.server_info` is populated from the
     `DiscoverResult`, and the name is the one passed to `FastMCP(...)`.
 
+    **The build is half of that identity.**  A server from another build
+    advertises the same name and answers MCP correctly; what it does not have
+    is this build's tool signatures, so reusing it makes every turn fail on the
+    first tool whose signature moved.  `server_info.version` is compared
+    against this build's `__version__` — which every server built by
+    :func:`house_server` advertises — and a server that reports none is the
+    same unreadable-identity case the name fallback exists for, so the name
+    check stands alone.
+
     The fallback exists because the name is not guaranteed.  A client pinned to
     an exact modern protocol version gets a *synthesized* identity with an empty
     name, and a server from another implementation may report none at all — so
@@ -508,7 +552,14 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
     """
     info = client.server_info
     if info is not None and info.name:
-        return info.name == expected_name
+        if info.name != expected_name:
+            return False
+        # `getattr` because a reported identity need not carry a version at all
+        # — `Implementation` has the field, a test double or another
+        # implementation may not — and an absent one is the unreadable case
+        # above, not a mismatch.
+        reported = getattr(info, "version", "")
+        return not reported or reported == __version__
 
     names = {tool.name for tool in await client.list_tools()}
     return fallback_tool in names
@@ -593,7 +644,8 @@ class _Ours(ClientTransport):
 
 
 class Peer(Client):
-    """A connection to one of our own servers, which says which home it is for.
+    """A connection to one of our own servers, which says which home and turn it
+    is for.
 
     Every call this makes carries the ambient home
     (`slife2.libs.plugin.audience.with_home`), which is the other half of
@@ -601,6 +653,11 @@ class Peer(Client):
     and it has to pass that on, or the second hop of every chain — the context
     store a turn is remembered in, the cabinet a tool result is saved to, the hub
     a tool is routed through — would resolve the files in its own directory.
+
+    **And the ambient turn** (`slife2.helpers.logcontext.current_turn`), which
+    is the second thing a call says beside its arguments.  The far end prints it
+    on every line it writes, so one turn's hops share a value a reader can grep;
+    a call made outside any turn carries none and changes nothing.
 
     A subclass rather than a wrapper, so that the call sites that hold one of
     these are unchanged and still typed as a `Client`: what changed is what a
@@ -615,7 +672,12 @@ class Peer(Client):
         meta: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
-        return await super().call_tool(name, arguments, meta=with_home(meta), **kwargs)
+        return await super().call_tool(
+            name,
+            arguments,
+            meta=with_turn(with_home(meta), logcontext.current_turn()),
+            **kwargs,
+        )
 
 
 async def open_server(
@@ -644,6 +706,12 @@ async def open_server(
     check, which is what a caller that does not know it wants — a test, or a URL
     nobody configured.  :func:`identifies` explains why the handshake's own
     identity is asked first and the tool list second.
+
+    **A server from another build is refused by name and remedy.**  The
+    handshake says which build answered, and a daemon left running by an older
+    one is the reason the check compares versions at all; the refusal says so,
+    and names the command that stops it, rather than reporting it as a stranger
+    on the port.
 
     The client is *not* closed on success; the caller owns its lifetime, and
     :func:`close_server` is the other half of this pair.
@@ -675,6 +743,15 @@ async def open_server(
     try:
         await client.__aenter__()
         if name and not await identifies(client, name, fallback_tool=fallback_tool):
+            # A name that matches but a build that does not is a different
+            # refusal from a stranger on the port: the server *is* ours, from
+            # an earlier build, and the fix is one command.
+            info = client.server_info
+            if info is not None and info.name == name and getattr(info, "version", ""):
+                raise ConnectionError(
+                    f"{name} is build {info.version}, not this build {__version__}; "
+                    f"{DOWN_HINT}"
+                )
             names = sorted(tool.name for tool in await client.list_tools())
             raise ConnectionError(f"not {name} (tools: {names or 'none'})")
     except asyncio.CancelledError:
@@ -726,8 +803,14 @@ def tool_payload(result: Any) -> dict[str, Any]:
     Reads the structured payload the SDK has already deserialized, and falls
     back to the text block — which is the same JSON, since a structured result
     is also sent as text.  A server reached over a transport that kept only the
-    text is still readable, and one that answered with neither is a caller that
-    gets an empty mapping and says so itself.
+    text is still readable.
+
+    **An answer that is not a mapping is refused.**  A tool that answered in
+    prose, a scalar, or a body that will not parse is not a tool that answered
+    with `{}`: reading it as empty makes a build mismatch or a damaged payload
+    indistinguishable from an honest empty answer — the confident negative SDD
+    Appendix C forbids — and every caller would have to remember to check.  The
+    refusal is `unreadable`, so it quotes the answer and names the remedy.
 
     **The text block is `result.content`, and it has to be read there.**  A
     result that carried no structured content — any tool whose return the SDK
@@ -735,9 +818,7 @@ def tool_payload(result: Any) -> dict[str, Any]:
     block, because `fastmcp.client` fills `data` from `structured_content` alone
     (`_parse_call_tool_result`).  A tool returning a scalar is wrapped by
     FastMCP, so its JSON arrives in `data` itself, which is why the loop below
-    reads both.  Only the JSON matters, so a text block that is not a mapping —
-    a refusal's message, a tool that answered in prose — is still `{}`, which
-    is the caller's cue to say the shape is wrong.
+    reads both.
 
     Here rather than in a caller, because it is about reading a *tool result*
     and this is the module that owns what being one of our servers means.  Two
@@ -752,15 +833,33 @@ def tool_payload(result: Any) -> dict[str, Any]:
     # than in the block, and the two spellings are the same value either way.
     blocks = getattr(result, "content", None) or []
     found = [getattr(block, "text", None) for block in blocks]
+    seen: Any = None
     for text in (*found, data):
         if not isinstance(text, str) or not text.strip():
             continue
+        seen = text
         try:
             decoded = json.loads(text)
         except json.JSONDecodeError:
-            return {}
-        return decoded if isinstance(decoded, dict) else {}
-    return {}
+            raise unreadable("the far end", "answer with a mapping", text) from None
+        if not isinstance(decoded, dict):
+            raise unreadable("the far end", "answer with a mapping", decoded)
+        return decoded
+    raise unreadable("the far end", "answer with a mapping", seen)
+
+
+def tool_payload_or_empty(result: Any) -> dict[str, Any]:
+    """`tool_payload`, except that an answer that is not a mapping reads as `{}`.
+
+    **The job runtime's reader.**  A job's direct `call` may reach any server's
+    tool, and a tool that answers in prose (`skill_use` is the shape) is an
+    answer rather than a build mismatch: `data` is empty and the caller reads
+    the text blocks.  Every other hop uses `tool_payload`, which refuses.
+    """
+    try:
+        return tool_payload(result)
+    except UnreadableAnswer:
+        return {}
 
 
 class UnreadableAnswer(ConnectionError):
@@ -820,8 +919,11 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
         prog=description, description=description, allow_abbrev=False
     )
     add_data_dir_argument(parser)
-    parser.add_argument("--host", default=None, help="override the listen address")
+    parser.add_argument(
+        "--host", default=None, help="override the listen address (loopback only)"
+    )
     parser.add_argument("--port", default=None, type=int, help="override the port")
+    parser.add_argument("--path", default=None, help="override the endpoint path")
     args = parser.parse_args(argv)
     apply_data_dir(args)
     return args
@@ -888,7 +990,19 @@ def _live_owner(url: str) -> ServerRecord | None:
     record = read_record(url)
     if record is None or not pid_alive(record.pid):
         return None
-    if same_process(record) or not record.start_token:
+    if not record.start_token:
+        # The platform has no token, so a live pid is the whole of the evidence
+        # there is.
+        return record
+    current = process_start_token(record.pid)
+    # **An unreadable token is not a mismatch.**  `same_process` answers False
+    # for both, deliberately, because it is the question "may I signal this
+    # process?" and erring towards leaving it alone is safe there.  Here the
+    # question is "may I overwrite its record?", and the safe answer is the
+    # opposite: reading "could not prove" as "not ours" lets a second start
+    # overwrite and then delete a live daemon's record, orphaning it.  A token
+    # that exists and differs is the only proof of a recycled pid.
+    if current is None or current == record.start_token:
         return record
     return None
 
@@ -976,12 +1090,21 @@ def serve(
       between two of them.  The agent server does keep its loops, but it names
       them with an ordinary tool argument rather than a transport session, so it
       is stateless in the sense this flag means.  See `slife2.plugins.agent.server`.
+
+    **A non-loopback host is refused before anything is written.**  The config
+    field is refused at load (`config.is_loopback_host`), but `--host` overrides
+    it after the load — so the bind itself is the last place the boundary can
+    be held, and a refusal leaves no record behind.
     """
-    url = ServerSettings(
-        host=args.host or server.host,
-        port=args.port or server.port,
-        path=server.path,
-    ).url
+    host = args.host or server.host
+    port = args.port or server.port
+    path = getattr(args, "path", None) or server.path
+    if not is_loopback_host(host):
+        raise ConfigError(
+            f"{name}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
+            f"`--host` takes `localhost` or a loopback address only"
+        )
+    url = ServerSettings(host=host, port=port, path=path).url
     record = ServerRecord.now(
         name=name,
         url=url,
@@ -1021,8 +1144,8 @@ def serve(
         _fastmcp_http.FastMCPStreamableHTTPSessionManager = _OwnedSessionManager
         mcp.run(
             transport="http",
-            host=args.host or server.host,
-            port=args.port or server.port,
+            host=host,
+            port=port,
             path=server.path,
             # **No banner, for two reasons.**  It is ~20 lines of ASCII art at
             # every server start, in a file whose first useful line is ours; and
@@ -1044,7 +1167,9 @@ def serve(
             uvicorn_config={"log_config": None},
         )
     finally:
-        if owner is None and read_record(url) == record:
+        # A live owner returned above, before the server was started, so this
+        # process is the one that wrote the record.
+        if read_record(url) == record:
             clear_record(url)
 
 
@@ -1208,11 +1333,13 @@ def serve_plugin(
     a half-formatted line.  `logger` is the caller's, so a line still lands
     under the name of the server that wrote it rather than this module's.
 
-    **Two things stop a start here, and both are configuration answers.**  The
+    **Three things stop a start here, and all are configuration answers.**  The
     config itself may be missing or unusable (`ConfigError` from `find_config_path`
-    or `load`), and `require` may say what this server cannot serve without —
-    a model protocol no provider in the config speaks is the whole of that.
-    Both are written as `"<server>: <sentence>"` to **stderr**, returning 2 —
+    or `load`), `require` may say what this server cannot serve without —
+    a model protocol no provider in the config speaks is the whole of that —
+    and a `--host` beyond loopback is refused, because every server here is
+    unauthenticated (`config.is_loopback_host`).
+    All three are written as `"<server>: <sentence>"` to **stderr**, returning 2 —
     the same answer `slife2` gives a server that would not come up: two lines
     and no stack, because nothing has been drawn yet and the fix is an edit to
     the file the sentence names.  Said rather than raised, and the reason is
@@ -1244,6 +1371,18 @@ def serve_plugin(
     if require is not None and (missing := require(config)):
         print(f"{server_name}: {missing}", file=sys.stderr)
         return 2
+    host = args.host or address.host
+    if not is_loopback_host(host):
+        # Refused before the start-up line: a log must not say "serving" about
+        # a server that refused to start.  The config field is refused at load,
+        # so what reaches here is `--host` — the same answer as every other
+        # configuration refusal, one sentence and exit 2.
+        print(
+            f"{server_name}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
+            f"`--host` takes `localhost` or a loopback address only",
+            file=sys.stderr,
+        )
+        return 2
 
     # **A start-up line has to say which run it is.**  Logs are appended across
     # restarts, and a person reading one has no other way to tell one instance
@@ -1253,9 +1392,9 @@ def serve_plugin(
     logger.info(
         "serving %s on http://%s:%d%s%s (pid %d, data-dir %s%s)",
         server_name,
-        args.host or address.host,
+        host,
         args.port or address.port,
-        address.path,
+        args.path or address.path,
         f" ({note(config)})" if note is not None else "",
         os.getpid(),
         data_dir(),

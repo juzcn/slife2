@@ -3,7 +3,7 @@
 A transcript holds three kinds of line — what the person said, what the model
 said, and what the *harness* did — and the third is the one nothing in the
 conversation itself accounts for: history came back when the window opened, the
-discriminator kept some turns and went to the log for others, a turn was
+decision model kept some turns and went to the log for others, a turn was
 cancelled, a peer came online or went away.  This is the one place their words
 are written, so a reader who has learned `[restored 3 turns]` meets the same
 shape everywhere and a producer cannot quietly invent a fourth spelling.
@@ -20,18 +20,25 @@ than a peer.  Both go through the two functions below, so a channel cannot
 announce itself in a vocabulary of its own: what it supplies is the name.
 
 **And the words are the interface's, so they are the language's.**  Every line
-here goes through `t()` (`slife2.tui.i18n`), which is why a Chinese window reads
-`[已恢复 3 轮]` where an English one reads `[restored 3 turns]`.  That the two
-arrival lines are written by *daemons* rather than by the window is a wrinkle
-worth knowing: a plugin composes its note in its own process, so `--lang` — a
-flag on the window's own command line — does not reach it, and a daemon follows
-the OS locale where a window follows the flag (`SDD` §10.4).
+here goes through `t()` (`slife2.libs.harness.i18n`), which is why a Chinese
+window reads `[已恢复 3 轮]` where an English one reads `[restored 3 turns]`.
+That the two arrival lines are written by *daemons* rather than by the window is
+a wrinkle worth knowing: a plugin composes its note in its own process, so
+`--lang` — a flag on the window's own command line — does not reach it, and a
+daemon follows the OS locale where a window follows the flag (`SDD` §10.4).
+
+**This module is a library's rather than the window's**, because a plugin that
+composes one of these lines must not import the terminal package to do it: a
+headless daemon has no display, and a plugin depending on the window inverts the
+layering.  The window imports it like any other reader.
 """
 
 from __future__ import annotations
 
-from slife2.tui.i18n import t
-from slife2.tui.theme import GLYPHS
+import json
+
+from slife2.libs.harness.glyphs import GLYPHS
+from slife2.libs.harness.i18n import t
 
 #: The two glyphs every arrival and departure wears, named here because two
 #: channels write these lines (`slife2.plugins.a2a.mesh`, `slife2.plugins.wechat.server`) and a glyph
@@ -44,12 +51,12 @@ def as_turns(count: int) -> str:
     """`3 turns`, or `1 turn` — the phrase the counting notes are written in.
 
     Shared rather than spelled twice: the restored-history note and the
-    discriminator's note are the same kind of line, and a reader who has learned
+    decision model's note are the same kind of line, and a reader who has learned
     to read one should not meet `1 turns` in the other.
 
     **The choice between the two spellings is made here**, in the one place that
     has the count: the table has no plural machinery and neither should it
-    (`slife2.tui.i18n`), and a language whose noun does not inflect gives both
+    (`slife2.libs.harness.i18n`), and a language whose noun does not inflect gives both
     keys the same value.
     """
     return t("turn_one", n=count) if count == 1 else t("turn_many", n=count)
@@ -60,24 +67,40 @@ def restored(count: int) -> str:
     return t("restored", turns=as_turns(count))
 
 
-def kept(kept: int, recalled: int) -> str:
-    """What one turn's discriminator decided to run on."""
-    return t("kept", turns=as_turns(kept), recalled=recalled)
+def unloaded(answer: str) -> str:
+    """The trim's answer as a person's line: what left the model's list.
 
+    **The tool answers the model with five lists, one verdict per name**, and
+    that object is what its pair carries (`slife2.clients.toolclient`).  A
+    person reading a transcript needs the names, not the keys — so the five
+    lists become one sentence here, the one place the object is for a reader
+    rather than for a model.  The names keep their lists' order and verdict.
 
-#: The context server's rerank statuses and the sentence each one owes the
-#: person.  An unknown status is a newer server's word and falls back to the
-#: generic failure rather than showing a translation key.
-_RERANK = {
-    "unavailable": "rerank_unavailable",
-    "failed": "rerank_failed",
-    "empty": "rerank_empty",
-}
-
-
-def rerank(status: str) -> str:
-    """A recall whose cross-encoder could not be used, and what that cost."""
-    return t(_RERANK.get(status, "rerank_failed"))
+    **An answer this does not recognise is shown as it came.**  A partial or
+    foreign object is not "nothing moved"; that reading is the failure Appendix
+    C names.  Every list is required before anything is said.
+    """
+    try:
+        found = json.loads(answer)
+    except (json.JSONDecodeError, TypeError):
+        return answer
+    if not isinstance(found, dict):
+        return answer
+    labels = (
+        ("unloaded", "trim_unloaded"),
+        ("refused", "trim_refused"),
+        ("no_load_state", "trim_no_load_state"),
+        ("unknown", "trim_unknown"),
+        ("not_loaded", "trim_not_loaded"),
+    )
+    parts: list[str] = []
+    for key, label in labels:
+        names = found.get(key)
+        if not isinstance(names, list):
+            return answer
+        if names:
+            parts.append(t(label, names=", ".join(str(name) for name in names)))
+    return "; ".join(parts) if parts else t("trim_nothing")
 
 
 def interrupted() -> str:

@@ -18,6 +18,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from slife2.libs.host.section import SectionError, read_switch
+from slife2.libs.host.validation import validation_refusal
+
 Transport = Literal["stdio", "http"]
 
 
@@ -58,11 +61,32 @@ class McpConfig(BaseModel):
                 raise ValueError("stdio needs `command` — the program to start")
             if self.url:
                 raise ValueError("stdio must not name `url` — choose one transport")
+            if self.headers:
+                raise ValueError(
+                    "stdio must not name `headers` — that belongs to the http "
+                    "transport, and nothing would send it"
+                )
         else:
             if not self.url:
                 raise ValueError("http needs `url` — the endpoint to connect to")
             if self.command:
                 raise ValueError("http must not name `command` — choose one transport")
+            # **A field of the other transport is a key nobody reads.**  These
+            # were accepted and silently dropped: `headers` on a stdio entry
+            # was never resolved or sent, and `args`/`env`/`cwd` on an http one
+            # never reached a process.  The operator believes the credential
+            # is in use, which is the one way a config can lie without an
+            # error (SDD §11.1, Appendix C).
+            for name, value in (
+                ("args", self.args),
+                ("env", self.env),
+                ("cwd", self.cwd),
+            ):
+                if value:
+                    raise ValueError(
+                        f"http must not name `{name}` — that belongs to the "
+                        f"stdio transport, and nothing would read it"
+                    )
         return self
 
 
@@ -81,8 +105,7 @@ class RestApiConfig(BaseModel):
         "document names."
     )
     api_key: str = Field(
-        description="A `${VAR}` or `keyring:` reference; empty for an API that "
-        "needs no key."
+        description="A `${VAR}` reference; empty for an API that needs no key."
     )
     args: list[str] | None = Field(description="Extra arguments for the proxy.")
     env: dict[str, str] | None = Field(
@@ -157,41 +180,39 @@ CLI_DEFAULTS: dict[str, Any] = {
     "enabled": True,
 }
 
-_MISSING = object()
 
+def read_enabled(
+    data: Mapping[str, Any], where: str, *, error: type[Exception] = ValueError
+) -> bool:
+    """An entry's `enabled:` switch — a real YAML boolean, and absent means on.
 
-def _check_enabled(data: Mapping[str, Any], where: str) -> None:
-    """The switch is a real YAML boolean, and absence means on.
-
-    The same rule and the same sentence as `slife2.libs.host.config._enabled`:
-    a YAML 1.2 `no`/`off` is a string, every non-empty string is true, and a
-    switch that decides whether a process is dialled is refused rather than
-    guessed at.
+    The rule is `slife2.libs.host.section.read_switch`'s, and that is where the
+    YAML-1.2 argument lives: `no` and `off` are strings there, and every
+    non-empty string is true, so a switch is refused rather than guessed at.
+    This is the one spelling for the sections whose entries are validated as
+    objects (`mcp:`, `rest-api:`, `cli:`); `error` is the exception the calling
+    layer refuses with (`ConfigError` at load, `ValueError` here).
     """
-    value = data.get("enabled", True)
-    if not isinstance(value, bool):
-        raise ValueError(
-            f"{where}.enabled: expected `true` or `false`, got {value!r} — YAML "
-            f"spells a boolean as one, so `no`, `off` and a quoted 'false' are "
-            f"strings; leave the key out for true"
-        )
+    try:
+        return read_switch(data.get("enabled", True), f"{where}.enabled")
+    except SectionError as exc:
+        raise error(str(exc)) from exc
 
 
-def _error(where: str, exc: ValidationError) -> ValueError:
-    """The first validation failure, in the config's own sentence.
+def string_field(value: Any, where: str, *, strip: bool = True) -> str:
+    """A `command:`/`url:`/`spec:` as written — a string or absent, never coerced.
 
-    The path is what a caller acts on; an enum or switch also names the value it
-    got.  Everything else does not echo its input, because Pydantic puts the
-    whole parent mapping in `input` for a missing field and that can carry a
-    literal credential.
+    `str(["npx", "foo"])` is the program name `"['npx', 'foo']"`: a row that
+    loads cleanly and fails at spawn in another process, which is the failure
+    the canonical objects exist to prevent — and their `str` fields refuse a
+    non-string, so the hand-written readers refuse it the same way.  A
+    non-scalar is named by its type, not echoed (`validation_refusal`'s rule).
     """
-    first = exc.errors()[0]
-    path = ".".join(str(part) for part in first.get("loc", ()))
-    got = first.get("input", _MISSING)
-    shown = first.get("type") in ("literal_error", "bool_type") and got is not _MISSING
-    suffix = f" (got {got!r})" if shown else ""
-    where = f"{where}.{path}" if path else where
-    return ValueError(f"{where}: {first['msg']}{suffix}")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
+    return value.strip() if strip else value
 
 
 def load_mcp(raw: Any, *, where: str) -> McpConfig:
@@ -203,8 +224,8 @@ def load_mcp(raw: Any, *, where: str) -> McpConfig:
         raise ValueError(
             f"{where}: `transport` is derived from `command`/`url`; do not write it"
         )
-    command = str(data.get("command") or "").strip()
-    url = str(data.get("url") or "").strip()
+    command = string_field(data.get("command"), f"{where}.command")
+    url = string_field(data.get("url"), f"{where}.url")
     if command and url:
         raise ValueError(
             f"{where}: has both `command` and `url`; one entry is one "
@@ -218,7 +239,7 @@ def load_mcp(raw: Any, *, where: str) -> McpConfig:
     data["command"] = command or None
     data["url"] = url or None
     data["transport"] = "http" if url else "stdio"
-    _check_enabled(data, where)
+    read_enabled(data, where)
     for key in ("args", "env", "headers", "cwd", "description"):
         if data.get(key) is None:
             data.pop(key, None)
@@ -226,7 +247,7 @@ def load_mcp(raw: Any, *, where: str) -> McpConfig:
     try:
         return McpConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def load_rest_api(raw: Any, *, where: str) -> RestApiConfig:
@@ -248,7 +269,7 @@ def load_rest_api(raw: Any, *, where: str) -> RestApiConfig:
         )
     if not data.get("spec"):
         raise ValueError(f"{where}: needs `spec` — the OpenAPI document's URL or path")
-    _check_enabled(data, where)
+    read_enabled(data, where)
     for key in ("base_url", "api_key", "args", "env", "cwd", "description"):
         if data.get(key) is None:
             data.pop(key, None)
@@ -256,7 +277,7 @@ def load_rest_api(raw: Any, *, where: str) -> RestApiConfig:
     try:
         return RestApiConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def load_cli(raw: Any, *, where: str) -> CliConfig:
@@ -264,14 +285,14 @@ def load_cli(raw: Any, *, where: str) -> CliConfig:
     if not isinstance(raw, Mapping):
         raise ValueError(f"{where}: expected a mapping")
     data = {str(key): value for key, value in raw.items()}
-    command = str(data.get("command") or "")
+    command = string_field(data.get("command"), f"{where}.command", strip=False)
     if not command:
         raise ValueError(
             f"{where}: needs `command` — the program the model may run "
             f"(e.g. `gh`, or `python -m mytool`)"
         )
     data["command"] = command
-    _check_enabled(data, where)
+    read_enabled(data, where)
     for key in ("description", "install"):
         if data.get(key) is None:
             data.pop(key, None)
@@ -286,7 +307,7 @@ def load_cli(raw: Any, *, where: str) -> CliConfig:
     try:
         return CliConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def mcp_entry(config: McpConfig) -> dict[str, Any]:

@@ -290,10 +290,13 @@ async def unload_tools(client: Client) -> dict[str, Any]:
     Returns:
         The hub's payload: `unloaded` (the names that moved), `refused`,
         `no_load_state`, `unknown` and `not_loaded` — the four that did not
-        move — and `text`, the same thing in a sentence.  **An answer this
-        build cannot read comes back as the empty mapping**, not as one of
-        these: the caller reads it with `trim_answer`, which is where the
-        refusal belongs.
+        move — and `text`, the answer as the hub rendered it (the object, as
+        text).  The sentence a person reads is
+        `slife2.libs.harness.notes.unloaded`, which turns the five lists into
+        the names that left.  **An answer this build cannot read raises**, from
+        `tool_payload`: the trim did not happen, and the caller reports that at
+        its own level.  `trim_answer` then reads the five keys of a mapping that
+        did arrive.
     """
     return tool_payload(
         await client.call_tool(FUNC_TOOL_UNLOAD, {}, timeout=_T.timeouts.work.hub)
@@ -474,33 +477,34 @@ def arguments_fit(
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
-    """Read a trim's answer — the names it unloaded and its sentence — or refuse it.
+    """Read a trim's answer — the names it unloaded and the rendered answer — or refuse it.
 
     **An answer the harness cannot read is not a trim that unloaded nothing.**
     `found.get("unloaded") or []` reads a missing or null key as the same
     "nothing to unload" an honest no-op produces, so no pair is written and the
     caller goes on believing it still holds the tools that have gone;
     `found.get("text") or ""` does the same one key over, writing an empty
-    sentence where the hub's own belongs.  Both halves are one answer and are
-    read as strictly as `remote_tools` reads a listing: only a *readable* empty
-    answer is a verdict, and a missing key is damage (SDD Appendix C — a
-    failure is not a verdict).  Reading both before either half is used also
-    means a refused answer can never leave the half-written pair every provider
-    rejects.
+    answer where the hub's own belongs.  `tool_payload` has already refused a
+    body that is not a mapping; this is the key-level half of the same rule:
+    both halves are one answer and are read as strictly as `remote_tools` reads
+    a listing — only a *readable* empty answer is a verdict, and a missing key
+    is damage (SDD Appendix C — a failure is not a verdict).  Reading both
+    before either half is used also means a refused answer can never leave the
+    half-written pair every provider rejects.
 
-    **Here rather than in the two servers that trim**, which is where it was:
-    the agent server and the agent-task server each carried a byte-identical
-    copy of this function, down to the two messages — which are
-    `slife2.libs.plugin.protocol.unreadable`'s, now one function the five modules
-    that read a peer's answer share.  The rule belongs with the call whose answer
-    it reads.
+    **Here rather than in the servers that trim**, which is where it was: the
+    agent server and the agent-task server each carried a byte-identical copy
+    of this function, and both now read it through the turn runtime.  The two
+    messages are `slife2.libs.plugin.protocol.unreadable`'s — one function the
+    five modules that read a peer's answer share — and the rule belongs with
+    the call whose answer it reads.
     """
     names = found.get("unloaded")
     if not isinstance(names, list):
         raise unreadable("the toolhub", "return the names it unloaded", found)
     text = found.get("text")
     if not isinstance(text, str):
-        raise unreadable("the toolhub", "return the trim's sentence", found)
+        raise unreadable("the toolhub", "return the trim's rendered answer", found)
     return [str(name) for name in names], text
 
 
@@ -525,12 +529,12 @@ def _proxy(client: Client, name: str, conversation_id: tuple[str, str] | None = 
             )
         )
         # **An unreadable answer here is the same diagnosis the list path makes,
-        # and not a tool that refused.**  `tool_payload` hands back `{}` for a
-        # result it cannot read, and treating that as the `ok` false below would
-        # render a version mismatch as `ToolFailed` — "the tool said no" — which
-        # is the opposite of what this half of the hop deliberately says when the
-        # *list* comes back wrong.  The contract is `{"text": str, "ok": bool}`,
-        # so a payload missing either is a build this one cannot read.
+        # and not a tool that refused.**  `tool_payload` refuses a body that is
+        # not a mapping; a mapping missing either key is the same build
+        # mismatch, and treating it as the `ok` false below would render that as
+        # `ToolFailed` — "the tool said no" — which is the opposite of what this
+        # half of the hop deliberately says when the *list* comes back wrong.
+        # The contract is `{"text": str, "ok": bool}`.
         if "text" not in payload or "ok" not in payload:
             raise unreadable("the toolhub", "answer a call", payload)
         text = str(payload.get("text") or "")

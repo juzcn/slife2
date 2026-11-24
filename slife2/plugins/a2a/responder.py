@@ -62,7 +62,8 @@ from paho.mqtt.packettypes import PacketTypes
 from paho.mqtt.properties import Properties
 
 import slife2.helpers.timeouts as _T
-from slife2.plugins.a2a.inbound_store import (
+from slife2.plugins.a2a.inbound_store import InboundStore, InboundTask
+from slife2.plugins.a2a.states import (
     CANCELLED,
     COMPLETED,
     FAILED,
@@ -70,8 +71,7 @@ from slife2.plugins.a2a.inbound_store import (
     REJECTED,
     TERMINAL_STATUSES,
     WORKING,
-    InboundStore,
-    InboundTask,
+    user_property,
 )
 
 log = logging.getLogger("slife2.plugins.a2a.responder")
@@ -130,15 +130,6 @@ class StreamCallback(Protocol):
     """Progress frames for the round's current correlation."""
 
     async def __call__(self, message: str, *, type: str = "text") -> None: ...
-
-
-def _user_property(props, key: str) -> str:
-    """One MQTT v5 User Property value, or ``""``."""
-    pairs = getattr(props, "UserProperty", None) or []
-    for name, value in pairs:
-        if name == key:
-            return str(value)
-    return ""
 
 
 def _raw_message(data: dict) -> tuple[str, str, str]:
@@ -224,7 +215,6 @@ class Responder(abc.ABC):
         #: its state lives in the store, not in a coroutine.
         self._rounds: dict[str, asyncio.Task] = {}
         self._stopping = False
-        self._client: aiomqtt.Client | None = None
 
     @abc.abstractmethod
     async def on_request(
@@ -238,6 +228,38 @@ class Responder(abc.ABC):
 
     async def on_cancel(self, task_id: str, peer: str) -> None:  # noqa: B027 - a no-op default hook, not an abstract obligation
         """A peer withdrew an interrupted task; the harness may want to know."""
+
+    async def withdraw_inbound(self, task_id: str) -> bool:
+        """Settle an inbound task whose sender no longer exists.
+
+        **The receiver's half of a removal, and the half a session drop cannot
+        reach.**  The tasks a removed member *sent* are filed here, in the
+        inbound tables of the members that survived it.  Its reply topic is
+        gone, so no answer can ever be published for them, and a live round
+        keeps a responder slot waiting on a completion nobody can send.  The
+        task ends `cancelled`, and the work is told through `on_cancel` — the
+        same hook a peer's withdrawal uses, because from this side that is what
+        happened.
+
+        A bare message is not a task: its delivery settles it, so it is left
+        alone.  There is no status to publish — there is nobody left to read
+        one — which is the whole of the difference from `CancelTask`.
+
+        Returns:
+            Whether there was an open task to settle.
+        """
+        record = self._inbound.get(task_id)
+        if record is None or record.state in TERMINAL_STATUSES:
+            return False
+        if record.kind != "task":
+            return False
+        self._inbound.terminal(task_id, CANCELLED, "")
+        round_task = self._rounds.get(task_id)
+        if round_task is not None:
+            round_task.cancel()
+        else:
+            await self.on_cancel(task_id, record.peer)
+        return True
 
     # ── Connection ───────────────────────────────────────────────────────
 
@@ -264,9 +286,12 @@ class Responder(abc.ABC):
             **self._mqtt.client_kwargs(
                 identifier=f"{self._topics.org}/{self._topics.unit}/{self._agent_id}",
                 will=will,
+                # The same bound the probe and the outbound loop carry: a TCP
+                # connection that never sends CONNACK would hold the responder
+                # for ever, and the member would never resubscribe.
+                timeout=_T.timeouts.deliver.mqtt_connect,
             ),
         ) as client:
-            self._client = client
             try:
                 await client.subscribe(request_topic, qos=1)
                 online_props = Properties(PacketTypes.PUBLISH)
@@ -301,7 +326,6 @@ class Responder(abc.ABC):
                 # interrupted or terminal task keeps its state: the peer can
                 # still continue it, and a retry replays the last answer.
                 self._inbound.forget_working()
-                self._client = None
                 try:
                     offline_props = Properties(PacketTypes.PUBLISH)
                     offline_props.UserProperty = [
@@ -400,7 +424,7 @@ class Responder(abc.ABC):
 
         # The profile's binding property is advisory for transport visibility;
         # when both the property and the JSON are present they must agree.
-        prop_context = _user_property(
+        prop_context = user_property(
             getattr(mqtt_msg, "properties", None), "a2a-context-id"
         )
         if prop_context and context_id and prop_context != context_id:
@@ -419,9 +443,14 @@ class Responder(abc.ABC):
         peer = req.sender or "unknown"
 
         if message_type == "task_response":
-            # A response-typed frame on the request topic is not a new task:
-            # acknowledge it empty, as upstream does, and remember it so a
-            # duplicate is answered the same way.
+            # **A response-typed frame on the request topic is not a new task.**
+            # An id this process never held is acknowledged empty, as upstream
+            # does, and remembered so a duplicate is answered the same way.  An
+            # id it *does* hold is answered with that task's own state and never
+            # with `completed`: the frame is not the task's answer, and a
+            # terminal published for a task that is still `working` settles the
+            # requester's send — which forgets every routing entry for the task,
+            # so the real artifact, when it comes, has nowhere to go.
             record = self._inbound.get(task_id)
             if record is None:
                 self._inbound.add(
@@ -433,18 +462,19 @@ class Responder(abc.ABC):
                     text=text,
                 )
                 self._inbound.terminal(task_id, COMPLETED, "")
-            # A known task is left exactly as it is: this frame is not its
-            # answer, it is a stray response-typed message on the request
-            # topic.
-            await self._publish_status(
-                client,
-                response_topic,
-                correlation,
-                request_id,
-                task_id,
-                COMPLETED,
-                "",
-                context_id,
+                await self._publish_status(
+                    client,
+                    response_topic,
+                    correlation,
+                    request_id,
+                    task_id,
+                    COMPLETED,
+                    "",
+                    context_id,
+                )
+                return
+            await self._replay_status(
+                client, response_topic, correlation, request_id, record
             )
             return
 
@@ -489,7 +519,17 @@ class Responder(abc.ABC):
 
         duplicate = bool(message_id and record.seen(message_id))
         if not message_id:
-            duplicate = text in record.seen_texts
+            # **No id: the task's LAST text is the retry's fingerprint**
+            # (SDD Appendix C).  Any of the remembered texts would swallow a
+            # continuation that repeats an older round's words as a retry of
+            # that round; only the last one is what a re-send of the current
+            # request repeats.  The comparison cannot tell a re-minted retry
+            # from a continuation that repeats the text — the distinction the
+            # register gives up — so the fallback says it fired: a debug line
+            # naming the peer and the task.
+            duplicate = bool(text) and text == record.last_text()
+            if duplicate:
+                log.debug("a2a_retry_by_text task=%s peer=%s", task_id, peer)
 
         if record.state in TERMINAL_STATUSES:
             if duplicate:
@@ -508,7 +548,13 @@ class Responder(abc.ABC):
             return
 
         if record.state == WORKING:
-            if duplicate or (message_id and text and text == record.last_text()):
+            # **A retry replays working; a new message is refused.**  The
+            # retry is the same `messageId` — this build's requester always
+            # stamps one and its ladder republishes the identical payload —
+            # or, for a peer that sends none, the last-text comparison above
+            # (SDD Appendix C).  A new id with repeated text is a new message,
+            # not a retry: the register's text fallback is the no-id case.
+            if duplicate:
                 await self._publish_status(
                     client,
                     response_topic,
@@ -579,8 +625,7 @@ class Responder(abc.ABC):
                 req,
                 response_topic,
                 correlation,
-                task_id,
-                record.context_id,
+                record,
                 continuation,
             )
         )
@@ -598,11 +643,26 @@ class Responder(abc.ABC):
         req: A2ARequest,
         reply_topic: str,
         correlation: str,
-        task_id: str,
-        context_id: str,
+        record: InboundTask,
         continuation: bool,
     ) -> None:
         request_id = req.request_id
+        task_id = record.task_id
+        context_id = record.context_id
+
+        def ours() -> InboundTask | None:
+            """This round's record, while the store still holds it.
+
+            **A record can be evicted and replaced while its round runs.**  The
+            store prunes past its cap, and a profile retry of the same task id
+            then builds a fresh record and cancels the old round — so an ending
+            recorded against "the task with this id" would land on the *new*
+            record, publish its terminal state, and the new round would finish
+            into a state that is already terminal and drop its answer.  Identity
+            is what makes an ending this round's own.
+            """
+            current = self._inbound.get(task_id)
+            return current if current is record else None
 
         async def stream(message: str, *, type: str = "text") -> None:
             await self._publish_status(
@@ -632,10 +692,20 @@ class Responder(abc.ABC):
             async with self._semaphore:
                 outcome = await self.on_request(req, stream, continuation=continuation)
         except asyncio.CancelledError:
-            record = self._inbound.get(task_id)
+            # **A cancellation by a replacement round is not a withdrawal.**
+            # `_start_round` pops the old round and registers the new one before
+            # cancelling the old, so a round that is no longer the registered
+            # one was cancelled by its successor — not by the peer.  Recording
+            # `cancelled` here would end the task the successor is working on:
+            # its answer is then dropped as terminal, and the requester gets a
+            # spurious cancel instead of its continuation's result.
+            me = asyncio.current_task()
+            if self._rounds.get(task_id) is not me:
+                raise
+            current = ours()
             if (
-                record is not None
-                and record.state not in TERMINAL_STATUSES
+                current is not None
+                and current.state not in TERMINAL_STATUSES
                 and not self._stopping
             ):
                 self._inbound.terminal(task_id, CANCELLED, "")
@@ -652,8 +722,10 @@ class Responder(abc.ABC):
             raise
         except Exception:  # noqa: BLE001 - a handler failure is a task failure, and the peer is owed the state
             log.exception("A2A round failed for task %s", task_id)
-            current = self._inbound.get(task_id)
-            if current is not None and current.state in TERMINAL_STATUSES:
+            current = ours()
+            if current is None:
+                return  # this round's record was evicted; its retry owns the task
+            if current.state in TERMINAL_STATUSES:
                 return  # a withdrawal already ended it
             self._inbound.terminal(task_id, FAILED, "Internal error")
             await self._publish_status(
@@ -669,9 +741,12 @@ class Responder(abc.ABC):
             return
 
         # A withdrawal may have landed while the model was still working; the
-        # cancel path already recorded the terminal state and published it.
-        current = self._inbound.get(task_id)
-        if current is not None and current.state in TERMINAL_STATUSES:
+        # cancel path already recorded the terminal state and published it.  A
+        # record that is gone or replaced is the other ending: this round no
+        # longer speaks for the task, and its answer must not settle somebody
+        # else's round.
+        current = ours()
+        if current is None or current.state in TERMINAL_STATUSES:
             return
 
         if outcome.state == COMPLETED:
@@ -773,7 +848,14 @@ class Responder(abc.ABC):
             )
             return
         self._inbound.terminal(task_id, CANCELLED, "")
-        round_task = self._rounds.pop(task_id, None)
+        # **The round stays registered while it is stopped.**  The handler that
+        # unwinds it asks this table whether the round it is cancelling is still
+        # the one registered — that is how a peer's withdrawal is told from a
+        # retry's replacement (`MeshResponder.on_request`) — and popping the id
+        # here made the peer path answer "no" about itself, so a working task's
+        # withdrawal was never handed to the agent.  The done callback is what
+        # removes the entry, once the round has actually finished.
+        round_task = self._rounds.get(task_id)
         if round_task is not None:
             round_task.cancel()
         else:

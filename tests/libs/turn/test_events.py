@@ -14,24 +14,15 @@ import json
 
 import pytest
 
-from slife2.libs.turn.events import ContextChosen, TurnFinished, decode
+from slife2.libs.turn.events import ToolsCounted, TurnFinished, UsageReported, decode
 from slife2.libs.turn.messages import Usage
 
 pytestmark = pytest.mark.unit
 
 
 def test_a_known_line_is_decoded() -> None:
-    assert decode(json.dumps({"t": "context", "kept": 2, "recalled": 1})) == (
-        ContextChosen(kept=2, recalled=1)
-    )
-    assert decode(
-        json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": "unavailable"})
-    ) == ContextChosen(kept=2, recalled=1, rerank="unavailable")
-
-    # A status of another type is a line this build does not know, not one
-    # whose status is empty.
-    assert (
-        decode(json.dumps({"t": "context", "kept": 2, "recalled": 1, "r": 3})) is None
+    assert decode(json.dumps({"t": "tools", "n": 2, "l": 1})) == ToolsCounted(
+        total=2, loaded=1
     )
 
 
@@ -39,8 +30,8 @@ def test_a_count_with_the_wrong_type_drops_the_line_instead_of_raising() -> None
     """**A readable line with the wrong type is still unreadable.**  `int("many")`
     used to raise out of `decode` and into the progress callback, where the
     registered answer is to drop the line."""
-    assert decode(json.dumps({"t": "context", "kept": "many"})) is None
-    assert decode(json.dumps({"t": "context", "kept": True})) is None
+    assert decode(json.dumps({"t": "tools", "n": "many", "l": 1})) is None
+    assert decode(json.dumps({"t": "tools", "n": True, "l": 1})) is None
     assert (
         decode(json.dumps({"t": "tool_start", "name": "x", "iteration": "1"})) is None
     )
@@ -55,11 +46,25 @@ def test_a_usage_breakdown_with_a_string_is_dropped() -> None:
     assert decode(json.dumps({"t": "done", "iterations": 3})) is None
 
 
+def test_a_usage_report_carries_one_calls_counts() -> None:
+    """The per-call figure the bar follows, with its own breakdown.
+
+    `last_usage` is what a `TurnFinished` carries as its `last`, so the two
+    spellings of one measurement have to read back identically.
+    """
+    usage = Usage(7, 3, cache_read=2, cache_creation=1)
+    line = json.dumps({"t": "usage", "last": usage.to_wire()})
+    assert decode(line) == UsageReported(last_usage=usage)
+
+    # A hole is not a zero: every count this build writes, a payload missing one
+    # was not written by this build (the rule `_usage_ok` keeps).
+    assert decode(json.dumps({"t": "usage", "last": {"prompt_tokens": 7}})) is None
+
+
 def test_a_line_with_a_hole_is_not_read_as_a_zero() -> None:
     """`encode` writes every count it has, so a missing one is not this build's
     line — and reading the hole as a number would show a figure nobody measured."""
     assert decode(json.dumps({"t": "tools", "n": 3})) is None
-    assert decode(json.dumps({"t": "context", "kept": 2})) is None
     full = {
         "t": "done",
         "d": "ok",

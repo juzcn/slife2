@@ -25,9 +25,12 @@ the credentials — the same isolation every other plugin keeps.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import re
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -36,6 +39,7 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
 import slife2.job as runtime
+from slife2.helpers.threads import off_loop
 from slife2.libs.host.config import (
     JOB_SERVER_NAME,
     Config,
@@ -166,31 +170,44 @@ class Registry:
     Held per home (`Homes`), because the folder is the home's: two homes served
     by one process keep two sets of jobs, and a `job_set` in one cannot shadow a
     name in the other.
+
+    **The table is read and written by two threads.**  `list_sources` is a sync
+    tool FastMCP runs on a worker thread — it is how the hub asks before a
+    search — while `job_set` and `job_remove` run on the loop.  A listing that
+    iterated the dict while a write replaced an entry raised "dictionary changed
+    size during iteration" out of the tool.  So mutations and snapshots take
+    one lock; a reader gets a complete list, never a half-applied edit.
     """
 
     def __init__(self, config: Config, root: Path) -> None:
         self.config = config
         self.root = root
         self._jobs = jobs.scan_jobs_dir(root)
+        self._lock = threading.Lock()
 
     def find(self, name: str) -> jobs.Job | None:
         """One job, by its bare name or the exposed `job__<name>`."""
-        return self._jobs.get(_bare(name.strip()))
+        with self._lock:
+            return self._jobs.get(_bare(name.strip()))
 
     def put(self, job: jobs.Job) -> None:
         """Replace one entry — the registry is keyed by the job's name."""
-        self._jobs[job.name] = job
+        with self._lock:
+            self._jobs[job.name] = job
 
     def forget(self, name: str) -> None:
-        self._jobs.pop(name, None)
+        with self._lock:
+            self._jobs.pop(name, None)
 
     def names(self) -> list[str]:
         """Every installed job's name, for a refusal that says what is there."""
-        return sorted(self._jobs)
+        with self._lock:
+            return sorted(self._jobs)
 
     def values(self) -> list[jobs.Job]:
         """Every job, sorted by name — the listing's order and one place it is."""
-        return sorted(self._jobs.values(), key=lambda one: one.name)
+        with self._lock:
+            return sorted(self._jobs.values(), key=lambda one: one.name)
 
     def rows(self) -> list[dict[str, Any]]:
         """Every job, as one catalogue row each.
@@ -264,7 +281,14 @@ class Registry:
         with runtime.running(context):
             try:
                 result = await job.tool.run(dict(arguments or {}))
-            except Exception as exc:  # noqa: BLE001 — a job failure is a result
+            except BaseException as exc:  # noqa: BLE001 — a job failure is a result
+                # **A job may call `sys.exit()`.**  `SystemExit` and
+                # `KeyboardInterrupt` are `BaseException`, so they walked past
+                # this handler and out of the tool — `asyncio` re-raises
+                # `SystemExit`, taking the jobs plugin (a required hub upstream)
+                # down for every home.  A job that exits is a failed job.
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
                 logger.warning("job_failed name=%s err=%s", job.name, exc)
                 return f"{type(exc).__name__}: {exc}", False
         text = jobs.result_text(result)
@@ -317,7 +341,11 @@ def build_server(
                 "text": f"{source!r} is not a source this plugin holds",
                 "ok": False,
             }
-        registry = homes.current()
+        # **The first ask for a home scans its folder**, which is a directory
+        # read and one arbitrary module per file — a job file's top-level code
+        # is model-written and may be slow.  Hopped, because this is the shared
+        # loop every conversation's jobs run on.
+        registry = await off_loop(_home)
         job = registry.find(tool)
         if job is None:
             return {"text": _unknown_job(tool, registry.names()), "ok": False}
@@ -357,8 +385,12 @@ def build_server(
             (`enabled` or `error`), and `error` when it did not load — plus
             `total`, `limit` and `offset`.
         """
+        # The first ask for a home scans its folder, and a job file's top-level
+        # code is model-written and may be slow; the shared loop carries every
+        # conversation's work, so the scan is hopped (`off_loop`).
+        registry = await off_loop(_home)
         rows: list[dict[str, Any]] = []
-        for job in _home().values():
+        for job in registry.values():
             row: dict[str, Any] = {
                 "name": job.name,
                 "tool": _exposed(job.name),
@@ -385,9 +417,9 @@ def build_server(
             `name`, `code` — the source as written — and `error`, which is
             empty for a job that loaded.
         """
-        job = _refused(name)
+        job = await off_loop(_refused, name)
         try:
-            code = job.path.read_text(encoding="utf-8-sig")
+            code = await off_loop(job.path.read_text, encoding="utf-8-sig")
         except (OSError, ValueError) as exc:
             # `UnicodeDecodeError` is a `ValueError`, not an `OSError`: a job
             # saved in the machine's codepage answered the documented repair
@@ -415,9 +447,10 @@ def build_server(
         or an agent.
 
         A write that does not load is refused and the previous version is put
-        back, so the installed job is never a broken file. Replacing a job is
-        the same call — keep the function name stable if you want the tool name
-        and its arguments to stay the same.
+        back, so the installed job is never a broken file — a put-back that
+        itself fails says so, naming the broken file left on disk for `job_set`
+        to replace. Replacing a job is the same call — keep the function name
+        stable if you want the tool name and its arguments to stay the same.
 
         Args:
             name: The job's name and the file's stem; a Python identifier, not
@@ -435,7 +468,10 @@ def build_server(
         if not code.strip():
             raise ToolError("a job needs code")
         text = code if code.endswith("\n") else code + "\n"
-        registry = _home()
+        # The first ask can scan the folder, and `load_job` below executes the
+        # submitted module's top-level code; both are hopped because this runs
+        # on the loop every conversation shares (`off_loop`).
+        registry = await off_loop(_home)
         final = registry.root / f"{name}.py"
         #: The bytes to put back if the new code will not load.  **Bytes, not
         #: text**: a file saved in the machine's codepage is not decodable as
@@ -466,7 +502,7 @@ def build_server(
                 f"could not write {name!r}: {exc} — close whatever holds the "
                 f"file (an editor, another slife2) and try `job_set` again"
             ) from exc
-        loaded = jobs.load_job(final, name=name)
+        loaded = await off_loop(jobs.load_job, final, name=name)
         if not loaded.ok:
             try:
                 if exists and previous is not None:
@@ -474,8 +510,27 @@ def build_server(
                     os.replace(staging, final)
                 else:
                     final.unlink(missing_ok=True)
+            except OSError as exc:
+                # **A restore that failed is said, not raised raw.**  The broken
+                # new file is what is on disk now, and the previous bytes live
+                # only in this call — so the model is told exactly that, and
+                # that `job_set` again is the repair.
+                undo = (
+                    "the previous version could not be restored"
+                    if exists
+                    else "the broken file could not be removed"
+                )
+                raise ToolError(
+                    f"{name!r} was not installed — {loaded.error} — and {undo} "
+                    f"({exc}): the file at {final} is the broken code. Fix the "
+                    f"code and call `job_set` again"
+                ) from exc
             finally:
-                staging.unlink(missing_ok=True)
+                # A staging file left behind is harmless — the next `job_set`
+                # reuses the name — and a cleanup that raised would mask the
+                # refusal it follows.
+                with contextlib.suppress(OSError):
+                    staging.unlink(missing_ok=True)
             raise ToolError(
                 f"{name!r} was not installed — {loaded.error}"
                 + ("; the previous version was restored" if exists else "")
@@ -499,7 +554,7 @@ def build_server(
         Returns:
             `name` and `removed`, which a success makes true.
         """
-        job = _refused(name)
+        job = await off_loop(_refused, name)
         try:
             job.path.unlink(missing_ok=True)
         except OSError as exc:
@@ -534,7 +589,7 @@ def build_server(
             the sentence saying why it failed. An unknown or unloaded job is
             refused as a failed call, not returned as an `ok` false result.
         """
-        job = _refused(name)
+        job = await off_loop(_refused, name)
         if not job.ok:
             raise ToolError(_not_loaded(job))
         client = request_conversation(ctx) or ("", "")

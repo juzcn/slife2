@@ -27,7 +27,14 @@ import importlib
 import logging
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Mapping,
+)
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -68,6 +75,12 @@ INSTRUCTIONS = (
     "authoritative — a caller that ignores the progress stream still gets the "
     "whole answer. This server keeps no state between calls."
 )
+
+#: How much of the output budget a thinking model may spend reasoning.  Half,
+#: because the other half is what the answer is made of and a model that spends
+#: everything thinking returns nothing.  Both adapters that send a thinking
+#: budget read it here.
+THINKING_BUDGET_SHARE = 0.5
 
 
 @dataclass
@@ -176,6 +189,10 @@ class _TurnBuilder:
     #: this from the display channel would be reading the record out of a stream
     #: that is allowed to drop fragments.
     thinking_parts: list[str] = field(default_factory=list)
+    #: The provider's own reasoning blocks, in the order they completed.  Kept
+    #: verbatim because they are replayed verbatim; the readable text above is
+    #: what a person sees, and it is not a substitute for these.
+    reasoning_parts: list[dict[str, Any]] = field(default_factory=list)
     calls: ToolCallAccumulator = field(default_factory=ToolCallAccumulator)
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = ""
@@ -202,19 +219,66 @@ class _TurnBuilder:
             self.text_parts.append(event.text)
         if event.thinking:
             self.thinking_parts.append(event.thinking)
+        if event.reasoning:
+            self.reasoning_parts.extend(event.reasoning)
         for delta in event.tool_call_deltas:
             self.calls.add(delta)
         if event.usage is not None:
             self.usage = self.usage + event.usage
         return event
 
-    def build(self) -> StreamChatResult:
+    def build(self, model: str) -> StreamChatResult:
+        """The complete result, with its reasoning bound to the model that made it.
+
+        The model is stamped here rather than by the adapter because this is the
+        one layer that knows the model id the request was made with, and a
+        replayed signed block is only valid for that model (`Message.reasoning`).
+        """
         return StreamChatResult(
             text="".join(self.text_parts),
             tool_calls=tuple(self.calls.complete()),
             thinking="".join(self.thinking_parts),
+            reasoning=(
+                {"model": model, "blocks": list(self.reasoning_parts)}
+                if self.reasoning_parts
+                else {}
+            ),
             usage=self.usage,
             stop_reason=self.stop_reason,
+        )
+
+
+def call_options(
+    tool_choice: str, thinking: str, temperature: float | None = None
+) -> dict[str, Any]:
+    """The per-call options a streamer or request builder receives, when set.
+
+    Empty is the wire's ordinary behaviour, and a scripted streamer in a test
+    keeps its four-argument call: always-present keywords would break every one
+    of them for an option none of those tests set.  `temperature` is forwarded
+    only when the caller named one — the decision calls ask for 0 — so a call
+    with no override keeps the model's configured value (or its absence).
+    """
+    options: dict[str, Any] = {}
+    if tool_choice:
+        options["tool_choice"] = tool_choice
+    if thinking:
+        options["thinking"] = thinking
+    if temperature is not None:
+        options["temperature"] = temperature
+    return options
+
+
+def forced_tool(tools: list[ToolSpec], tool_choice: str) -> None:
+    """Refuse a forced choice that names a tool the call does not send.
+
+    A forced choice with nothing to choose is a caller's bug this build refuses
+    rather than sends; every wire adapter calls this before writing
+    `tool_choice`.
+    """
+    if tool_choice and not tools:
+        raise ValueError(
+            f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
         )
 
 
@@ -225,6 +289,10 @@ async def stream_chat_impl(
     tools: list[dict[str, Any]],
     model: str,
     ctx: Context,
+    *,
+    tool_choice: str = "",
+    thinking: str = "",
+    temperature: float | None = None,
 ) -> dict[str, Any]:
     """Run one streamed model call and return the assembled result.
 
@@ -247,24 +315,41 @@ async def stream_chat_impl(
     (`slife2.libs.model.base`).  A stream with no `Finish` is therefore one that
     was cut, and the turn fails rather than handing half an answer to a loop
     that would record it as a whole one.
+
+    **And the stream is closed on every way out, not only the normal one.**
+    An interrupted turn raises out of `ctx.report_progress` while the adapter
+    is suspended at its `yield`, and an `async for` abandoned there leaves it
+    suspended — holding the SDK's open response and the pool's lease — until
+    the collector happens to reach it, with the provider still generating on
+    a connection nobody reads.  `aclosing` runs the adapter's own cleanup
+    deterministically instead: the SDK stream is closed and the lease released
+    on the way out, whichever way out it is.
+
+    **The two per-call options are forwarded only when set** (`call_options`):
+    `tool_choice` forces the one tool the decision calls must use, and
+    `thinking` overrides the model's configured value for this call.
     """
     builder = _TurnBuilder()
     reported = 0
 
-    async for event in streamer(
-        provider,
-        [Message.from_wire(m) for m in messages],
-        [ToolSpec.from_wire(t) for t in tools],
-        model,
-    ):
-        chunk = builder.absorb(event)
-        if chunk is None:
-            continue
-        reported += 1
-        # A no-op when the client sent no progress token, which is the intended
-        # behaviour: a caller that does not want a stream should not pay for
-        # one, and gets the same result at the end.  See `slife2.libs.turn.events`.
-        await ctx.report_progress(reported, None, encode_chunk(chunk))
+    async with contextlib.aclosing(
+        streamer(
+            provider,
+            [Message.from_wire(m) for m in messages],
+            [ToolSpec.from_wire(t) for t in tools],
+            model,
+            **call_options(tool_choice, thinking, temperature),
+        )
+    ) as events:
+        async for event in events:
+            chunk = builder.absorb(event)
+            if chunk is None:
+                continue
+            reported += 1
+            # A no-op when the client sent no progress token, which is the intended
+            # behaviour: a caller that does not want a stream should not pay for
+            # one, and gets the same result at the end.  See `slife2.libs.turn.events`.
+            await ctx.report_progress(reported, None, encode_chunk(chunk))
 
     if not builder.finished:
         raise RuntimeError(
@@ -273,7 +358,7 @@ async def stream_chat_impl(
         )
     # The result is the tool output; the progress stream is display only.  The
     # result is masked here and again by `MaskingMiddleware`.
-    return masked_obj(builder.build().to_wire())
+    return masked_obj(builder.build(model).to_wire())
 
 
 def read_int(source: Any, attribute: str) -> int:
@@ -286,6 +371,141 @@ def read_int(source: Any, attribute: str) -> int:
     stream.
     """
     return int(getattr(source, attribute, 0) or 0)
+
+
+@dataclass(frozen=True)
+class WireParts:
+    """What one wire calls the two parts a neutral content value is made of.
+
+    **Two of the three chat backends build a request field by field, and both
+    walk a content value the same way.**  A part the wire cannot carry is
+    dropped and *named* — passing it on is a 400 on every call that carries
+    one, and dropping it with no word loses the caller's attachment with
+    nothing anywhere saying so — and an image source neither wire can read is
+    refused the same way.  What differs is only what the wire calls the two
+    kinds and what surrounds an image URL inside its part, so that is all an
+    adapter supplies here; `content_parts` is the walk, and the rest of the
+    translation stays where the SDK is.
+    """
+
+    #: The name a drop is logged under, so a reader can tell which backend lost
+    #: the part.
+    server: str
+    #: This wire's `type` for a text part.
+    text: str
+    #: This wire's `type` for an image part.
+    image: str
+    #: The fields an image part carries beside its `type`, built from a URL
+    #: `content_parts` has already accepted.  None drops the part, for a rule
+    #: this wire owns — an empty `data:` payload has no bytes to read as
+    #: Anthropic's base64 source.
+    image_fields: Callable[[str], dict[str, Any] | None]
+
+
+def content_parts(content: Any, wire: WireParts) -> list[dict[str, Any]]:
+    """Neutral content — a string or OpenAI content parts — as one wire's parts.
+
+    **One walk, two wires.**  The parts this build produces are the neutral
+    ones (`slife2.libs.turn.attachments.parts`), and each protocol that builds
+    a request field by field renames them: a text part is `text` or
+    `input_text`, an image is `image` or `input_image`.  The *rules* around the
+    rename are not per-protocol — a part the wire cannot carry is dropped
+    rather than passed through, and is named when it is dropped, for the reason
+    SDD Appendix C gives about every silent degrade — so they are stated here
+    once and `wire` says only what this wire calls its parts.
+
+    **Both forms of an image URL go on, and neither is fetched here.**  A
+    `data:` URL is inline bytes and an `http(s)` one is downloaded by the
+    provider on its own side, which is why passing it through is exactly what
+    "no request leaves this process" looks like.  A URL in neither form — a
+    `file:` URL, a bare word — is a source the wire has no part to read it as,
+    so it is dropped and named by its scheme: an attachment that vanishes
+    without a word is the failure this module cannot see from inside.
+    """
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": wire.text, "text": content}] if content else []
+
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            logger.warning(
+                "%s: dropping a content part that is %r, not a mapping — this "
+                "wire takes parts as mappings only, so it cannot be passed "
+                "through, but the caller's part is now missing",
+                wire.server,
+                type(part).__name__,
+            )
+            continue
+        match part.get("type"):
+            case "text":
+                text = part.get("text") or ""
+                if text:
+                    parts.append({"type": wire.text, "text": text})
+            case "image_url":
+                url = _image_url(part.get("image_url"), wire)
+                if url is not None:
+                    fields = wire.image_fields(url)
+                    if fields is not None:
+                        parts.append({"type": wire.image, **fields})
+            case other:
+                logger.warning(
+                    "%s: dropping a content part of type %r — it is not a part "
+                    "this wire takes, so it cannot be passed through, but the "
+                    "caller's attachment is now missing",
+                    wire.server,
+                    other,
+                )
+    return parts
+
+
+def _image_url(raw: Any, wire: WireParts) -> str | None:
+    """The URL in an `image_url` part, when it is a form a provider can read."""
+    url = (raw or {}).get("url") if isinstance(raw, dict) else None
+    if not isinstance(url, str) or not url:
+        return None
+    if url.startswith(("data:", "http://", "https://")):
+        return url
+    scheme, _, _ = url.partition(":")
+    logger.warning(
+        "%s: dropping an image from a %r source — it is neither a `data:` URL "
+        "nor an http(s) one, so it is not a part this wire takes, and the "
+        "caller's attachment goes with it",
+        wire.server,
+        scheme,
+    )
+    return None
+
+
+def system_text(content: Any, wire: WireParts, field: str) -> str:
+    """A system turn's text, for a wire that takes the system prompt separately.
+
+    Both wires that build requests field by field have the same rule, and had a
+    copy each: the system prompt is a string parameter, so a system turn's
+    content parts have no field to live in — the text in them is taken and the
+    rest is *named*.  **It is taken, not dropped**: reading only `str` content
+    meant a system turn carrying blocks contributed nothing at all, with no
+    word anywhere, so a prompt the caller wrote left the request (SDD Appendix
+    C).  `field` is the name this wire gives the parameter, because that is
+    what the warning is about.
+    """
+    if isinstance(content, str):
+        return content
+    parts = content_parts(content, wire)
+    text = "".join(
+        str(part.get("text") or "") for part in parts if part.get("type") == wire.text
+    )
+    other = [str(part.get("type")) for part in parts if part.get("type") != wire.text]
+    if other:
+        logger.warning(
+            "%s: a system turn carries %s, which the %s has no field for — the "
+            "text beside it is kept and these are left out",
+            wire.server,
+            ", ".join(other),
+            field,
+        )
+    return text
 
 
 def render_tool_result(content: Any) -> str:
@@ -316,7 +536,55 @@ def render_tool_result(content: Any) -> str:
     return as_tool_text(content)
 
 
-class ProviderClients:
+class Leased:
+    """A pool of clients a config change retires, closed when its last call ends.
+
+    **Retired is not closed.**  The edit that moves the config past a pool may
+    land while a call is still reading a client it built, and closing under that
+    call cuts a billed answer off.  So a pool that will not be handed out again
+    is closed by whichever holder finishes last.
+
+    **The hand-out and the count are one synchronous step** (`hold`), because a
+    rebuild landing between them would find no holders and close a client a call
+    is about to use.  `release` is the caller's, and a context manager
+    (`LiveProviders.lease`, `LiveEmbedding.lease`) is what keeps the pair from
+    being two statements somebody must remember.
+
+    The chat and embedding backends both used to spell this out — the same
+    counter, the same retired flag, the same last-holder rule — and the second
+    copy is the one that would have drifted.
+    """
+
+    def __init__(self) -> None:
+        self._holders = 0
+        self._retired = False
+
+    def hold(self) -> None:
+        """Count one more call as using this pool.  See the class docstring."""
+        self._holders += 1
+
+    async def release(self) -> None:
+        """One holder is done with this pool, closing it if it was retired."""
+        self._holders -= 1
+        await self._close_if_retired()
+
+    async def retire(self) -> None:
+        """Say this pool will not be handed out again; close it once it is idle."""
+        self._retired = True
+        await self._close_if_retired()
+
+    async def _close_if_retired(self) -> None:
+        if not self._retired or self._holders:
+            return
+        self._retired = False
+        await self._close()
+
+    async def _close(self) -> None:
+        """Close whatever this pool built; the subclass's one difference."""
+        raise NotImplementedError
+
+
+class ProviderClients(Leased):
     """The SDK clients of one process, one per configured provider, on first use.
 
     **The three wire adapters need the same two things and differ in one.**  A
@@ -343,36 +611,13 @@ class ProviderClients:
         server_name: str,
         make_client: Callable[[ProviderSettings, str], Any],
     ) -> None:
+        super().__init__()
         self._providers = providers
         self._server = server_name
         self._make_client = make_client
         self._clients: dict[str, Any] = {}
-        #: Streams holding this pool, and whether the config has moved past it.
-        #: A retired pool closes its SDK clients when its last holder is done —
-        #: see `LiveProviders.lease`.
-        self._holders = 0
-        self._retired = False
 
-    def hold(self) -> None:
-        """Count one more stream as using this pool.
-
-        **Synchronous on purpose**, and it must be: the hand-out and the count
-        have to happen with no await between them, or a rebuild landing in the
-        gap would find no holders and close a client a stream is about to use.
-        """
-        self._holders += 1
-
-    async def release(self) -> None:
-        """One holder is done with this pool, closing it if it was retired."""
-        self._holders -= 1
-        await self._close_if_retired()
-
-    async def retire(self) -> None:
-        """Say this pool will not be handed out again; close it once it is idle."""
-        self._retired = True
-        await self._close_if_retired()
-
-    async def _close_if_retired(self) -> None:
+    async def _close(self) -> None:
         """Close every SDK client this pool built, once nothing is using it.
 
         **A client owns a connection pool and its socket, and nothing else ever
@@ -387,9 +632,8 @@ class ProviderClients:
         `close()` closes the connection *under* a stream that may still be
         reading it, so a pool the config has moved past waits for its last
         holder: an edit must not cut off a model call that is half answered.
+        `Leased` is that wait.
         """
-        if not self._retired or self._holders:
-            return
         clients, self._clients = list(self._clients.values()), {}
         for client in clients:
             try:
@@ -503,12 +747,10 @@ def unresolved_key(server_name: str, name: str, provider: Any) -> str:
     what a person needs to fix it.  Handing the literal to the SDK instead
     produces a 401 that says nothing about which name is missing.
 
-    **`unresolved_reference` and not `startswith("${")`**, which is what this
-    was: that test does not recognise `keyring:NAME`, so on a host with no
-    credstore installed the reference itself went out as the bearer token —
-    `Bearer keyring:DEEPSEEK_API_KEY` — which is the exact deformation the
-    config module names (SDD Appendix C) and which the other three readers of
-    this same answer already refused.
+    **`unresolved_reference` and not `startswith("${")`.**  The config module
+    is the single reader of "this is still a reference" (SDD Appendix C);
+    handing the text to the SDK instead produces a `401` that says nothing
+    about which name is missing.
     """
     key = provider.api_key
     if key and not unresolved_reference(key):
@@ -548,11 +790,18 @@ def sdk_client_factory(
     stays importable, and a process that serves nothing from it never loads the
     SDK.  It also leaves the class named once, in the `sdk_streamer` call that
     uses it.
+
+    **No call is ever repeated behind the caller's back.**  Both SDKs default
+    to two retries, and a retried request may already have reached the
+    provider — a second generation billed for one answer.  `max_retries=0`
+    makes a failed call fail the turn, and the caller retries deliberately
+    (SDD §2.7); the embeddings server states the same policy for the one
+    client it builds itself.
     """
 
     def make_client(provider: ProviderSettings, key: str) -> Any:
         client_class = getattr(importlib.import_module(module), attribute)
-        return client_class(api_key=key, base_url=provider.base_url)
+        return client_class(api_key=key, base_url=provider.base_url, max_retries=0)
 
     return make_client
 
@@ -562,7 +811,7 @@ def sdk_streamer(
     api: str,
     server_name: str,
     sdk_client: Callable[[ProviderSettings, str], Any],
-    build_request: Callable[[list[Message], list[ToolSpec], Any], dict[str, Any]],
+    build_request: Callable[..., dict[str, Any]],
     start: StartStream,
     translator: Translator,
 ) -> Streamer:
@@ -579,9 +828,9 @@ def sdk_streamer(
     how many output tokens have already been counted.  Made per stream, so two
     concurrent calls cannot share a counter.
 
-    `build_request` is passed in rather than called here because one wire has a
-    flag that has to be closed over before the request exists (`stream_usage`),
-    and closing over it is the caller's business.
+    `build_request` is passed in rather than called here because the body is
+    the wire's own: each adapter builds the fields its protocol takes from the
+    same neutral messages, tools and resolved settings.
     """
     pool = LiveProviders(api, server_name, sdk_client)
 
@@ -590,19 +839,37 @@ def sdk_streamer(
         messages: list[Message],
         tools: list[ToolSpec],
         model: str,
-    ) -> AsyncIterator[ProviderEvent]:
+        *,
+        tool_choice: str = "",
+        thinking: str = "",
+        temperature: float | None = None,
+    ) -> AsyncGenerator[ProviderEvent]:
         # Held for the whole stream, not just to look the provider up: the
         # client is what carries the response being read below, and a config
         # edit landing mid-answer must not close it out from under the stream
         # (`LiveProviders.lease`).
         async with pool.lease() as clients:
             settings = clients.provider(provider).model(model)
-            request = build_request(messages, tools, settings)
+            request = build_request(
+                messages,
+                tools,
+                settings,
+                **call_options(tool_choice, thinking, temperature),
+            )
             response = await start(clients.client(provider), request)
             translate = translator()
-            async for event in response:
-                for out in translate(event):
-                    yield out
+            # **The response is closed on every way out of the loop.**  An
+            # `async for` left by a thrown exception — the GeneratorExit of an
+            # interrupted turn reaching the yield below — does not close its
+            # iterator, and an open stream keeps the provider generating on a
+            # connection nobody reads.  `close()` is the spelling both SDKs
+            # have; `aclose` is OpenAI's alias for it.
+            try:
+                async for event in response:
+                    for out in translate(event):
+                        yield out
+            finally:
+                await response.close()
 
     return stream
 
@@ -641,6 +908,9 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
         agent: str = "",
         subagent: str = "",
         kind: str = "",
+        tool_choice: str = "",
+        thinking: str = "",
+        temperature: float | None = None,
     ) -> dict[str, Any]:
         """Stream one chat completion.
 
@@ -668,19 +938,39 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 leaving every hop anonymous.
             subagent: Which of that agent's conversations, empty for its own.
             kind: What sort of call this is — `turn` for the loop's own model
-                calls (a compaction call included: it is the turn's own work),
-                `discriminator` for the recall decision, the one call that
-                reaches this server outside the loop's backend.  Nothing is
-                keyed on it; it is the word the usage line is read by, because
-                the two are separate prompt lineages and a cache-hit ratio that
-                averaged them could not say which one was missing.
+                calls, `decision` for the recall decision, and `compactor` for
+                the live-view selector.  The last two are the calls that reach
+                this server outside the loop's backend.  Nothing is keyed on it;
+                it is the word the usage line is read by, because they are
+                separate prompt lineages and a cache-hit ratio that averaged
+                them could not say which one was missing.
+            tool_choice: The name of the one tool this call must use.  Empty
+                leaves the choice to the model; the decision calls name their
+                single decision tool, because a model left free in a tool-heavy
+                conversation continues the conversation instead of deciding.
+            thinking: `enabled` or `disabled` to override the model's configured
+                `compat.thinking` for this call only; empty uses the config.
+                The decision calls disable it — a thinking endpoint rejects a
+                forced `tool_choice`, and the structured call is what makes the
+                decision readable.
+            temperature: A sampling temperature to use for this call only;
+                omitted uses the model's configured value. The decision calls
+                send 0, because a selection should not vary between runs.
         """
         who = f"{agent}/{subagent}" if subagent else agent or "(unstated)"
         what = kind or "(unstated)"
         began = time.monotonic()
         try:
             result = await stream_chat_impl(
-                streamer, provider, messages, tools, model, ctx
+                streamer,
+                provider,
+                messages,
+                tools,
+                model,
+                ctx,
+                tool_choice=tool_choice,
+                thinking=thinking,
+                temperature=temperature,
             )
         except Exception as exc:
             # **A failed call carries the identity on the line**: FastMCP's own

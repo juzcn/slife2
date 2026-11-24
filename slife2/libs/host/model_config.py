@@ -14,9 +14,11 @@ refused at load, at `model_get`, and at `model_set` with the same sentence.
 **Every field is required here, and the loader supplies the defaults.**  The
 file may omit `reasoning`, `input`, `compat` and the rest; `load_model` fills
 the canonical default before validation, so the object a caller sees is always
-complete.  The tools do not fill anything: a `model_set` that leaves a field
-out is a schema error, not a silent reset.  The two behaviours are the same
-object; only the input side differs.
+complete.  `context_window` is the exception: a model entry must state it,
+because every bound in a turn is measured against it, and the loader refuses an
+entry that does not.  The tools do not fill anything: a `model_set` that leaves
+a field out is a schema error, not a silent reset.  The two behaviours are the
+same object; only the input side differs.
 
 **`compat` is nested here although the runtime model flattens it.**  The file
 spells it nested, the model-facing object spells it nested, and
@@ -31,6 +33,8 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from slife2.libs.host.validation import validation_refusal
 
 #: The wire protocols a provider may name.  `slife2.libs.host.config.API_BACKENDS`
 #: is derived from the plugins, and a test holds the two sets equal; this module
@@ -90,7 +94,7 @@ class ProviderConfig(BaseModel):
         description="The endpoint the provider's models are reached at."
     )
     api_key: str = Field(
-        description="A `${VAR}` or `keyring:` reference, as the file writes it. "
+        description="A `${VAR}` reference, as the file writes it. "
         "Empty keeps an existing provider's key; a new provider needs one."
     )
 
@@ -109,7 +113,10 @@ class ModelConfig(BaseModel):
         description="The model thinks natively, and its reasoning is kept on the turn."
     )
     input: list[Modality] = Field(description="What it reads: `text` and/or `image`.")
-    context_window: int = Field(description="Its context window, in tokens.")
+    context_window: int = Field(
+        gt=0,
+        description="Its context window, in tokens; a model entry must state it.",
+    )
     max_tokens: int | None = Field(
         description="Its output limit, in tokens; null uses the provider's default."
     )
@@ -148,12 +155,12 @@ COMPAT_DEFAULTS: dict[str, Any] = {
 
 #: What a file that omits a model field means.  The loader merges these under
 #: the raw entry; the tool takes the resulting `ModelConfig` whole, so a
-#: `model_set` can never inherit one of these by accident.
+#: `model_set` can never inherit one of these by accident.  `context_window` is
+#: absent: a model entry must state its window, and no default is a window.
 MODEL_DEFAULTS: dict[str, Any] = {
     "name": "",
     "reasoning": False,
     "input": ["text"],
-    "context_window": 0,
     "max_tokens": None,
     "temperature": None,
     "top_p": None,
@@ -168,35 +175,23 @@ PROVIDER_DEFAULTS: dict[str, Any] = {"api_key": ""}
 #: same courtesy `rest_api_set` already extends.
 _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-_MISSING = object()
+#: A whole value that is one well-formed reference — the only shape the secret
+#: chain resolves (`slife2.libs.host.config._ENV_PATTERN`).  A malformed
+#: `${...}` is not a reference: passed through, it resolves to nothing, is read
+#: as a literal, and travels to the far end as the key itself.
+_REFERENCE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+#: The refusal both credential-writing tools answer with — `model_set` and
+#: `rest_api_set` — because one rule about one field is one sentence.
+API_KEY_REFUSAL = "api_key must be a `${VAR}` reference — not the secret itself"
 
 #: Model fields whose `null` in YAML means "the field was not written", which
 #: the loader turns into the canonical default.  `reasoning`, `max_tokens`,
 #: `temperature` and `top_p` are absent here deliberately: a written `null`
 #: there is either refused (the switch) or a real value (the numbers).
-_NULL_IS_ABSENT = ("name", "input", "compat", "context_window")
-
-
-def _error(where: str, exc: ValidationError) -> ValueError:
-    """The first validation failure, in the config's own sentence.
-
-    **The field path is the part a model acts on**, so it is always there, and
-    the offending value is appended when Pydantic kept it — a refusal that says
-    `providers.p.api: Input should be ...` is one the caller can fix without
-    opening the file.
-    """
-    first = exc.errors()[0]
-    path = ".".join(str(part) for part in first.get("loc", ()))
-    # **Only an enum or a switch echoes its value.**  Pydantic puts the whole
-    # parent mapping in `input` for a missing field, and that can carry a
-    # literal API key; an unknown key's value can be one too.  The field path
-    # plus the message is enough to fix either, and a literal error's value is
-    # a protocol, a modality or a quirk — never a credential.
-    got = first.get("input", _MISSING)
-    shown = first.get("type") in ("literal_error", "bool_type") and got is not _MISSING
-    suffix = f" (got {got!r})" if shown else ""
-    where = f"{where}.{path}" if path else where
-    return ValueError(f"{where}: {first['msg']}{suffix}")
+#: `context_window` is absent for the other reason: a written `null` is not a
+#: window, and an omitted one is refused by the required field.
+_NULL_IS_ABSENT = ("name", "input", "compat")
 
 
 def load_provider(raw: Any, *, where: str) -> ProviderConfig:
@@ -216,17 +211,19 @@ def load_provider(raw: Any, *, where: str) -> ProviderConfig:
     try:
         return ProviderConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def load_model(raw: Any, *, where: str) -> ModelConfig:
     """One model entry, validated and completed with the canonical defaults.
 
-    The file may leave out `name`, `input`, `compat`, `context_window` and the
-    numeric fields; this is the one place that turns those absences into the
-    values the rest of the system means.  *This* is why `model_set` can require
-    every field without making an old file invalid: loading and setting are the
-    same object, with the defaults applied on one side only.
+    The file may leave out `name`, `input`, `compat` and the numeric fields;
+    this is the one place that turns those absences into the values the rest of
+    the system means.  `context_window` is not one of them: it is the one fact
+    a model entry must state, and validation refuses the entry that does not.
+    *This* is why `model_set` can require every field without making an old file
+    invalid: loading and setting are the same object, with the defaults applied
+    on one side only.
     """
     if not isinstance(raw, Mapping):
         raise ValueError(f"{where}: each model must be a mapping")
@@ -251,7 +248,7 @@ def load_model(raw: Any, *, where: str) -> ModelConfig:
     try:
         return ModelConfig.model_validate(data)
     except ValidationError as exc:
-        raise _error(where, exc) from exc
+        raise validation_refusal(where, exc) from exc
 
 
 def model_entry(model: ModelConfig) -> dict[str, Any]:
@@ -269,8 +266,9 @@ def model_entry(model: ModelConfig) -> dict[str, Any]:
         spec["reasoning"] = True
     if list(model.input) != MODEL_DEFAULTS["input"]:
         spec["input"] = list(model.input)
-    if model.context_window:
-        spec["context_window"] = model.context_window
+    # Always written: a model entry must state its window, and the loader
+    # refuses one that does not.
+    spec["context_window"] = model.context_window
     if model.max_tokens is not None:
         spec["max_tokens"] = model.max_tokens
     if model.temperature is not None:
@@ -290,13 +288,16 @@ def model_entry(model: ModelConfig) -> dict[str, Any]:
 def show_api_key(value: str) -> str:
     """The key as a model may see it: the reference, or nothing.
 
-    A `${VAR}`/`keyring:` reference is not the secret and is what a full-set
-    has to restate.  A literal written into the file is the operator's secret,
-    so it is shown as `""`; `model_set` treats `""` as "leave the provider's
-    key alone", which is the one field where that is the safe answer.
+    A well-formed `${VAR}` reference is not the secret and is what a full-set
+    has to restate.  Anything else — a literal, or a malformed `${…}` the chain
+    could never resolve — is shown as `""`; `model_set` treats `""` as "leave
+    the provider's key alone", which is the one field where that is the safe
+    answer.  The test is `to_reference`'s (`_REFERENCE`), so `set(get())` is
+    true: a value get hands back is one set accepts, and a value get hides is
+    one set keeps rather than accuses the model of writing.
     """
     value = (value or "").strip()
-    if value.startswith("${") or value.startswith("keyring:"):
+    if _REFERENCE.match(value):
         return value
     return ""
 
@@ -305,16 +306,17 @@ def to_reference(value: str) -> str:
     """A model-written credential reference, normalized; the secret itself is refused.
 
     `OPENAI_API_KEY` means `${OPENAI_API_KEY}` — the same courtesy
-    `rest_api_set` extends.  Anything else that is not already a reference is
-    a literal key, and a model-facing tool must not write one into the file.
+    `rest_api_set` extends, and the same rule: this is the one normalizer both
+    tools write by, so they cannot come to different conclusions about one
+    value.  A reference is the well-formed shape the chain resolves
+    (`_REFERENCE`); anything else that is not a bare variable name is a literal
+    key, and a model-facing tool must not write one into the file.
     """
     value = (value or "").strip()
     if not value:
         return ""
-    if value.startswith("${") or value.startswith("keyring:"):
+    if _REFERENCE.match(value):
         return value
     if _ENV_NAME.match(value):
         return f"${{{value}}}"
-    raise ValueError(
-        "api_key must be a `${VAR}` or `keyring:` reference — not the secret itself"
-    )
+    raise ValueError(API_KEY_REFUSAL)

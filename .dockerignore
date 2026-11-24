@@ -1,6 +1,9 @@
 .git
 .github
 .venv
+# The README's `slife2.env` holds keys; it must never enter the build context.
+.env
+*.env
 agents
 dist
 build

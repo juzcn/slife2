@@ -9,6 +9,8 @@ restart and no second registry.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +20,13 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
 from slife2.libs.plugin.protocol import CALL_SOURCE, LIST_SOURCES
-from slife2.plugins.jobs.server import CATEGORY, SERVER_NAME, SOURCE, build_server
+from slife2.plugins.jobs.server import (
+    CATEGORY,
+    SERVER_NAME,
+    SOURCE,
+    Registry,
+    build_server,
+)
 from tests.fakes import config_file
 
 pytestmark = pytest.mark.unit
@@ -27,10 +35,11 @@ pytestmark = pytest.mark.unit
 #: handles' addresses; these tests never make a real hop.
 CONFIG = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${JOBS_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         context_window: 100000
@@ -40,7 +49,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 """
 
 #: A pure job: a new deterministic tool, no handles, no hops.
@@ -155,6 +163,75 @@ async def test_a_broken_write_restores_the_previous_job(
     assert (isolated_runtime / "jobs" / "slugify.py").read_text(
         encoding="utf-8"
     ) == SLUGIFY
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_cannot_write_says_the_file_is_broken(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A restore that failed is said, not raised raw.**
+
+    The rollback wrote the previous bytes through the staging file with no
+    `except`: a disk that filled between the swap and the restore let a raw
+    `OSError` out, left the broken new file live, and lost the previous bytes
+    with the call.  The refusal now says the restore failed and the file on
+    disk is the broken code — `job_set` again is the repair.
+    """
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        await ask(client, "job_set", name="slugify", code=SLUGIFY)
+        real_write_bytes = Path.write_bytes
+
+        def refuse_staging(self: Path, data: bytes) -> int:
+            if self.name == ".slugify.installing":
+                raise OSError("the disk is full")
+            return real_write_bytes(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", refuse_staging)
+        with pytest.raises(ToolError, match="could not be restored") as raised:
+            await client.call_tool(
+                "job_set", {"name": "slugify", "code": "def slugify(:\n"}
+            )
+        ran = await ask(
+            client, "job_run", name="slugify", arguments={"title": "Still works"}
+        )
+
+    assert "the disk is full" in str(raised.value), "the cause is in the sentence"
+    assert "broken code" in str(raised.value)
+    assert "slugify.py" in str(raised.value), "and the file it names is on disk"
+    assert "job_set" in str(raised.value)
+    assert (isolated_runtime / "jobs" / "slugify.py").read_text(
+        encoding="utf-8"
+    ) == "def slugify(:\n", "the broken file is what is on disk"
+    assert ran["text"] == "still-works", "the loaded tool is the previous one"
+    assert not (isolated_runtime / "jobs" / ".slugify.installing").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_new_jobs_broken_file_that_cannot_be_removed_is_said(
+    isolated_runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same refusal on the other branch: a new job that does not load is
+    removed, and a removal that fails says the broken file is still there."""
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        real_unlink = Path.unlink
+
+        def refuse_final(self: Path, missing_ok: bool = False) -> None:
+            if self.name == "broken.py":
+                raise OSError("the file is held by another program")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", refuse_final)
+        with pytest.raises(ToolError, match="could not be removed") as raised:
+            await client.call_tool(
+                "job_set", {"name": "broken", "code": "def broken(:\n"}
+            )
+
+    assert "broken code" in str(raised.value)
+    assert (isolated_runtime / "jobs" / "broken.py").read_text(
+        encoding="utf-8"
+    ) == "def broken(:\n"
 
 
 @pytest.mark.asyncio
@@ -325,3 +402,111 @@ async def test_a_misspelled_job_suggests_the_one_it_meant(
     assert called.data["ok"] is False
     assert "did you mean" in called.data["text"]
     assert "slugify" in called.data["text"]
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_exits_at_import_is_refused(isolated_runtime: Path) -> None:
+    """**`sys.exit()` is a failed job, not a failed server.**  `SystemExit` is a
+    `BaseException`; it escaped the loader's `except Exception`, so `job_set`
+    never reached its rollback and `scan_jobs_dir` could take the jobs plugin —
+    a required hub upstream — down for every home.
+    """
+    config_on_disk(isolated_runtime)
+    async with Client(build_server(load())) as client:
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "job_set", {"name": "oops", "code": "import sys\nsys.exit(0)\n"}
+            )
+        listed = await ask(client, "job_list")
+
+    assert listed["jobs"] == []
+    assert not (isolated_runtime / "jobs" / "oops.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_job_that_exits_when_called_answers_a_failure(
+    isolated_runtime: Path,
+) -> None:
+    config_on_disk(isolated_runtime)
+    code = (
+        'def bail() -> str:\n    """Exit only this job."""\n    raise SystemExit(3)\n'
+    )
+    async with Client(build_server(load())) as client:
+        await ask(client, "job_set", name="bail", code=code)
+        answer = await ask(client, "job_run", name="bail", arguments={})
+
+    assert answer["text"].startswith("SystemExit")
+
+
+@pytest.mark.asyncio
+async def test_a_slow_job_file_does_not_hold_the_event_loop(
+    isolated_runtime: Path,
+) -> None:
+    """**A job's top-level code is arbitrary, and the scan runs on a shared loop.**
+
+    The first ask for a home loads every file in its `jobs/` folder, and a
+    module's top level is model-written code that may block.  Run on the event
+    loop, it stalls every conversation's jobs and the hub's refresh for its
+    duration; hopped, it delays this home's first listing and nothing else.
+    """
+    import asyncio
+
+    config_on_disk(isolated_runtime)
+    jobs = isolated_runtime / "jobs"
+    jobs.mkdir(parents=True, exist_ok=True)
+    (jobs / "slow.py").write_text(
+        "import time\n"
+        "time.sleep(0.2)\n"  # timeouts: the value this test is built around
+        "\n"
+        "def slow() -> str:\n"
+        '    """Take a moment."""\n'
+        '    return "done"\n',
+        encoding="utf-8",
+    )
+    beat = asyncio.Event()
+
+    async def heartbeat() -> None:
+        await asyncio.sleep(0.02)  # timeouts: the value this test is built around
+        beat.set()
+
+    async with Client(build_server(load())) as client:
+        ticker = asyncio.create_task(heartbeat())
+        try:
+            await ask(client, "job_list")
+        finally:
+            ticker.cancel()
+
+    assert beat.is_set(), "the shared event loop was held by the job scan"
+
+
+def test_a_listing_is_a_snapshot_under_the_lock_a_write_uses(
+    isolated_runtime: Path,
+) -> None:
+    """**`list_sources` and `job_set` are two threads reading one dict.**
+
+    The listing is a sync tool FastMCP runs on a worker thread; the write runs
+    on the loop.  A snapshot that iterated the table while a write replaced an
+    entry is a "dictionary changed size during iteration" out of the tool, which
+    the hub reads as a source that cannot answer.  The lock is what makes the
+    listing wait for the write to finish; this holds it and proves the listing
+    does wait, rather than racing it and hoping a scheduler notices.
+    """
+    config_on_disk(isolated_runtime)
+    registry = Registry(load(), isolated_runtime / "jobs")
+    entered = threading.Event()
+    listed: list[list[Any]] = []
+
+    def snapshot() -> None:
+        entered.set()
+        listed.append(registry.values())
+
+    thread = threading.Thread(target=snapshot)
+    with registry._lock:
+        thread.start()
+        assert entered.wait(timeout=2), "the snapshot thread never ran"
+        time.sleep(0.05)  # timeouts: long enough for an unlocked snapshot
+        assert thread.is_alive(), "the listing ran without the lock"
+    thread.join(timeout=2)
+
+    assert not thread.is_alive(), "the listing did not resume after the write"
+    assert listed == [[]], "a fresh home has no jobs, and that is a snapshot"

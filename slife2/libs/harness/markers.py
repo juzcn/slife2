@@ -1,5 +1,5 @@
-"""`[Name:{…}]` — the marker a plugin puts in front of a message it delivers, and
-how a screen takes one back off.
+"""`[Name:{…}]` — the marker a plugin puts in front of a message it delivers,
+how one is built, and how a screen takes one back off.
 
 A marker is **content**: it goes into the turn's row along with the message and
 comes back out of it verbatim, which is what its word-shaped spelling says and
@@ -18,7 +18,8 @@ the raw marker at somebody.
 
 Nothing here parses a marker, compares two of them, or reads the case — the
 case is a convention about *where* a marker lives and no code has ever read it
-(SDD §5.5).  This is a prefix and a function for removing one.
+(SDD §5.5).  This is the shape itself: one function builds a marker, one takes
+it off, and neither knows a name.
 
 **Where a marker ends is a shape question, and it is asked as one.**  The end is
 the `]` that closes the payload's own braces, found by a scan of quoting and
@@ -30,6 +31,10 @@ is interpreted, which is all the old "nothing here parses a marker" ever meant.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from typing import Any
+
 #: The characters the shape is made of: a brace-delimited payload between the
 #: brackets, and the two that quote and escape a string inside it.  Named because
 #: the scan below is about *this* shape rather than about brackets in general.
@@ -38,6 +43,30 @@ _PAYLOAD_CLOSE = "}"
 _MARKER_END = "]"
 _QUOTE = '"'
 _ESCAPE = "\\"
+
+
+def wrap(prefix: str, payload: Mapping[str, Any] | str) -> str:
+    """One marker: the writer's prefix, the payload, the closing bracket.
+
+    **The envelope is built here because every writer was building it itself.**
+    Five writers spelled the same `prefix + json.dumps(payload) + "]"`, and a
+    shape written five times is a shape that can drift five ways — the closing
+    bracket is the same character `_marker_end` scans for, so the builder and
+    the reader now agree by construction.  The *name* stays with each writer
+    (the module docstring's rule): `prefix` is handed in, never chosen here.
+
+    `payload` is what goes inside the brackets: a mapping this serialises, or
+    the JSON text a writer already built — `turn_footnote` is also a screen's
+    reader, so its serialisation is shared rather than repeated.
+
+    **`ensure_ascii` off**, unlike the turn-event codec: a marker is content in
+    a conversation rather than a payload on a progress channel, and a name that
+    is not ASCII should read as itself in a transcript.
+    """
+    body = (
+        payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
+    )
+    return f"{prefix}{body}{_MARKER_END}"
 
 
 def _marker_end(content: str, start: int) -> int:

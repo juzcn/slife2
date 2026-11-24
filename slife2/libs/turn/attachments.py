@@ -44,11 +44,13 @@ a picture that is no longer in hand.
 from __future__ import annotations
 
 import base64
-import json
 import logging
-from collections.abc import MutableSequence, Sequence
+from collections.abc import Awaitable, Callable, MutableSequence, Sequence
 from pathlib import Path
 from typing import Any
+
+from slife2.helpers.threads import off_loop
+from slife2.libs.harness.markers import wrap
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,46 @@ def _encode(source: str, base: Path | None = None) -> tuple[str, str]:
     return f"data:{media_type};base64,{base64.b64encode(data).decode('ascii')}", ""
 
 
+#: What a caller's cabinet answers for the sources the encoder could not read:
+#: **one ask for the whole batch**, because the connection is the caller's and
+#: opening it per source would be one open per picture.
+Lookup = Callable[
+    [list[tuple[str, str]]],
+    Awaitable[tuple[list[tuple[str, str]], list[str]]],
+]
+
+#: One key, fetched through a caller's own cabinet connection: the URL it
+#: resolves to, or `None` when the cabinet does not hold it.
+Fetch = Callable[[str], Awaitable[str | None]]
+
+
+def split(
+    sources: Sequence[str], *, base: Path | None = None
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """*sources* split two ways: the pairs, and `(source, refusal)` for the rest.
+
+    The second answer is what `resolve_sources` retries against the cabinet, and
+    it is separated here so the direct pass (dedupe, order, one refusal per
+    source) is written once.
+    """
+    pairs: list[tuple[str, str]] = []
+    keys: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for source in sources:
+        if source in seen:
+            # Named twice, attached once: the second copy is the same bytes in
+            # the same request, and a screenshot is megabytes the model does not
+            # read twice.
+            continue
+        seen.add(source)
+        url, refusal = _encode(source, base)
+        if refusal:
+            keys.append((source, refusal))
+            continue
+        pairs.append((source, url))
+    return pairs, keys
+
+
 def resolve(
     sources: Sequence[str], *, base: Path | None = None
 ) -> tuple[list[tuple[str, str]], list[str]]:
@@ -155,18 +197,78 @@ def resolve(
     file.  The batch rule is why: dropping the whole list on one unreadable
     source would send four good images away with the missing fifth.
     """
+    pairs, keys = split(sources, base=base)
+    return pairs, [refusal for _source, refusal in keys]
+
+
+async def resolve_sources(
+    sources: Sequence[str],
+    *,
+    base: Path | None = None,
+    lookup: Lookup | None = None,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Like `resolve`, and then ask `lookup` about what it could not read.
+
+    **The second chance is for a `[Image:…]` key.**  A restored conversation
+    carries markers instead of pixels, so the string a model passes to
+    `attach_image` may be a cabinet path rather than a file or URL — and only the
+    cabinet can tell the two apart.  `lookup` is asked **once for the whole
+    batch** (`(source, refusal)` pairs in, `(pairs, refusals)` out), because
+    opening its connection is the caller's step and doing it per source would
+    make a batch of five keys five opens.
+
+    `lookup` is `None` for a caller with no cabinet: every failed source then
+    keeps the encoder's own sentence, exactly as `resolve` answers.
+
+    **The split runs off the loop.**  It reads files — up to `MAX_BYTES` each —
+    and base64-encodes them, and this coroutine is awaited on the one loop every
+    conversation of a server shares: on it, a batch of screenshots stalls turns
+    that are attaching nothing (`slife2.helpers.threads` states the rule).
+    """
+    pairs, keys = await off_loop(split, sources, base=base)
+    if not keys or lookup is None:
+        return pairs, [refusal for _source, refusal in keys]
+    more, refusals = await lookup(keys)
+    return pairs + more, refusals
+
+
+async def from_keys(
+    keys: Sequence[tuple[str, str]],
+    fetch: Fetch,
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Retry each failed source as a cabinet key, through `fetch` — one refusal
+    per source either way.
+
+    `fetch` answers the URL the key resolves to, or `None` when the cabinet does
+    not hold it; a `fetch` that raises is that source's refusal and not the
+    batch's.  The open, the patient and the call are the caller's, because the
+    two servers that attach images reach the cabinet differently (`Lookup` says
+    why the batch is handed over once).
+
+    A source that is neither a file, a URL nor a key keeps the encoder's own
+    sentence — "no such file" — rather than a sentence about the cabinet, which
+    is what makes the refusal name the string the model wrote.
+    """
     pairs: list[tuple[str, str]] = []
     refusals: list[str] = []
-    seen: set[str] = set()
-    for source in sources:
-        if source in seen:
-            # Named twice, attached once: the second copy is the same bytes in
-            # the same request, and a screenshot is megabytes the model does not
-            # read twice.
+    for source, refusal in keys:
+        try:
+            url = await fetch(source)
+        except Exception as exc:  # noqa: BLE001 - one source's refusal, not the batch's
+            # **A harness failure is not a source that is not there.**  The
+            # cabinet answering with a shape this build cannot read is the same
+            # damage `tool_payload` refuses; reading it as "the cabinet does not
+            # hold it" would turn a build mismatch into a confident miss.  Import
+            # the type lazily for `slife2.libs.turn.tools`'s reason: attaching a
+            # picture must not pull the plugin protocol — and FastMCP — into the
+            # loop's import graph.
+            from slife2.libs.plugin.protocol import UnreadableAnswer
+
+            if isinstance(exc, UnreadableAnswer):
+                raise
+            refusals.append(refusal)
             continue
-        seen.add(source)
-        url, refusal = _encode(source, base)
-        if refusal:
+        if not isinstance(url, str) or not url:
             refusals.append(refusal)
             continue
         pairs.append((source, url))
@@ -248,7 +350,6 @@ def parts(prompt: str, urls: Sequence[str]) -> list[dict[str, Any]]:
 #: for a URL the provider fetches — and the fields a reader acts on, nothing
 #: else.  The image note is what a picture that was **not** kept leaves.
 IMAGE_PREFIX = "[Image:"
-IMAGE_SUFFIX = "]"
 
 
 def image_reference(
@@ -271,7 +372,7 @@ def image_reference(
         payload["mime"] = mime
     if size:
         payload["size"] = int(size)
-    return f"{IMAGE_PREFIX}{json.dumps(payload, ensure_ascii=False)}{IMAGE_SUFFIX}"
+    return wrap(IMAGE_PREFIX, payload)
 
 
 def image_note(part: dict[str, Any]) -> str:
@@ -302,6 +403,47 @@ def image_note(part: dict[str, Any]) -> str:
         f"[image not stored: {media_type}{size} — the source is in this turn, "
         f"and attaching it again sends it]"
     )
+
+
+#: The refusals `attach_image` answers with, written once for both servers that
+#: serve it — the agent's and the agent task's.  Each is model-facing text twice
+#: over, the same argument `image_note` makes: two spellings would be two claims
+#: about one call, and the model has no way to tell which of them is the lie.
+#: The batch rule is the module's; these are the half that hands it to the model.
+NO_SOURCE = (
+    "this call named no source; pass the paths, URLs or `data:` "
+    "URIs of the images to attach."
+)
+
+#: What a call gets when the live list holds no user message to carry the
+#: picture — a fault in the caller rather than something to report to a person
+#: (`inject` says why it answers a boolean).
+NO_MESSAGE = "there is no message here to attach an image to."
+
+
+def cannot_read_images(model: str) -> str:
+    """The refusal a non-vision model's call gets, naming the model and the fix.
+
+    Encoding is refused rather than letting a provider drop the images: the
+    refusal is the tool result the model reads, so it can tell the person —
+    rather than the harness writing an assistant message on the model's behalf.
+    """
+    return (
+        f"{model} cannot read images, so nothing was attached — "
+        f"move to a model whose config lists `image` under `input`."
+    )
+
+
+def cabinet_unreachable(refusal: str, exc: Exception) -> str:
+    """One source's refusal when the cabinet could not be asked about it.
+
+    A missing path is not a cabinet failure: the lookup is only how a string
+    that failed the encoder is checked against the cabinet's keys, so an
+    unreachable cabinet leaves each such source with the encoder's own sentence
+    — plus why the second check could not be made, because a key that never got
+    its turn is a different fact from a path that is genuinely absent.
+    """
+    return f"{refusal} (the cabinet could not be reached: {exc})"
 
 
 #: What a *person* is told when `drop` has just taken their picture away, as

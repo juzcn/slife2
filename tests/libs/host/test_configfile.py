@@ -10,17 +10,18 @@ is not left on disk.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
 from slife2.libs.host.config import ConfigError, load
 from slife2.libs.host.configfile import (
     config_path,
-    read_scalar,
+    read_default,
     read_section,
     remove,
+    set_default,
     set_enabled,
-    set_scalar,
     update_entry,
     upsert,
 )
@@ -32,11 +33,12 @@ from slife2.libs.host.paths import DATA_ENV_VAR
 CONFIG = """\
 # slife2.yaml — the explanation lives here, and a write must not eat it.
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
     # The key is a reference; the value is in the credential store.
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         name: 'Big one'
@@ -47,7 +49,6 @@ embeddings:
     local:
       base_url: http://127.0.0.1:17347/v1
       model: big-emb
-default: local/big
 
 # ── Other people's servers ──────────────────────────────────────────────────
 mcp:
@@ -91,7 +92,7 @@ providers:
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    models: [{model: big}]
+    models: [{model: big, context_window: 1000}]
 embeddings:
   providers:
     local:
@@ -295,6 +296,26 @@ def test_an_edit_that_changes_nothing_does_not_touch_the_file(tmp_path) -> None:
     assert path.stat().st_mtime_ns == stamp.st_mtime_ns
 
 
+def test_an_edit_whose_judge_raises_a_non_config_error_is_rolled_back(tmp_path) -> None:
+    """The judge can refuse with more than `ConfigError`: a keyring, a socket,
+    any failure of its own.  Whatever the refusal, an edit that did not validate
+    is not an edit that happened — the file is restored, not left holding the
+    write while the tool reports failure."""
+    path = tmp_path / "slife2.yaml"
+    path.write_text(REQUIRED, encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+
+    def refuses(config):
+        raise RuntimeError("keyring locked")
+
+    with pytest.raises(RuntimeError, match="keyring locked"):
+        set_default("local/big", check=refuses, path=path)
+
+    assert path.read_text(encoding="utf-8") == before, (
+        "the unvalidated edit was rolled back"
+    )
+
+
 def test_removing_the_last_entry_empties_the_section_and_keeps_its_explanation(
     tmp_path,
 ) -> None:
@@ -399,6 +420,75 @@ def test_a_removal_leaves_every_other_entry_its_comment(tmp_path) -> None:
     assert list(load(path).mcp) == ["tail"]
 
 
+def test_a_removal_of_the_first_entry_keeps_the_sections_own_explanation(
+    tmp_path,
+) -> None:
+    """**The convention the removal relies on, exercised at the one slot it
+    cannot decide by itself.**
+
+    ruamel keeps the comment above a mapping's first key in that mapping's
+    pending slot, so an editor removing the first entry sees one block where two
+    things can live: the section's explanation (which belongs to the section and
+    must survive) and the entry's own introduction (which goes with it). The
+    file answers that by convention — a section's explanation is written above
+    the section key, a distinct slot — and this is the reading the writer takes:
+    the block inside the section belongs to the entry, the block above the key
+    belongs to the section.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        REQUIRED + "# ── External servers ──\n"
+        "mcp:\n"
+        "  # Describes slow-one, and slow-one is going.\n"
+        "  slow-one:\n"
+        "    command: npx\n"
+        "  # Describes filesystem, which stays.\n"
+        "  filesystem:\n"
+        "    command: fs\n",
+        encoding="utf-8",
+    )
+
+    assert remove("mcp", "slow-one", path=path) is True
+
+    after = path.read_text(encoding="utf-8")
+    assert "# ── External servers ──" in after, "the section's explanation"
+    assert "Describes slow-one" not in after, "the entry's introduction"
+    assert "Describes filesystem" in after
+    assert after.index("Describes filesystem") < after.index("filesystem:")
+    assert list(load(path).mcp) == ["filesystem"]
+
+
+def test_the_shipped_config_puts_each_sections_explanation_above_its_key() -> None:
+    """**The shipped file is the convention's first reader, so it must follow it.**
+
+    The four plugins that write `mcp:`, `rest-api:`, `cli:` and `skills:` — and
+    the model writer that writes `providers:` — remove and replace first entries
+    through the reading above. A section explanation written *inside* the
+    section, above its first entry, is indistinguishable from that entry's own
+    introduction and would go with it.
+    """
+    from ruamel.yaml import YAML
+
+    shipped = Path(__file__).parents[3] / "slife2.yaml"
+    document = YAML(typ="rt").load(shipped.read_text(encoding="utf-8"))
+    for section in (
+        "providers",
+        "embeddings",
+        "mcp",
+        "rest-api",
+        "cli",
+        "skills",
+        "media",
+        "file-tunnel",
+    ):
+        values = document[section]
+        pending = values.ca.comment if values.ca.comment else None
+        assert not pending or pending[1] is None, (
+            f"`{section}:` explains itself above its first entry; write the "
+            "explanation above the section key instead"
+        )
+
+
 def test_an_entry_that_ends_on_a_sequence_keeps_the_next_comment(tmp_path) -> None:
     """**The shape every entry in `slife2.yaml` actually has, and the walk that
     stopped one node too early.**
@@ -489,6 +579,78 @@ def test_the_switch_is_written_where_the_entry_is(tmp_path) -> None:
     assert "enabled" not in added(path, "chinese")
 
 
+#: A rewrite target that ends on a sequence, followed by a comment that
+#: introduces the next entry — the shape every `mcp:` entry in the shipped
+#: file has, and the one a plain list in the rewrite stopped the walk at.
+COMMENTED_TAIL = (
+    REQUIRED + "mcp:\n"
+    "  # Describes slow-one, which is written again.\n"
+    "  slow-one:\n"
+    "    command: npx\n"
+    "    args:\n"
+    "      - one  # inline note\n"
+    "  # Describes filesystem, which stays.\n"
+    "  filesystem:\n"
+    "    command: fs\n"
+    "    args:\n"
+    "      - -x\n"
+)
+
+
+def _assert_next_comment_above_its_entry(path) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = lines.index("  # Describes filesystem, which stays.")
+    assert lines[at + 1] == "  filesystem:", (
+        "the block introducing the next entry must print above that entry — "
+        "not inside the edited one, above one of its list items"
+    )
+
+
+def test_a_rewrite_does_not_strand_the_next_comment_inside_the_entry(tmp_path) -> None:
+    """**A plain list has no comment slots.**  `upsert` and `update_entry` hand
+    `_swap_entry` plain Python values; writing the next entry's introduction
+    onto the edited entry's last key then rendered it at the head of that list,
+    and a later `remove` took it out with the container.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(COMMENTED_TAIL, encoding="utf-8")
+
+    upsert("mcp", "slow-one", {"command": "uvx", "args": ["other"]}, path=path)
+    _assert_next_comment_above_its_entry(path)
+    assert "# inline note" in path.read_text(encoding="utf-8")
+
+    path.write_text(COMMENTED_TAIL, encoding="utf-8")
+    update_entry(
+        "mcp", "slow-one", lambda current: {**current, "args": ["-z"]}, path=path
+    )
+    _assert_next_comment_above_its_entry(path)
+
+    assert remove("mcp", "slow-one", path=path) is True
+    after = path.read_text(encoding="utf-8")
+    assert "Describes filesystem" in after, (
+        "the next entry's comment went out with the edited entry's container"
+    )
+    _assert_next_comment_above_its_entry(path)
+
+
+def test_the_switch_does_not_strand_the_next_comment_inside_the_entry(tmp_path) -> None:
+    """`enabled: false` is appended after an `args:`-ending entry, and removing
+    it takes the new last key with it.  The block introducing the next entry has
+    to move with the entry's end both ways."""
+    path = tmp_path / "slife2.yaml"
+    path.write_text(COMMENTED_TAIL, encoding="utf-8")
+
+    assert set_enabled("mcp", "slow-one", False, path=path) is True
+    _assert_next_comment_above_its_entry(path)
+    text = path.read_text(encoding="utf-8")
+    assert text.index("    enabled: false") < text.index("Describes filesystem")
+    assert "# inline note" in text, "the last value's own line keeps its comment"
+
+    assert set_enabled("mcp", "slow-one", True, path=path) is True
+    _assert_next_comment_above_its_entry(path)
+    assert "# inline note" in path.read_text(encoding="utf-8")
+
+
 # --- the two refusals --------------------------------------------------------
 
 
@@ -547,20 +709,20 @@ def test_the_path_is_the_one_the_loader_reads(
     assert config_path() == isolated_runtime / "slife2.yaml"
 
 
-# --- the top-level scalar, and the locked update -----------------------------
+# --- the default model, and the locked update --------------------------------
 
 
-def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
-    """`default:` is not a section, so it needs a writer of its own.
+def test_the_default_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
+    """`providers.default` is a key of a section, and `set_default` writes it.
 
-    And `load` accepts any string there — only `Config.resolve` knows a
-    reference from a typo — which is why the caller passes its own judge and a
-    write naming no model is rolled back like any other the reader refuses.
+    `load` accepts any string there — only `Config.resolve` knows a reference
+    from a typo — which is why the caller passes its own judge and a write
+    naming no model is rolled back like any other the reader refuses.
     """
     path = write(tmp_path)
 
-    set_scalar("default", "local/big", path=path)
-    assert read_scalar("default", path=path) == "local/big"
+    set_default("local/big", path=path)
+    assert read_default(path=path) == "local/big"
     assert load(path).default == "local/big"
     # Everything the one assignment had nothing to do with is untouched.
     assert "# slife2.yaml — the explanation lives here" in path.read_text(
@@ -569,8 +731,7 @@ def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
 
     before = path.read_text(encoding="utf-8")
     with pytest.raises(ConfigError):
-        set_scalar(
-            "default",
+        set_default(
             "nobody/knows",
             check=lambda config: config.resolve("nobody/knows"),
             path=path,
@@ -578,9 +739,9 @@ def test_a_scalar_is_written_and_still_judged_by_the_caller(tmp_path) -> None:
     assert path.read_text(encoding="utf-8") == before, "rolled back"
 
 
-def test_a_scalar_that_is_not_there_reads_as_the_default(tmp_path) -> None:
-    path = write(tmp_path)
-    assert read_scalar("nobody-wrote-this", default="?", path=path) == "?"
+def test_an_absent_default_reads_as_empty(tmp_path) -> None:
+    path = write(tmp_path, REQUIRED)
+    assert read_default(path=path) == ""
 
 
 def test_an_update_reads_and_writes_inside_one_lock(tmp_path) -> None:
@@ -637,14 +798,14 @@ def test_an_update_of_something_that_is_not_there_says_so(tmp_path) -> None:
 #: `mcp:` as a scalar, with nothing under it.
 BROKEN_SECTION = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         name: 'Big one'
-default: local/big
 
 mcp: "oops"
 """
@@ -652,14 +813,14 @@ mcp: "oops"
 #: And one entry inside a section that is a mapping.
 BROKEN_ENTRY = """\
 providers:
+  default: local/big
   local:
     api: openai-completions
     base_url: https://example.test/v1
-    api_key: ${SLIFE2_TEST_KEY:-none}
+    api_key: none
     models:
       - model: big
         name: 'Big one'
-default: local/big
 
 mcp:
   chinese: "oops"
@@ -680,6 +841,15 @@ def test_a_section_that_is_not_a_mapping_is_refused_not_answered_empty(tmp_path)
     assert "`mcp:`" in str(raised.value)
 
     assert read_section("a2a", path=path) == {}, "an absent section is still empty"
+
+
+@pytest.mark.parametrize("text", ["[]\n", '""\n', "false\n", "0\n"])
+def test_a_falsy_file_that_is_not_a_mapping_is_refused(tmp_path, text: str):
+    """The `or {}` that made an empty file convenient also made a top level of
+    `[]`, `""`, `false` or `0` answer `{}` — so a listing said a file has no
+    sections instead of refusing the file."""
+    with pytest.raises(ConfigError, match="not a mapping"):
+        read_section("mcp", path=write(tmp_path, text))
 
 
 def test_an_entry_that_is_not_a_mapping_is_refused_not_dropped(tmp_path):
@@ -739,3 +909,72 @@ def test_a_mode_that_could_not_be_kept_is_said_rather_than_swallowed(
 
     assert "the file's mode was not kept" in caplog.text
     assert load(path).mcp["new"].command == "x", "and the write still happened"
+
+
+def test_a_removal_keeps_the_survivors_inline_comment(tmp_path) -> None:
+    """**The inline comment on an entry's own last line is its own.**
+
+    ruamel merges that comment and the block introducing the *next* entry into
+    one trailing token (`command: a  # keep me` then the next entry's intro), so
+    a removal that overwrote the slot wholesale deleted the survivor's inline
+    comment along with the doomed entry's introduction — even when there was no
+    introduction to move at all.  The head stays; only the block remainder is
+    replaced.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        REQUIRED + "mcp:\n"
+        "  first:\n"
+        "    command: a  # keep me\n"
+        "  # Describes second, which is going.\n"
+        "  second:\n"
+        "    command: b  # bee\n"
+        "  # Describes third, which stays.\n"
+        "  third:\n"
+        "    command: c  # cee\n",
+        encoding="utf-8",
+    )
+
+    assert remove("mcp", "second", path=path) is True
+    after = path.read_text(encoding="utf-8")
+    assert "# keep me" in after, "the survivor's inline comment is its own"
+    assert "# bee" not in after, "the doomed entry's own inline goes with it"
+    assert "Describes second" not in after, "the doomed introduction goes"
+    assert "Describes third" in after
+    assert after.index("Describes third") < after.index("third:")
+
+    # The last entry goes: there is no block to move, and the entry before it
+    # still keeps its inline comment (nothing to clear but the doomed intro).
+    # **Its own inline comment goes with it** — it used to be re-hung on the
+    # predecessor, describing a value it was never written about.
+    assert remove("mcp", "third", path=path) is True
+    after = path.read_text(encoding="utf-8")
+    assert "# cee" not in after, "the last entry's own inline was re-hung"
+    assert "Describes third" not in after, "the doomed introduction goes"
+    assert "# keep me" in after
+
+
+def test_removing_the_first_entry_takes_its_inline_comment_with_it(tmp_path) -> None:
+    """The first-entry arm moves the next block above the new first key.
+
+    Its own inline comment rides the same trailing token, so it must not be
+    carried into the mapping's pending comment — the survivor's introduction
+    moves, and nothing of the doomed line does.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(
+        REQUIRED + "mcp:\n"
+        "  first:\n"
+        "    command: a  # do not keep\n"
+        "  # Describes second, which stays.\n"
+        "  second:\n"
+        "    command: b\n",
+        encoding="utf-8",
+    )
+
+    assert remove("mcp", "first", path=path) is True
+    after = path.read_text(encoding="utf-8")
+
+    assert "# do not keep" not in after
+    assert "Describes second" in after
+    assert after.index("Describes second") < after.index("second:")

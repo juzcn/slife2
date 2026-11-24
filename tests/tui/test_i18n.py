@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import pytest
 
-from slife2.tui import i18n
-from slife2.tui.i18n import _STRINGS, set_language, t
+from slife2.libs.harness import i18n
+from slife2.libs.harness.i18n import _STRINGS, set_language, t
 
 pytestmark = pytest.mark.unit
 

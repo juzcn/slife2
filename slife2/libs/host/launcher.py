@@ -25,13 +25,16 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Generator, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
+from slife2 import __version__
 from slife2.clients.toolclient import LIST_TOOLS, ToolCounts, remote_catalogue
 from slife2.libs.host.config import (
     LOCAL,
@@ -57,6 +60,7 @@ from slife2.libs.host.runtime import (
     process_start_token,
     read_claim,
     read_record,
+    records,
     register_client,
     same_process,
     spawn,
@@ -67,7 +71,7 @@ from slife2.libs.host.runtime import (
     unregister_client,
     write_claim,
 )
-from slife2.libs.plugin.protocol import close_server, open_server
+from slife2.libs.plugin.protocol import DOWN_HINT, close_server, open_server
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +89,8 @@ class Status(enum.Enum):
     #: Answering correctly, but started by hand — there is no record of it.
     #: Reused with a warning, because refusing would be pedantry.
     UNMANAGED = "running (external)"
-    #: The port is held by something that is not this server.
+    #: The port is held by something that is not this build's version of this
+    #: server — a stranger, or a daemon left by an earlier build.
     CONFLICT = "port held by something else"
     STARTED = "started"
     STOPPED = "stopped"
@@ -138,6 +143,10 @@ class ServerSpec:
     #: The tool that identifies it when it advertises no name — see
     #: `slife2.libs.plugin.protocol.identifies`.
     expected_tool: str
+    #: The endpoint path, pinned with the host and port: the child is told all
+    #: three, so an edit between the parent's load and the child's own cannot
+    #: move an endpoint out from under a server started for it.
+    path: str = "/mcp"
 
 
 @dataclass(frozen=True)
@@ -183,6 +192,7 @@ def spec_for(config: Config, one: Plugin) -> ServerSpec:
         url=address.url,
         host=address.host,
         port=address.port,
+        path=address.path,
         expected_name=one.name,
         expected_tool=one.probe,
     )
@@ -385,9 +395,11 @@ def _argv(spec: ServerSpec) -> list[str]:
     spawned it, and it does not depend on the scripts directory being on PATH —
     which it is not, under `uv run`.
 
-    Host and port are pinned to what this client already decided, so editing the
-    config between load and spawn cannot move an endpoint out from under a
-    server that was started for it.
+    Host, port and path are pinned to what this client already decided, so
+    editing the config between load and spawn cannot move an endpoint out from
+    under a server that was started for it.  The path is the half that used to
+    be left to the child: a `servers.<name>.path` edit in that window made the
+    launcher probe one endpoint while the child bound another.
     """
     argv = [
         sys.executable,
@@ -397,6 +409,8 @@ def _argv(spec: ServerSpec) -> list[str]:
         spec.host,
         "--port",
         str(spec.port),
+        "--path",
+        spec.path,
     ]
     # The *resolved* directory, not the environment variable.  The child is
     # spawned with its working directory at `<data>/runtime`, so a relative
@@ -447,6 +461,33 @@ def _wait_ready(spec: ServerSpec, proc: subprocess.Popen) -> None:
         delay = min(delay * 2, 0.5)
 
 
+#: The daemons this process spawned, kept so a later pass can reap them.
+#: **On POSIX a child that exits stays a zombie until its parent waits on it**,
+#: and a client spawns nothing else mid-session to trigger `subprocess`'s own
+#: cleanup — a server another instance's `down` stopped, or one that crashed,
+#: would otherwise sit in the process table for the life of this one.  `poll()`
+#: is the wait; on Windows it is a harmless status read.
+_spawned: list[subprocess.Popen] = []
+
+#: Guards `_spawned`.  `ensure_all` submits a whole start wave to `ensure` at
+#: once, so the reap below and the append in `_bring_up` run on several threads:
+#: two of them removing the same exited child was
+#: `ValueError: list.remove(x): x not in list` out of a start rather than an
+#: outcome (ubuntu and macOS CI, 2026-11-17).
+_spawned_lock = threading.Lock()
+
+
+def _reap_spawned() -> None:
+    """Wait on the children that already exited, so POSIX does not hold them.
+
+    **The whole rewrite is one operation under the lock**, not a removal per
+    child: an append racing a rewrite is a process the list never again sees,
+    and one it cannot see is one nobody reaps.
+    """
+    with _spawned_lock:
+        _spawned[:] = [proc for proc in _spawned if proc.poll() is None]
+
+
 def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     """Make sure a server is up, reusing one that already is — and time it.
 
@@ -456,6 +497,7 @@ def ensure(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     almost every launch finds everything already running, and a warm start that
     says `12ms` per server is the honest report of a start that did nothing.
     """
+    _reap_spawned()
     started = time.monotonic()
     outcome = _bring_up(spec, config_path=config_path)
     return replace(outcome, seconds=time.monotonic() - started)
@@ -482,13 +524,26 @@ def _bring_up(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
         return _reuse(spec, config_path=config_path)
 
     try:
-        with start_lock(spec.url):
+        # **The wait is the starter's whole budget, not the lock's own short
+        # default.**  `exclusive` resolves `timeout=None` to `grace.lock` (30 s),
+        # while the process holding this lock is inside `_wait_ready`, whose
+        # bound is `ready.plugin_start` (300 s).  A second instance arriving at
+        # a cold, slow server would give up after 30 s and report a failed
+        # start even though the first was bringing the same server up
+        # correctly — the opposite of "the one that waits re-probes once it
+        # gets in".
+        with start_lock(
+            spec.url,
+            timeout=_T.timeouts.ready.plugin_start + _T.timeouts.ready.probe,
+        ):
             if probe(spec):
                 return _reuse(spec, config_path=config_path)
             if tcp_listening(spec.host, spec.port):
                 return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
 
             proc = spawn(_argv(spec), url=spec.url)
+            with _spawned_lock:
+                _spawned.append(proc)
             _wait_ready(spec, proc)
             # The record is written by the server itself, not here: it is the
             # only party that knows which config it read, and that is what
@@ -526,10 +581,41 @@ def _reuse(spec: ServerSpec, *, config_path: Path | None = None) -> Outcome:
     return Outcome(spec, Status.RUNNING, record, detail)
 
 
+def _stale_build(spec: ServerSpec) -> str:
+    """The build of our own server holding this endpoint, when it is not this one.
+
+    A daemon left by a previous build answers to the same MCP name, so the
+    probe refuses it (`identifies`) and the port is still taken; the record is
+    what says *why* — it carries the build the daemon wrote about itself, and
+    every server writes it (`serve`).  Only a record whose pid is still the
+    process it names is evidence about what holds the port now; a stale record
+    says nothing (`_live_owner` in `libs/plugin/protocol.py` draws the same
+    line).  An empty version is a record this build cannot read, and is left as
+    the ordinary conflict.
+    """
+    record = read_record(spec.url)
+    if (
+        record is not None
+        and pid_alive(record.pid)
+        and (same_process(record) or not record.start_token)
+        and record.version
+        and record.version != __version__
+    ):
+        return record.version
+    return ""
+
+
 def _conflict_detail(spec: ServerSpec) -> str:
+    stale = _stale_build(spec)
+    if stale:
+        return (
+            f"port {spec.port} is held by {spec.name} from build {stale}, not "
+            f"this build {__version__}; {DOWN_HINT}"
+        )
     return (
-        f"port {spec.port} is held by something that is not {spec.name} "
-        f"(nothing calling itself {spec.expected_name!r} at {spec.url})"
+        f"port {spec.port} is held by something that is not this build's "
+        f"{spec.name} (nothing calling itself {spec.expected_name!r} from build "
+        f"{__version__} at {spec.url})"
     )
 
 
@@ -619,7 +705,7 @@ def others_running() -> list[ClientRecord]:
 
 
 #: The plugins the hub cannot be made to wait for, because each of them waits on
-#: the hub: itself, `agent-task` (a task's loop *runs on* the hub's tool list) and
+#: the hub: itself, `agent-task` (a task's turn *runs on* the hub's tool list) and
 #: `schedule` (its runs are handed to `agent-task`).  Named once, so that the
 #: entry below can be the rule rather than a list of names.
 _AFTER_THE_HUB: tuple[str, ...] = ("toolhub", "agent-task", "schedule")
@@ -821,8 +907,11 @@ def _status_of(spec: ServerSpec) -> Outcome:
     The record is read exactly the way `stop` reads it, and it has to be: a
     server answering with no record of ours was started by hand, so `status`
     calling it merely "running" while `down` refuses to stop it is two commands
-    disagreeing about one process.  The `UNMANAGED` branch in `slife2 status`'s
-    output — "(not started by slife2)" — is what this makes reachable.
+    disagreeing about one process.  That includes a record whose pid is gone or
+    now belongs to somebody else: printing that pid as the running server's is
+    the same disagreement in a subtler spelling, so ownership is proved here,
+    not just presence.  The `UNMANAGED` branch in `slife2 status`'s output —
+    "(not started by slife2)" — is what this makes reachable.
     """
     if probe(spec):
         record = read_record(spec.url)
@@ -830,13 +919,33 @@ def _status_of(spec: ServerSpec) -> Outcome:
             return Outcome(
                 spec, Status.UNMANAGED, detail="no record; not started by slife2"
             )
+        # **A record that proves a different process is stale; one that proves
+        # nothing is still a record.**  `same_process` answers False for both a
+        # dead/reused pid and an empty start token, deliberately — it is the
+        # question "may I signal this?".  For a *report*, a live pid with no
+        # token is the one fact there is (a platform without tokens), while a
+        # dead pid or a token that differs is the stale record whose pid must
+        # not be printed as the running server's.
+        stale = not pid_alive(record.pid) or (
+            bool(record.start_token)
+            and process_start_token(record.pid) not in (None, record.start_token)
+        )
+        if stale:
+            return Outcome(
+                spec,
+                Status.UNMANAGED,
+                detail=(
+                    f"its record names pid {record.pid}, which is not that "
+                    f"process now; the record is stale"
+                ),
+            )
         return _reuse(spec)
     if tcp_listening(spec.host, spec.port):
         return Outcome(spec, Status.CONFLICT, detail=_conflict_detail(spec))
     return Outcome(spec, Status.NOT_RUNNING)
 
 
-def stop(config: Config) -> Iterator[Outcome]:
+def stop(config: Config, *, everything: bool = False) -> Iterator[Outcome]:
     """Stop the servers this config names, and only ones we can prove are ours.
 
     "Prove" is doing real work in that sentence.  A record holds a pid, and
@@ -850,8 +959,43 @@ def stop(config: Config) -> Iterator[Outcome]:
     ordering to keep at all.  Yielded as each lands for `ensure_all`'s reason —
     the one that is stuck in `terminate` for five seconds should appear while it
     is stuck, which is the opposite of what a list assembled in silence shows.
+
+    **`everything=True` is the last client's take-down.**  The daemons are the
+    machine's: another config may have started a model backend this one never
+    names, and stopping only `specs(config)` left it running with no `status` or
+    `down` in either config able to find it.  The records are the machine-wide
+    list, so the ones this config's specs did not already cover are stopped too
+    (the overlap is skipped rather than stopped twice).
     """
     yield from _concurrently(_stop_one, specs(config))
+    if everything:
+        named = {spec.url for spec in specs(config)}
+        extra = [
+            _spec_from_record(record)
+            for record in records()
+            if record.url.startswith("http") and record.url not in named
+        ]
+        if extra:
+            yield from _concurrently(_stop_one, extra)
+
+
+def _spec_from_record(record: ServerRecord) -> ServerSpec:
+    """A record's endpoint as a spec, for a stop whose config does not name it.
+
+    Only the fields `_stop_one` reads are meaningful here: the record already
+    proves ownership, so the probe and the expected MCP identity are not used.
+    """
+    parts = urlsplit(record.url)
+    return ServerSpec(
+        name=record.name,
+        module="",
+        url=record.url,
+        host=parts.hostname or "",
+        port=parts.port or 0,
+        path=parts.path or "/mcp",
+        expected_name="",
+        expected_tool="",
+    )
 
 
 def _stop_one(spec: ServerSpec) -> Outcome:
@@ -870,7 +1014,6 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         return Outcome(spec, status, detail="no record; not started by slife2")
 
     if not same_process(record):
-        clear_record(spec.url)
         # `same_process` is False for three situations, and they are not the
         # same sentence.  A pid that is simply gone is the common one — a
         # launcher that killed a server which never became ready leaves exactly
@@ -881,12 +1024,21 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         # two without evidence "pid reused" asserts something nobody checked,
         # in the one line a reader gets when a server did not stop; the third
         # says what it knows (SDD Appendix C).
+        #
+        # **Only proven evidence clears the record.**  A record dropped because
+        # ownership could not be proven leaves a live daemon with no record at
+        # all: every later `status` says "running (external)" and every later
+        # `down` refuses to touch it, so the one process this command exists to
+        # stop can never be stopped again.  The record is kept in that case,
+        # exactly as it is when a pid outlives `terminate` below.
         if not pid_alive(record.pid):
+            clear_record(spec.url)
             detail = (
                 f"record points at pid {record.pid}, which is no longer "
                 f"{spec.name} (the process is gone); left alone"
             )
         elif record.start_token and process_start_token(record.pid) is not None:
+            clear_record(spec.url)
             detail = (
                 f"record points at pid {record.pid}, which is no longer "
                 f"{spec.name} (pid reused); left alone"
@@ -894,7 +1046,7 @@ def _stop_one(spec: ServerSpec) -> Outcome:
         else:
             detail = (
                 f"record points at pid {record.pid}, but its ownership could "
-                f"not be proven; left alone"
+                f"not be proven; the record is kept so `down` can find it again"
             )
         return Outcome(spec, Status.STOPPED, detail=detail)
 

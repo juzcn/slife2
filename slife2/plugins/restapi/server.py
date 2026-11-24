@@ -37,7 +37,11 @@ from slife2.libs.host.config import (
     resolve_secret,
     unresolved_reference,
 )
-from slife2.libs.host.model_config import show_api_key
+from slife2.libs.host.model_config import (
+    API_KEY_REFUSAL,
+    show_api_key,
+    to_reference,
+)
 from slife2.libs.host.tool_config import RestApiConfig, load_rest_api, rest_entry
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.family import (
@@ -46,11 +50,10 @@ from slife2.libs.plugin.family import (
     Homes,
     apply_and_report,
     build_family_server,
-    entry_report,
     list_entries,
     prepare_entry,
     remove_entry,
-    state_word,
+    report_entry,
     switch_entry,
 )
 from slife2.libs.plugin.protocol import serve_plugin
@@ -110,15 +113,18 @@ def _reference(value: str) -> str:
     """A credential written the way the config writes one: `${VAR}`.
 
     **The name, not the secret**, which is the whole of what makes this tool
-    safe to hand a model.  The stored credential is a *variable name* for the
-    same reason; a value that is already a reference (or a `keyring:` URI) is
-    left exactly as given, so a caller that knows the syntax is not
-    second-guessed.
+    safe to hand a model.  The rule is `to_reference`'s — the one `model_set`
+    writes by — so the two tools cannot disagree about one value; what is this
+    wrapper's is the exception's type, and the refusal of an empty answer:
+    a credential that was named but normalizes to nothing is not a reference.
     """
-    credential = value.strip()
-    if credential.startswith("${") or credential.startswith("keyring:"):
-        return credential
-    return f"${{{credential}}}"
+    try:
+        reference = to_reference(value)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+    if not reference:
+        raise ConfigError(API_KEY_REFUSAL)
+    return reference
 
 
 def _validate_http_url(url: str, what: str) -> str:
@@ -135,7 +141,7 @@ def _validate_http_url(url: str, what: str) -> str:
     return url
 
 
-def _prepare(
+async def _prepare(
     config: Config, name: str, rest: RestApiConfig, *, keep_key: str = ""
 ) -> ToolServerSettings:
     """Validate a `rest-api:` entry and write it, or raise why it cannot be.
@@ -162,7 +168,7 @@ def _prepare(
             entry["api_key"] = keep_key
         return _rest_api(entry, name), entry
 
-    return prepare_entry(config, name, build, section=SECTION)
+    return await prepare_entry(config, name, build, section=SECTION)
 
 
 def _unresolved(api_key: str) -> str:
@@ -183,43 +189,22 @@ def _unresolved(api_key: str) -> str:
     otherwise fields.
 
     **And "is this still a reference" is not answered here.**
-    `slife2.libs.host.config.unresolved_reference` is where that question is answered, and
-    its docstring names the four places that used to answer it separately and the
-    leak that came of it.  This was one of them: a `keyring:` value returned
-    `""` — nothing to say — where the rule says *unresolved*, so on a host with
-    no `credstore` (the degrade `resolve_secret` names) a
-    `keyring:slife2/github` did not resolve, was left verbatim, was written into
-    the proxy child's `API_KEY` as the credential, and the person was told
-    nothing while the sibling `${VAR}` case returned the name — two halves of
-    one rule disagreeing.
+    `slife2.libs.host.config.unresolved_reference` is where that question is
+    answered, and its docstring names the four places that used to answer it
+    separately and the leak that came of it.  A literal in the file is not a
+    reference, so there is nothing to report: the value is used as it stands.
     """
     if not api_key:
         return ""
-    reference = _reference(api_key)
+    try:
+        reference = _reference(api_key)
+    except ConfigError:
+        # A literal already in the file is not a reference: there is nothing
+        # to report as unresolved, and the value is used as it stands.
+        return ""
     if not unresolved_reference(resolve_secret(reference)):
         return ""
     return reference
-
-
-def _describe(one: Any, name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    """One row of `rest_api_list` — what the API is, and whether it is usable.
-
-    **A listing is for choosing, not for reading the entry.**  The key, the
-    operator's sentence about the API, the link's state, and an operation count
-    or the failure's reason are what a model chooses between APIs with; the
-    spec, base URL and credential are `rest_api_get`'s.  The spec in particular
-    is the proxy's document, not the API's purpose — a row that showed it would
-    spend the browse's tokens on the one field a chooser cannot use.
-    """
-    row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
-    if one is not None and one.settings.enabled:
-        if one.usable:
-            row["operations"] = len(one.rows or [])
-        elif one.error:
-            row["error"] = one.error
-    if description := str(raw.get("description") or ""):
-        row["description"] = description
-    return row
 
 
 def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
@@ -249,16 +234,6 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             raise ToolError(str(exc)) from exc
         return raw, config.model_copy(update={"api_key": show_api_key(config.api_key)})
 
-    async def report_of(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-        """The read-only half: the link's state and, when it answered, its count."""
-        family = homes.current()
-        family.connecting()
-        await family.settle()
-        one = family.held(name)
-        if one is None:
-            return {"name": name, "state": state_word(raw, None)}
-        return entry_report(one, name, words=WORDS)
-
     @mcp.tool(name="rest_api_list", meta=FOR_THE_MODEL)
     async def rest_api_list(limit: int = 0, offset: int = 0) -> dict[str, Any]:
         """List the REST APIs configured under `rest-api:`, with their state.
@@ -278,9 +253,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             has one — and `total`, `limit` and `offset`, so
             `offset + len(apis) < total` says whether more remain.
         """
-        return await list_entries(
-            homes.current(), limit, offset, words=WORDS, describe=_describe
-        )
+        return await list_entries(homes.current(), limit, offset, words=WORDS)
 
     @mcp.tool(name="rest_api_get", meta=FOR_THE_MODEL)
     async def rest_api_get(name: str) -> dict[str, Any]:
@@ -288,9 +261,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         The answer is the canonical entry — `config` has `spec`, `base_url`,
         `api_key`, `args`, `env`, `cwd`, `description` and `enabled` — so
-        `rest_api_set` takes the same object back. `api_key` is the
-        `${VAR}`/`keyring:` reference, never the resolved key; empty means the
-        file has a literal key that is not shown.
+        `rest_api_set` takes the same object back. `api_key` is the `${VAR}`
+        reference, never the resolved key; empty means the file has a literal key
+        that is not shown.
 
         `state` is the link's read-only word, and `operations` or `error` says
         what it answered when it did. `unresolved` names a reference that
@@ -300,7 +273,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             name: The API's name — the key it is written under.
         """
         raw, config = entry_of(name)
-        report = await report_of(name, raw)
+        report = await report_entry(homes, name, raw, words=WORDS)
         report.pop("enabled", None)  # the writable field is in `config`
         answer = {**report, "config": config.model_dump()}
         if unresolved := _unresolved(config.api_key):
@@ -313,8 +286,8 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         Every field is required; a field left out is a schema error, not a
         silent default. Read `rest_api_get`, change what you mean to change, and
-        pass the whole `config` back. `api_key` is a `${VAR}`/`keyring:`
-        reference; empty means no key.
+        pass the whole `config` back. `api_key` is a `${VAR}` reference; empty
+        means no key.
 
         Every endpoint in the OpenAPI document becomes an operation named
         `{name}__{operation}`, so one spec can be hundreds of them. The answer is
@@ -337,7 +310,7 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             # object I was handed did not contain it" — keep it.
             if current and not show_api_key(current):
                 keep_key = current
-        settings = _prepare(load(), name, config, keep_key=keep_key)
+        settings = await _prepare(load(), name, config, keep_key=keep_key)
         report = await apply_and_report(homes.current(), settings, words=WORDS)
         report.pop("enabled", None)  # the writable field is in `config`
         _, written = entry_of(name)
@@ -374,9 +347,10 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
             enabled: True serves it; False stops it and keeps the entry.
 
         Returns:
-            The same payload `rest_api_set` answers with, and no `unresolved`:
-            writing the entry is what put the credential there, and this call
-            changed only the switch.
+            `name`, `enabled`, `state`, and `operations` or `error` when the link
+            has one of them. Unlike `rest_api_set` there is no `config` — this
+            call changed only the switch — and no `unresolved`, because writing
+            the entry is what put the credential there.
         """
         return await switch_entry(homes.current(), name, enabled, words=WORDS)
 

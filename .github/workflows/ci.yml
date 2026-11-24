@@ -86,6 +86,19 @@ jobs:
         shell: bash
         run: uv pip install dist/slife2-*.whl pytest pytest-asyncio pytest-xdist
 
+      # The vocabulary is package data, and a wheel that omits it would fail at
+      # the first recall in the field rather than here.  The suite proves the
+      # load is network-free; this proves the file travels in the artifact.
+      - name: The wheel carries the tokenizer vocabulary
+        shell: bash
+        run: |
+          uv run python - <<'PY'
+          import glob, zipfile
+          wheel = glob.glob("dist/slife2-*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          assert any("tiktoken_cache/fb374d" in name for name in names), names
+          PY
+
       # The precondition the macOS step above exists for, asserted rather than
       # assumed.  Without it, a runner whose interpreter cannot load extensions
       # reports five "Client failed to connect" errors out of `test_agent_task`
