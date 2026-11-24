@@ -255,13 +255,18 @@ TURN_COMPACT = "_turn_compact"
 #: tool description — **one text for both callers**, for `CONTEXT_REBUILD_TEXT`'s
 #: reason.  The field rules are the schema's (`slife2.libs.turn.context.LIVE_REPLY`).
 TURN_COMPACT_TEXT = (
-    "Drop what this turn no longer needs from the view it is running on. Call "
-    "it with `compact` — the live message ids to drop, a JSON array of strings "
-    'such as ["cur.1"], never a string containing one; [] means drop '
-    "nothing. The answer says how many messages left the view; the turn's "
-    "record and the conversation's live list keep every one, and the next turn "
-    "starts from the full conversation. `_context_rebuild` is the tool that "
-    "edits the durable context."
+    "Drop what this turn no longer needs from the view it is running on — the "
+    "turn's own tool results too, because a turn that keeps every result can "
+    "grow past its window. Call it with `compact` — the live message ids to "
+    'drop, a JSON array of strings such as ["cur.1"], never a string '
+    "containing one; [] means drop nothing. Name only ids the "
+    '`[MESSAGE:{"id": …}]` annotations show; never invent one. An assistant '
+    "message carries none — to drop its exchange, name the tool result. Drop "
+    "the searches and reports the turn has already used. The answer says how "
+    "many messages left the view; the turn's record and the conversation's "
+    "live list keep every one, and the next turn starts from the full "
+    "conversation. `_context_rebuild` is the tool that edits the durable "
+    "context."
 )
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the

@@ -345,13 +345,7 @@ async def _ask_model(
         tool_name=CONTEXT_REBUILD,
         tool_text=CONTEXT_REBUILD_TEXT,
         parameters=decisions.RECALL_REPLY,
-        instruction=decisions.decision_instruction(
-            usage,
-            CONTEXT_REBUILD,
-            '`keep` is `{"action": "keep"}` and `recall` is `{}` — and that is '
-            "right only when every turn in hand serves the current work and "
-            "nothing outside it is needed",
-        ),
+        instruction=decisions.decision_instruction(usage, CONTEXT_REBUILD),
         kind="decision",
     )
 
@@ -395,12 +389,7 @@ async def _ask_selector(
         tool_name=TURN_COMPACT,
         tool_text=TURN_COMPACT_TEXT,
         parameters=decisions.LIVE_REPLY,
-        instruction=decisions.decision_instruction(
-            usage,
-            TURN_COMPACT,
-            "`compact` is `[]` — and that is right only when the turn needs "
-            "every message",
-        ),
+        instruction=decisions.decision_instruction(usage, TURN_COMPACT),
         kind="compactor",
     )
 

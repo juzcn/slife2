@@ -1062,10 +1062,11 @@ automatic call and the model's own call answer to one shape. The contract:
    hides nothing; the turn continues either way, and the failure is in the tool
    result where the agent can see it.
 
-Both instances are the same call, and they share one instruction template
-(`decision.j2`): the guard, the figure, the forced tool's name and its explicit
-no-change answer are generic, the tool is the one the model already calls
-(`_context_rebuild` / `_turn_compact`), and the rules are its schema. `_ask_tool`
+Both instances are the same call, and **each has its own instruction template**
+(`context_rebuild.j2` / `turn_compact.j2`): the guard and the one-call rules are
+repeated on purpose, because calibrating one decision's wording must not move
+the other; the tool is the one the model already calls (`_context_rebuild` /
+`_turn_compact`), and the field rules are its schema. `_ask_tool`
 builds the forced request, and `_ask_model` and `_ask_selector` keep only their
 tool, schema, instruction and log subject. **The forced call names the real
 tool** — the same name, description and schema the model calls in a turn — and

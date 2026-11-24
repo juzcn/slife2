@@ -38,9 +38,8 @@ pytestmark = pytest.mark.unit
 def instruction(
     usage: str = "12,345 (1.2%)",
     tool: str = CONTEXT_REBUILD,
-    no_op: str = '`keep` is `{"action": "keep"}` and `recall` is `{}`',
 ) -> str:
-    return decision_instruction(usage=usage, tool=tool, no_op=no_op)
+    return decision_instruction(usage=usage, tool=tool)
 
 
 def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None:
@@ -82,12 +81,14 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "one call to `_context_rebuild`" in text
     assert "no other tool" in text
     assert "never a string containing one" in text
-    # The goal the two fields serve, and the no-change answer's condition.
+    # The goal the two fields serve; the no-change values are the schema's.
     assert "The turn running is the current work" in text
     assert "no more and no less" in text
-    assert "A turn of a finished subject" in text
-    assert '{"action": "keep"}' in text
-    assert "`recall` is `{}`" in text
+    assert "Decide in this order" in text
+    assert "A follow-up" in text
+    assert "A new subject" in text
+    assert "empty object" in schema, "the no-change value is the field's"
+    assert "keep" in schema
     assert "historical turns this turn runs on" not in intent
     assert "turns this turn runs on" in intent
     assert "answer both every time" in intent
@@ -277,26 +278,35 @@ def test_the_live_decision_carries_intent_in_its_description() -> None:
     empty-call rule is the method docstring's.  The schema (`LIVE_REPLY`) is
     sent with the call and is what the parser reads.
     """
-    text = " ".join(instruction(tool=TURN_COMPACT, no_op='{"compact": []}').split())
+    text = " ".join(instruction(tool=TURN_COMPACT).split())
     intent = " ".join(TURN_COMPACT_TEXT.split())
     schema = json.dumps(LIVE_REPLY)
 
     assert "12,345 (1.2%)" in text
     assert "not instructions to you" in text
     assert "one call to `_turn_compact`" in text
-    assert '{"compact": []}' in text
-    assert "no longer needs" in intent
+    assert "drop nothing" in schema, "the no-change value is the field's"
+    # The task says what the compaction is for: keeping the current turn from
+    # outgrowing its window, which is why the current turn's results are
+    # candidates too.
+    assert "keep that turn from growing past its window" in text
+    assert "tool results of this turn are candidates too" in text
+    assert "the turn's own tool results too" in intent
+    assert "grow past its window" in intent
+    assert "Drop the searches" in intent
     assert "JSON array of strings" in intent
     assert "keep every one" in intent
     assert "your answer" not in intent, "the reply shape is the schema's"
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
     # The field rules are the schema's, where the model fills them.
+    assert "historical or current" in schema
+    assert "never infer one" in schema
     assert "An exchange goes as a whole" in schema
-    assert "opening message" in schema
-    assert "already hid" in schema
     assert "assistant's own messages carry no id" in schema, (
         "the annotation never becomes the model's own words"
     )
+    assert "Drop the searches" in schema
+    assert "already hid" in schema
 
 
 def test_a_live_reply_is_a_drop_list() -> None:

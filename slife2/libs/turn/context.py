@@ -59,15 +59,18 @@ from slife2.helpers.clock import now
 from slife2.helpers.timeutil import BOUND_GRAMMAR, can_place
 from slife2.libs.harness.markers import wrap
 from slife2.libs.turn.prompt import render_instruction
-from slife2.libs.turn.tools import INTERRUPTED
+from slife2.libs.turn.tools import CONTEXT_REBUILD, INTERRUPTED, TURN_COMPACT
 
-#: The decision model's instruction, shipped as a template for the reason the
-#: system prompt is: it is text with holes in it, and a template says where they
-#: are.  Beside `system.j2` so both are found the same way.  **One template for
-#: every decision**: the guard, the figure and the "record it by calling this
-#: tool" are the same call; what differs is the tool the forced call names —
-#: `_context_rebuild` or `_turn_compact` — and that tool's schema.
-DECISION_TEMPLATE = "decision.j2"
+#: The decision model's instruction, **one template per decision**, shipped as
+#: templates for the reason the system prompt is: each is text with holes in it,
+#: and a template says where they are.  The guard and the one-call rules are
+#: duplicated on purpose: calibrating one decision's wording must not move the
+#: other, and the two turn out to need different emphases.  The field rules stay
+#: in each tool's schema.
+DECISION_TEMPLATES = {
+    CONTEXT_REBUILD: "context_rebuild.j2",
+    TURN_COMPACT: "turn_compact.j2",
+}
 
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
@@ -90,12 +93,14 @@ LIVE_REPLY: dict[str, Any] = {
                 '`[MESSAGE:{"id": …}]` annotation, historical or current. The '
                 "person's messages and tool results carry one; the system "
                 "prompt, the turn's opening message and the assistant's own "
-                "messages carry no id. Write the ids exactly as the annotation "
-                "shows them, as a JSON array of strings; [] means drop "
-                "nothing. **An exchange goes as a whole**: name a tool result "
-                "and the assistant message that asked for it goes with all of "
-                "its results. Naming an id this turn already hid asks for the "
-                "same view."
+                "messages carry no id. Name only ids an annotation shows; never "
+                "infer one, because an id the view does not show is refused. "
+                "Write the ids exactly as the annotation shows them, as a JSON "
+                "array of strings; [] means drop nothing. **An exchange goes as "
+                "a whole**: name a tool result and the assistant message that "
+                "asked for it goes with all of its results. Drop the searches "
+                "and reports the turn has already used. Naming an id this turn "
+                "already hid asks for the same view."
             ),
             "type": "array",
             "items": {"type": "string"},
@@ -641,25 +646,26 @@ def parse_with_reason(text: str) -> tuple[Decision | None, str]:
     return Decision(keep=keep, recall=recall), ""
 
 
-def decision_instruction(usage: str, tool: str, no_op: str) -> str:
-    """What a decision model is told: the guard, the figure and the one call.
+#: The one task paragraph each decision carries.  **The envelope is shared and
+#: the task is not**: `_context_rebuild` chooses turns for the current work,
+#: while `_turn_compact` edits the running turn's view and its job is to keep
+#: that turn from growing past its window.  The paragraph used to be in the
+#: template as one text, and the compact read turn-selection rules it could not
+#: act on; the field rules stay in each schema.
+def decision_instruction(usage: str, tool: str) -> str:
+    """What a decision model is told, in that tool's own template.
 
-    **One template for every decision.**  The task's intent is the description
-    of the tool the forced call names (`CONTEXT_REBUILD_TEXT`/`TURN_COMPACT_TEXT`
-    in `slife2.libs.turn.tools`), the answer's shape is its schema
-    (`RECALL_REPLY`/`LIVE_REPLY`), and what the template carries is what a
-    schema cannot: the anti-injection guard, the context figure, the forced
-    tool's name and its explicit no-change answer.  The rebuild and the
-    compaction were two copies of this envelope, and a change to either drifted
-    from the other.
+    **One template per decision.**  The anti-injection guard and the one-call
+    rules are repeated in `context_rebuild.j2` and `turn_compact.j2` on purpose:
+    the two decisions need different emphases, and a shared envelope made a
+    calibration of one move the other.  Each template names its own tool and
+    carries its own task; the field rules stay in its schema (`RECALL_REPLY` /
+    `LIVE_REPLY`).
 
     **The call is the whole answer.**  The model must not continue the
-    conversation's own tool calls or answer in prose; it names `tool` and
-    nothing else.  `no_op` is the tool's explicit no-change answer, and it is a
-    sentence because the two tools spell it differently: `_context_rebuild`
-    keeps every turn in hand and recalls nothing (`"keep"` + `{}`), while
-    `_turn_compact` writes `{"compact": []}`.  What is shared is the rule that
-    the answer is a decision, never an empty object.
+    conversation's own tool calls or answer in prose; it names the tool and
+    nothing else.  An empty object is refused: every required field is answered,
+    and the schema names what "nothing changes" looks like for that tool.
 
     **No input is passed beside the messages.**  A decision runs where the
     turn's own message is already in the list (or, mid-turn, the cut-in the loop
@@ -671,7 +677,10 @@ def decision_instruction(usage: str, tool: str, no_op: str) -> str:
     the context is could not weigh keeping against recalling — or what to give
     up.
     """
-    return render_instruction(DECISION_TEMPLATE, usage=usage, tool=tool, no_op=no_op)
+    template = DECISION_TEMPLATES.get(tool)
+    if template is None:
+        raise ValueError(f"no decision template for {tool!r}")
+    return render_instruction(template, usage=usage)
 
 
 def parse_live(text: str) -> tuple[list[str] | None, str]:
