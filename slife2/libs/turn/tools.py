@@ -260,13 +260,14 @@ TURN_COMPACT_TEXT = (
     "grow past its window. Call it with `compact` — the live message ids to "
     'drop, a JSON array of strings such as ["cur.1"], never a string '
     "containing one; [] means drop nothing. Name only ids the "
-    '`[MESSAGE:{"id": …}]` annotations show; never invent one. An assistant '
-    "message carries none — to drop its exchange, name the tool result. Drop "
-    "the searches and reports the turn has already used. The answer says how "
-    "many messages left the view; the turn's record and the conversation's "
-    "live list keep every one, and the next turn starts from the full "
-    "conversation. `_context_rebuild` is the tool that edits the durable "
-    "context."
+    '`[MESSAGE:{"id": …}]` annotations show; never invent one. A tool '
+    "exchange goes as a whole: to drop one, name both the assistant message "
+    "that asked and every result of its calls — a half-named exchange is "
+    "refused and stays in the view. Drop the searches and reports the turn "
+    "has already used. The answer says how many messages left the view; the "
+    "turn's record and the conversation's live list keep every one, and the "
+    "next turn starts from the full conversation. `_context_rebuild` is the "
+    "tool that edits the durable context."
 )
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the

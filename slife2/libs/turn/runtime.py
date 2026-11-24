@@ -922,9 +922,9 @@ class TurnRuntime:
         would otherwise be read as four ids.  An id the view did not offer is
         refused whole rather than filtered out, because the rest would be a
         selection the model did not make.  A tool exchange named in part is
-        completed to the whole (`compact.whole_exchanges`), which is the rule
-        the schema states: the next request stays legal without the model
-        having to list a call it cannot see.
+        refused whole (`compact.split_exchanges`), and the pair stays in the
+        view: the safe direction is keeping it, and dropping it needs both the
+        assistant message and its results named.
 
         `hidden` is the turn's own state and is mutated here; the caller's
         `present` callback reads it, and the turn's saved row never does.
@@ -977,9 +977,18 @@ class TurnRuntime:
                     "id is the one its [MESSAGE:…] annotation shows"
                 ),
             )
-        applied = [
-            mid for mid in compact.whole_exchanges(view, drop) if mid not in hidden
-        ]
+        split = compact.split_exchanges(view, drop)
+        if split:
+            return compact.Compacted(
+                seen=len(view),
+                dropped=0,
+                refused=(
+                    "a tool exchange was named only in part — name the assistant "
+                    "message and every result of its calls, or none of them; "
+                    "the exchange stays in the view"
+                ),
+            )
+        applied = [mid for mid in drop if mid not in hidden]
         hidden.update(applied)
         return compact.Compacted(seen=len(view), dropped=len(applied))
 

@@ -20,7 +20,9 @@ window is not tight, prefer keeping a message later turns might use; when it is
 filling up, keep only what this turn still needs.
 
 Name only the ids the `[MESSAGE:{"id": …}]` annotations show; never invent one.
-When nothing should be dropped, `compact` is `[]`.
+A tool exchange is one decision: to drop it, name both the assistant message
+and every result of its calls; naming only part is refused, and the exchange
+stays in the view. When nothing should be dropped, `compact` is `[]`.
 
 This conversation is running against a limited context window.{% if usage %} Current
 context: {{ usage }}.{% endif %}

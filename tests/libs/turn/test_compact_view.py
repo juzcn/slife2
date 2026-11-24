@@ -15,11 +15,12 @@ from slife2.libs.turn.compact import (
     Compacted,
     due,
     opening,
+    projection,
     report,
     selectable,
+    split_exchanges,
     unknown_ids,
     view,
-    whole_exchanges,
 )
 from slife2.libs.turn.messages import Message, ToolCall
 
@@ -126,11 +127,11 @@ def test_the_system_and_the_opening_are_not_selectable() -> None:
     assert selectable(got, opening_mid) == ["7.0", "cur.1"]
 
 
-def test_a_selection_of_one_message_of_an_exchange_takes_the_whole_exchange() -> None:
-    """The provider's rule, applied before the next request rather than by it.
+def test_a_half_named_exchange_is_split_and_a_whole_one_is_not() -> None:
+    """**A pair moves whole or not at all.**
 
-    A tool-call-only assistant message carries no annotation, so the model's
-    ordinary move is to name a result; the call goes with it.
+    Naming one member is a split the caller refuses, and the pair stays in the
+    view; naming both is the only way to drop the exchange.
     """
     exchange = Message(
         role="assistant",
@@ -142,11 +143,32 @@ def test_a_selection_of_one_message_of_an_exchange_takes_the_whole_exchange() ->
     later = Message(role="assistant", content="done", mid="cur.3")
     got = [system(), user("now"), exchange, result, later]
 
-    assert whole_exchanges(got, ["cur.2"]) == {"cur.1", "cur.2"}, "the result names it"
-    assert whole_exchanges(got, ["cur.1"]) == {"cur.1", "cur.2"}, "the call names it"
-    assert whole_exchanges(got, ["cur.1", "cur.2"]) == {"cur.1", "cur.2"}
-    assert whole_exchanges(got, ["cur.3"]) == {"cur.3"}, "a plain message is alone"
-    assert whole_exchanges(got, []) == set()
+    assert split_exchanges(got, ["cur.2"]) == [["cur.1", "cur.2"]], "the result alone"
+    assert split_exchanges(got, ["cur.1"]) == [["cur.1", "cur.2"]], "the call alone"
+    assert split_exchanges(got, ["cur.1", "cur.2"]) == [], "the pair is whole"
+    assert split_exchanges(got, ["cur.3"]) == [], "a plain message is alone"
+    assert split_exchanges(got, []) == []
+
+
+def test_the_selector_view_annotates_the_assistant_of_an_exchange() -> None:
+    """The selector has to read both ids to drop a pair.
+
+    The turn's own view leaves the assistant message unannotated; the selector's
+    copy (`projection`) writes its id, because an exchange is dropped by naming
+    both members.
+    """
+    exchange = Message(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="c1", name="fake__echo")],
+        mid="7.1",
+    )
+    result = Message(role="tool", content="ok", tool_call_id="c1", mid="7.2")
+
+    projected, candidates = projection([system(), user("now"), exchange, result], set())
+
+    assert projected[2].content == '[MESSAGE:{"id": "7.1"}]'
+    assert candidates == ["7.1", "7.2"]
 
 
 def test_an_id_the_view_did_not_offer_is_named() -> None:

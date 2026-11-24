@@ -775,9 +775,10 @@ def build_server(
                 selection=arguments["compact"],
             )
             # **The same rule as the agent server's**: an unreadable selection
-            # is a tool error, a split exchange is completed (`whole_exchanges`),
-            # and a decision to keep everything or a failed selector stops the
-            # automatic pass; a drop leaves it live.
+            # is a tool error, a half-named exchange is refused
+            # (`split_exchanges`) and the pair stays, and a decision to keep
+            # everything or a failed selector stops the automatic pass; a drop
+            # leaves it live.
             if result.refused:
                 turn.compact_hold = True
                 raise ToolFailed(result.refused)

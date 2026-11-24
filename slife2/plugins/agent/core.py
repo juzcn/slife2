@@ -2791,9 +2791,9 @@ class AgentCore:
         # **An unreadable selection is refused, not applied.**  The model's own
         # call gets a tool error it can correct; the automatic one gets a report
         # and stops asking for the turn (a selection about the whole view, like
-        # a keep-all or a failed selector).  A split exchange is not a refusal:
-        # the schema says an exchange moves as one, and `whole_exchanges`
-        # completes a selection that named one member.
+        # a keep-all or a failed selector).  A half-named exchange is a refusal
+        # too: the schema says an exchange moves as one, and `split_exchanges`
+        # keeps the pair rather than completing the drop.
         if result.refused:
             loop.compact_hold = True
             raise ToolError(result.refused)

@@ -301,9 +301,9 @@ def test_the_live_decision_carries_intent_in_its_description() -> None:
     # The field rules are the schema's, where the model fills them.
     assert "historical or current" in schema
     assert "never infer one" in schema
-    assert "An exchange goes as a whole" in schema
-    assert "assistant's own messages carry no id" in schema, (
-        "the annotation never becomes the model's own words"
+    assert "A tool exchange goes as a whole" in schema
+    assert "the assistant message of a tool exchange" in schema, (
+        "both members of a pair are addressable in the compaction view"
     )
     assert "Drop the searches" in schema
     assert "already hid" in schema

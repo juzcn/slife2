@@ -100,6 +100,31 @@ def drop_echo(messages: list[dict], selectable: list[str]) -> list[str]:
     return sorted(dict.fromkeys(wanted))
 
 
+def pair_ids(messages: list[Any]) -> list[str]:
+    """The echo exchange's two mids, from the loop's `Message` objects.
+
+    The turn's own view does not annotate the assistant message, so the wire
+    dicts do not carry its id; the messages the backend is handed do, as `.mid`.
+    An exchange is dropped by naming both members.
+    """
+    view = list(messages)
+    wanted: list[str] = []
+    for index, message in enumerate(view):
+        if message.role != "tool" or OLD not in without_id(message.content):
+            continue
+        if message.mid:
+            wanted.append(message.mid)
+        previous = view[index - 1] if index else None
+        if (
+            previous is not None
+            and previous.role == "assistant"
+            and previous.tool_calls
+            and previous.mid
+        ):
+            wanted.append(previous.mid)
+    return sorted(dict.fromkeys(wanted))
+
+
 async def no_drop(*_args: Any, **_kwargs: Any) -> str:
     """A selector that keeps everything; tests that must not reach it use it."""
     return json.dumps({"compact": []})
@@ -241,7 +266,7 @@ async def test_a_turn_drops_from_its_view_and_keeps_its_record(
     cfg = config_over()
     backend = FakeBackend(
         calling("fake__echo", {"text": OLD}, "c1"),
-        calling("_turn_compact", {"compact": ["cur.4"]}, "c2"),
+        calling("_turn_compact", {"compact": ["cur.3", "cur.4"]}, "c2"),
         answered("done"),
     )
     seen: list[list[dict]] = []
@@ -329,10 +354,8 @@ async def test_the_model_fills_the_compaction_itself(tmp_path, monkeypatch) -> N
 
         def stream(self, messages: list[Any], tools: list[Any]) -> Any:
             if len(self.calls) == 1:
-                view = [message.to_wire() for message in messages]
-                ids = [view_id(message) for message in view]
                 self._turns[0] = calling(
-                    TURN_COMPACT, {"compact": drop_echo(view, ids)}, "c2"
+                    TURN_COMPACT, {"compact": pair_ids(messages)}, "c2"
                 )
             return super().stream(messages, tools)
 
@@ -412,15 +435,14 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_a_selection_of_one_result_takes_its_whole_exchange(
+async def test_a_half_named_exchange_is_refused_and_the_pair_stays(
     tmp_path, monkeypatch
 ) -> None:
-    """**The model names what it can see; the harness completes the exchange.**
+    """**A pair moves whole or not at all.**
 
-    A tool-call-only assistant message carries no annotation, so the model's
-    natural selection is the result.  The schema says an exchange goes as one,
-    and the call follows the result instead of leaving a split the next request
-    would reject.
+    The model names only the result; the harness refuses the selection and keeps
+    the exchange in the view.  Auto-completing it into a drop would take a
+    message the model did not name.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over()
@@ -428,12 +450,10 @@ async def test_a_selection_of_one_result_takes_its_whole_exchange(
     class Splits(FakeBackend):
         def stream(self, messages: list[Any], tools: list[Any]) -> Any:
             if len(self.calls) == 1:
-                view = [message.to_wire() for message in messages]
                 tool_id = next(
-                    view_id(message)
-                    for message in view
-                    if message.get("role") == "tool"
-                    and OLD in str(message.get("content"))
+                    message.mid
+                    for message in messages
+                    if message.role == "tool" and OLD in without_id(message.content)
                 )
                 self._turns[0] = calling(TURN_COMPACT, {"compact": [tool_id]}, "c2")
             return super().stream(messages, tools)
@@ -454,27 +474,28 @@ async def test_a_selection_of_one_result_takes_its_whole_exchange(
     assert answer.data["text"] == "done"
     assert selected == [], "the model's own call does not ask the selector"
     final = backend.calls[-1][0]
-    assert not any(
+    assert any(
         message.role == "tool" and without_id(message.content) == OLD
         for message in final
-    ), "the exchange left the view with its result"
-    assert not any(
+    ), "the pair stays in the view"
+    assert any(
         message.role == "assistant"
         and any(call.name == "fake__echo" for call in message.tool_calls)
         for message in final
-    ), "the call went with it"
+    ), "the call stays with its result"
     rows = stored_messages()
     assert any(
-        message.get("role") == "tool" and without_id(message.get("content")) == OLD
+        message.get("role") == "tool"
+        and "named only in part" in str(message.get("content"))
         for message in rows
-    ), "the record keeps every message"
+    ), "the tool error names the half-named exchange"
 
 
 @pytest.mark.asyncio
-async def test_an_automatic_selection_of_one_result_takes_the_exchange(
+async def test_an_automatic_selection_names_both_members_of_the_exchange(
     tmp_path, monkeypatch
 ) -> None:
-    """The automatic pass names a result; the exchange completes with it."""
+    """The automatic pass names both members; the exchange leaves the view."""
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over(compact_at=0.0005)
     base_turn = calling("fake__echo", {"text": OLD}, "c1")
@@ -487,7 +508,7 @@ async def test_an_automatic_selection_of_one_result_takes_the_exchange(
     )
     backend = FakeBackend(first, answered("done"))
 
-    async def one_result(
+    async def both(
         agent: str,
         subagent: str,
         model: str,
@@ -498,14 +519,9 @@ async def test_an_automatic_selection_of_one_result_takes_the_exchange(
         previous: str = "",
         repair: str = "",
     ) -> str:
-        ids = [
-            view_id(message)
-            for message in messages
-            if message.get("role") == "tool" and OLD in str(message.get("content"))
-        ]
-        return json.dumps({"compact": ids})
+        return json.dumps({"compact": drop_echo(messages, selectable)})
 
-    answer = await run_turn(cfg, backend, one_result)
+    answer = await run_turn(cfg, backend, both)
 
     assert answer.data["text"] == "done", "the turn continues"
     final = backend.calls[-1][0]
@@ -756,16 +772,12 @@ async def test_a_later_turn_can_drop_a_historical_exchange(
     assert first.data["text"] == "first"
 
     class DropsHistory(FakeBackend):
-        """Names the historical echo exchange by the ids its own view shows."""
+        """Names the historical echo exchange by both mids its view carries."""
 
         def stream(self, messages: list[Any], tools: list[Any]) -> Any:
             if len(self.calls) == 0:
-                view = [message.to_wire() for message in messages]
-                ids = [view_id(message) for message in view]
                 self._turns[0] = calling(
-                    TURN_COMPACT,
-                    {"compact": drop_echo(view, [mid for mid in ids if mid])},
-                    "c2",
+                    TURN_COMPACT, {"compact": pair_ids(messages)}, "c2"
                 )
             return super().stream(messages, tools)
 

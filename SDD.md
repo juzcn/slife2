@@ -1327,11 +1327,11 @@ the store's live-context list are the conversation, and the next turn starts
 from the full list. The system message and the turn's opening message are the
 fixed two; the annotated messages, historical or current, are the model's to
 drop. The legality of a tool exchange is the *schema's* rule — a call and its
-results go together — and the harness **completes a selection that names one
-member to the whole exchange** (`whole_exchanges`), so the next request stays
-legal and the model does not have to list a call whose message carries no id.
-**A selection naming an id the view does not offer is refused whole** — the
-fixed two, or no id at all — rather than filtered, because applying the part
+results go together — and the harness **refuses a selection that names only
+part of an exchange** (`split_exchanges`), keeping the pair in the view; the
+selector's view annotates the assistant message too, so the model can name
+both. **A selection naming an id the view does not offer is refused whole** —
+the fixed two, or no id at all — rather than filtered, because applying the part
 that resolves would be a decision the model did not make. An id an earlier
 compaction already hid is not an error: it is already applied, and a model
 repeating a cumulative list is asking for the same view. A

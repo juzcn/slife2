@@ -91,17 +91,18 @@ LIVE_REPLY: dict[str, Any] = {
             "description": (
                 "The live message ids to drop — any message carrying a "
                 '`[MESSAGE:{"id": …}]` annotation, historical or current. The '
-                "person's messages and tool results carry one; the system "
-                "prompt, the turn's opening message and the assistant's own "
-                "messages carry no id — an assistant message is named through "
-                "its exchange's tool result. Name only ids an annotation shows; "
-                "never infer one, because an id the view does not show is "
-                "refused. Write the ids exactly as the annotation shows them, as "
-                "a JSON array of strings; [] means drop nothing. **An exchange "
-                "goes as a whole**: name a tool result and the assistant message "
-                "that asked for it goes with all of its results. Drop the "
-                "searches and reports the turn has already used. Naming an id "
-                "this turn already hid asks for the same view."
+                "person's messages, tool results, and (in the compaction view) "
+                "the assistant message of a tool exchange carry one; the system "
+                "prompt and the turn's opening message do not. Name only ids an "
+                "annotation shows; never infer one, because an id the view does "
+                "not show is refused. Write the ids exactly as the annotation "
+                "shows them, as a JSON array of strings; [] means drop nothing. "
+                "**A tool exchange goes as a whole**: to drop one, name both "
+                "the assistant message that asked and every result of its "
+                "calls. Naming only part of it is refused, and the exchange "
+                "stays in the view. Drop the searches and reports the turn has "
+                "already used. Naming an id this turn already hid asks for the "
+                "same view."
             ),
             "type": "array",
             "items": {"type": "string"},
