@@ -31,7 +31,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from fastmcp import Client
 
@@ -71,9 +71,10 @@ from slife2.libs.turn.events import (
     emit,
     preview,
 )
-from slife2.libs.turn.loop import AgentLoop, harness_call
+from slife2.libs.turn.loop import AgentLoop, AutoCall, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
-from slife2.libs.turn.tools import ToolRegistry
+from slife2.libs.turn.tokens import estimate_turn_tokens
+from slife2.libs.turn.tools import CONTEXT_REBUILD, TURN_COMPACT, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,38 @@ class Rebuilt:
     #: `"unfetchable"`.  `""` on a changed answer.  The report names it so four
     #: different facts are not one "unchanged" sentence.
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class Applied:
+    """A rebuild already applied to a live view, and the answer it owes.
+
+    `opening` is the running turn's first message in the *new* list — the index
+    the agent server keeps as `turn_opening`, and the one an agent task does not
+    need.  `text` is the model-facing report, built from the list as it stands.
+    """
+
+    rebuilt: Rebuilt
+    opening: int
+    text: str
+
+
+class LiveView(Protocol):
+    """The mutable state a live context edit touches, on either server.
+
+    `Loop` (an agent's conversation) and `Turn` (an agent task's clone) spell the
+    same state; the two tool bodies had a copy of every edit, which is how "a
+    rebuild resets the view" comes to be true on one server and stale on the
+    other.
+    """
+
+    messages: list[Message]
+    turn_ids: list[int]
+    covered: int
+    hidden: set[str]
+    compact_hold: bool
+    compact_at: float
+    rebuilt: bool
 
 
 @dataclass(frozen=True)
@@ -314,6 +347,25 @@ def measured_tokens(live: AgentLoop | None, fallback: int) -> int:
     if live is not None and live.last_usage.total_tokens:
         return live.last_usage.total_tokens
     return fallback
+
+
+def _rebuild_answer(
+    messages: list[Message], rebuilt: Rebuilt, prompt_window: int
+) -> str:
+    """The model-facing report after a rebuild, sized from the list it left."""
+    tokens = decisions.context_usage(
+        estimate_turn_tokens([message.to_record() for message in messages]),
+        prompt_window,
+    )[0]
+    return decisions.rebuild_report(
+        kept=rebuilt.kept,
+        in_hand=rebuilt.in_hand,
+        outside=rebuilt.outside,
+        recalled=rebuilt.recalled,
+        rerank=rebuilt.rerank,
+        fitted=rebuilt.fitted,
+        tokens=tokens,
+    )
 
 
 class TurnRuntime:
@@ -989,6 +1041,176 @@ class TurnRuntime:
         applied = [mid for mid in drop if mid not in hidden]
         hidden.update(applied)
         return compact.Compacted(seen=len(view), dropped=len(applied), held=held)
+
+    async def rebuild_call(
+        self,
+        identity: ConversationId,
+        view: LiveView,
+        live: AgentLoop | None,
+        model: str,
+        *,
+        context_tokens: int,
+        prompt_window: int,
+    ) -> AutoCall | None:
+        """The once-per-turn `_context_rebuild` call, or `None` when not due.
+
+        **The decision is asked here, before the call**, so the pair the loop
+        writes carries its selection from the start rather than starting empty
+        and being rewritten.  A hub that does not advertise the tool is a build
+        that predates it; the turn then runs on the context it has instead of
+        writing an error pair at every boundary, and the attempt is not repeated
+        (`rebuilt` is set before the declaration is read).
+        """
+        if view.rebuilt or live is None:
+            return None
+        view.rebuilt = True
+        if not live.declares(CONTEXT_REBUILD):
+            return None
+        selection = await self.rebuild_arguments(
+            identity,
+            view.messages,
+            model,
+            context_tokens=context_tokens,
+            prompt_window=prompt_window,
+        )
+        return AutoCall(CONTEXT_REBUILD, arguments=selection)
+
+    async def compact_call(
+        self,
+        identity: ConversationId,
+        view: LiveView,
+        live: AgentLoop | None,
+        model: str,
+        *,
+        context_tokens: int,
+        prompt_window: int,
+    ) -> AutoCall | None:
+        """The `_turn_compact` call when the threshold is due, or `None`.
+
+        **One threshold rule and one decision call for both servers** — a task
+        runs one turn and has no next turn to recover on, so the same rule is
+        what keeps it alive.  The guard on the tool being declared keeps a hub
+        from a build that predates it from paying a decision call at every
+        boundary.
+        """
+        asked = (
+            compact.due(
+                view.messages,
+                view.hidden,
+                last_tokens=live.last_usage.total_tokens,
+                prompt_window=prompt_window,
+                compact_at=view.compact_at,
+                held=view.compact_hold,
+            )
+            if live is not None and live.declares(TURN_COMPACT)
+            else None
+        )
+        if asked is None:
+            return None
+        shown, selectable = asked
+        selection = await self.compact_arguments(
+            identity,
+            shown,
+            selectable,
+            model,
+            context_tokens=context_tokens,
+            prompt_window=prompt_window,
+        )
+        return AutoCall(TURN_COMPACT, arguments=selection)
+
+    async def apply_compaction(
+        self,
+        identity: ConversationId,
+        view: LiveView,
+        model: str,
+        *,
+        selection: Any,
+        context_tokens: int,
+        prompt_window: int,
+    ) -> compact.Compacted:
+        """The shared body of `_turn_compact`: refuse, apply, and hold the pass.
+
+        **The arguments are the selection, and a call must carry one.**  The
+        servers word the refusal in their own exception type; `compact.Refusal`
+        is how this hands over the sentence without importing either.  A string
+        is the harness's failure selection and an unreadable one is a decision
+        about the whole view, so both stop the automatic pass; a decision to
+        keep everything stops it for the same reason — re-asking would pay for
+        an answer already given — and a drop leaves it live.
+
+        **A half-named exchange is not a refusal**: the pair stays in the view
+        and the other ids the model named are applied, so one missed member does
+        not discard the rest of its answer.  The report names the pair, and the
+        automatic pass stays live when something else dropped.
+        """
+        if selection is None:
+            raise compact.Refusal(compact.NO_SELECTION)
+        if isinstance(selection, str):
+            view.compact_hold = True
+            raise compact.Refusal(compact.unreadable_selection(selection))
+        result = await self.compact_turn(
+            identity,
+            view.messages,
+            view.hidden,
+            model,
+            context_tokens=context_tokens,
+            prompt_window=prompt_window,
+            selection=selection,
+        )
+        if result.refused:
+            view.compact_hold = True
+            raise compact.Refusal(result.refused)
+        view.compact_hold = result.dropped == 0 or bool(result.decision)
+        return result
+
+    async def apply_rebuild(
+        self,
+        identity: ConversationId,
+        view: LiveView,
+        model: str,
+        *,
+        publish: bool,
+        context_tokens: int,
+        prompt_window: int,
+        keep: Any,
+        recall: Any,
+    ) -> Applied | None:
+        """The shared body of `_context_rebuild`; `None` for a view with no opening.
+
+        **`keep` and `recall` are the decision's two halves**, parsed by
+        `rebuild_selection` here because both servers must refuse the same
+        shapes.  The list the view is made of moves in place, the opening's new
+        index is returned for the agent server to keep, and the compaction view
+        starts over — a history edit is the moment a per-turn projection ends.
+        """
+        at = compact.opening(view.messages)
+        if at is None:
+            return None
+        selection = decisions.rebuild_selection(keep, recall)
+        rebuilt = await self.rebuild(
+            identity,
+            view.messages,
+            view.turn_ids,
+            view.covered,
+            model,
+            publish=publish,
+            context_tokens=context_tokens,
+            prompt_window=prompt_window,
+            selection=selection,
+        )
+        # **The prefix moves; the suffix does not.**  `carried` is everything
+        # from the opening on, and its length is what the new index preserves.
+        carried = len(view.messages) - at
+        view.messages[:] = rebuilt.messages
+        view.turn_ids = rebuilt.turn_ids
+        view.covered = rebuilt.covered
+        view.hidden.clear()
+        view.compact_hold = False
+        return Applied(
+            rebuilt=rebuilt,
+            opening=len(rebuilt.messages) - carried,
+            text=_rebuild_answer(view.messages, rebuilt, prompt_window),
+        )
 
     # ── the turn boundary ────────────────────────────────────────────────
 

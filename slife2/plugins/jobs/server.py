@@ -30,6 +30,7 @@ import contextlib
 import logging
 import os
 import re
+import threading
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -169,31 +170,44 @@ class Registry:
     Held per home (`Homes`), because the folder is the home's: two homes served
     by one process keep two sets of jobs, and a `job_set` in one cannot shadow a
     name in the other.
+
+    **The table is read and written by two threads.**  `list_sources` is a sync
+    tool FastMCP runs on a worker thread — it is how the hub asks before a
+    search — while `job_set` and `job_remove` run on the loop.  A listing that
+    iterated the dict while a write replaced an entry raised "dictionary changed
+    size during iteration" out of the tool.  So mutations and snapshots take
+    one lock; a reader gets a complete list, never a half-applied edit.
     """
 
     def __init__(self, config: Config, root: Path) -> None:
         self.config = config
         self.root = root
         self._jobs = jobs.scan_jobs_dir(root)
+        self._lock = threading.Lock()
 
     def find(self, name: str) -> jobs.Job | None:
         """One job, by its bare name or the exposed `job__<name>`."""
-        return self._jobs.get(_bare(name.strip()))
+        with self._lock:
+            return self._jobs.get(_bare(name.strip()))
 
     def put(self, job: jobs.Job) -> None:
         """Replace one entry — the registry is keyed by the job's name."""
-        self._jobs[job.name] = job
+        with self._lock:
+            self._jobs[job.name] = job
 
     def forget(self, name: str) -> None:
-        self._jobs.pop(name, None)
+        with self._lock:
+            self._jobs.pop(name, None)
 
     def names(self) -> list[str]:
         """Every installed job's name, for a refusal that says what is there."""
-        return sorted(self._jobs)
+        with self._lock:
+            return sorted(self._jobs)
 
     def values(self) -> list[jobs.Job]:
         """Every job, sorted by name — the listing's order and one place it is."""
-        return sorted(self._jobs.values(), key=lambda one: one.name)
+        with self._lock:
+            return sorted(self._jobs.values(), key=lambda one: one.name)
 
     def rows(self) -> list[dict[str, Any]]:
         """Every job, as one catalogue row each.

@@ -145,10 +145,7 @@ from slife2.libs.plugin.vocabulary import (
 )
 from slife2.libs.turn import attachments, compact, plan
 from slife2.libs.turn.context import (
-    context_usage,
     failure_text,
-    rebuild_report,
-    rebuild_selection,
     turn_prompt_lead,
     with_lead,
 )
@@ -161,7 +158,6 @@ from slife2.libs.turn.runtime import (
     TurnRuntime,
     measured_tokens,
 )
-from slife2.libs.turn.tokens import estimate_turn_tokens
 from slife2.libs.turn.tools import (
     ATTACH_IMAGE,
     CHECK_NEW_INPUT,
@@ -757,33 +753,17 @@ def build_server(
             compaction here is a projection of `turn.messages` and touches no
             record at all.
             """
-            if arguments.get("compact") is None:
-                raise ToolFailed(compact.NO_SELECTION)
-            if isinstance(arguments.get("compact"), str):
-                # **The automatic pass stops, exactly as it does on a
-                # keep-all**: an unreadable selection is a decision about the
-                # whole view, and re-asking it at every boundary would pay for
-                # the same failure.
-                turn.compact_hold = True
-                raise ToolFailed(compact.unreadable_selection(arguments["compact"]))
-            result = await runtime.compact_turn(
-                task.identity,
-                turn.messages,
-                turn.hidden,
-                turn.model,
-                context_tokens=measured_tokens(turn.live, turn.context_tokens),
-                prompt_window=turn.prompt_window,
-                selection=arguments["compact"],
-            )
-            # **The same rule as the agent server's**: an unreadable selection
-            # is a tool error; a half-named exchange stays whole while the rest
-            # of the selection applies (`split_exchanges`), and the report names
-            # the pair; a decision to keep everything or a failed selector stops
-            # the automatic pass, and a drop leaves it live.
-            if result.refused:
-                turn.compact_hold = True
-                raise ToolFailed(result.refused)
-            turn.compact_hold = result.dropped == 0 or bool(result.decision)
+            try:
+                result = await runtime.apply_compaction(
+                    task.identity,
+                    turn,
+                    turn.model,
+                    selection=arguments.get("compact"),
+                    context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                    prompt_window=turn.prompt_window,
+                )
+            except compact.Refusal as exc:
+                raise ToolFailed(str(exc)) from None
             logger.info(
                 "agent task %s: turn_compact seen=%d dropped=%d held=%d "
                 "decision=%s hold=%s",
@@ -806,34 +786,24 @@ def build_server(
             verbatim, exactly as on the agent server, and the decision is made
             from the live context — the task's own opening is in it.
             """
-            at = compact.opening(turn.messages)
-            if at is None:
-                return "This task has no opening message; nothing to rebuild."
             try:
-                selection = rebuild_selection(
-                    arguments.get("keep"),
-                    arguments.get("recall"),
+                applied = await runtime.apply_rebuild(
+                    task.identity,
+                    turn,
+                    turn.model,
+                    publish=False,
+                    # The last LLM call: this task's own completed call when one
+                    # returned, otherwise the restored turn's last call.
+                    context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                    prompt_window=turn.prompt_window,
+                    keep=arguments.get("keep"),
+                    recall=arguments.get("recall"),
                 )
             except ValueError as exc:
                 raise ToolFailed(str(exc)) from None
-            rebuilt = await runtime.rebuild(
-                task.identity,
-                turn.messages,
-                turn.turn_ids,
-                turn.covered,
-                turn.model,
-                publish=False,
-                # The last LLM call: this task's own completed call when one
-                # returned, otherwise the restored turn's last call.
-                context_tokens=measured_tokens(turn.live, turn.context_tokens),
-                prompt_window=turn.prompt_window,
-                selection=selection,
-            )
-            turn.messages[:] = rebuilt.messages
-            turn.turn_ids = rebuilt.turn_ids
-            turn.covered = rebuilt.covered
-            turn.hidden.clear()
-            turn.compact_hold = False
+            if applied is None:
+                return "This task has no opening message; nothing to rebuild."
+            rebuilt = applied.rebuilt
             logger.info(
                 "agent task %s: context_rebuild changed=%s kept=%d in_hand=%d "
                 "outside=%d recalled=%d rerank=%s decision=%s",
@@ -846,21 +816,7 @@ def build_server(
                 rebuilt.rerank or "-",
                 rebuilt.decision or "-",
             )
-            tokens = context_usage(
-                estimate_turn_tokens(
-                    [message.to_record() for message in turn.messages]
-                ),
-                turn.prompt_window,
-            )[0]
-            return rebuild_report(
-                kept=rebuilt.kept,
-                in_hand=rebuilt.in_hand,
-                outside=rebuilt.outside,
-                recalled=rebuilt.recalled,
-                rerank=rebuilt.rerank,
-                fitted=rebuilt.fitted,
-                tokens=tokens,
-            )
+            return applied.text
 
         return {
             CHECK_NEW_INPUT: nothing_waiting,
@@ -1016,44 +972,26 @@ def build_server(
             (`slife2.libs.turn.compact.due`, `TurnRuntime.compact_arguments`):
             a task is one turn, so the same rule has to keep it alive.
             """
-            if not turn.rebuilt and turn.live is not None:
-                turn.rebuilt = True
-                if turn.live.declares(CONTEXT_REBUILD):
-                    selection = await runtime.rebuild_arguments(
-                        task.identity,
-                        turn.messages,
-                        turn.model,
-                        context_tokens=measured_tokens(turn.live, turn.context_tokens),
-                        prompt_window=turn.prompt_window,
-                    )
-                    return AutoCall(CONTEXT_REBUILD, arguments=selection)
+            if call := await runtime.rebuild_call(
+                task.identity,
+                turn,
+                turn.live,
+                turn.model,
+                context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                prompt_window=turn.prompt_window,
+            ):
+                return call
             # **A task is one turn and records nothing**, so a turn that
-            # overflows has no next turn to recover on: this is the bound that
-            # keeps it alive, and it is the agent server's rule.
-            asked = (
-                compact.due(
-                    turn.messages,
-                    turn.hidden,
-                    last_tokens=turn.live.last_usage.total_tokens,
-                    prompt_window=turn.prompt_window,
-                    compact_at=turn.compact_at,
-                    held=turn.compact_hold,
-                )
-                if turn.live is not None and turn.live.declares(TURN_COMPACT)
-                else None
+            # overflows has no next turn to recover on: the same threshold rule
+            # as the agent server's is the bound that keeps it alive.
+            return await runtime.compact_call(
+                task.identity,
+                turn,
+                turn.live,
+                turn.model,
+                context_tokens=measured_tokens(turn.live, turn.context_tokens),
+                prompt_window=turn.prompt_window,
             )
-            if asked is not None:
-                view, selectable = asked
-                selection = await runtime.compact_arguments(
-                    task.identity,
-                    view,
-                    selectable,
-                    turn.model,
-                    context_tokens=measured_tokens(turn.live, turn.context_tokens),
-                    prompt_window=turn.prompt_window,
-                )
-                return AutoCall(TURN_COMPACT, arguments=selection)
-            return None
 
         # **The task's prompt marker, and no strip after it.**  A task's messages
         # are not recorded — the answer is what the conversation gains — so
@@ -1680,24 +1618,16 @@ def build_server(
                 )
                 await send(Closed(task.ending or "the task is no longer running"))
                 return {"closed": True}
-            if replay is None:
-                # The task is running but has published nothing yet, or its
-                # build kept no tap; the brief is still the frame that says what
-                # is being watched, and the live queue follows.
-                await send(
-                    TaskBrief(
-                        name=task.name,
-                        description=task.description,
-                        status=task.status,
-                    )
-                )
-            else:
-                # The brief and every event the turn has produced, from its
-                # start.  A task's tap has no store id, so there is no snapshot
-                # that could already contain this turn and nothing to skip.
-                await send(replay.started)
-                for event in replay.events:
-                    await send(event)
+            # **A running task always has a tap**, because `agent_task_start`
+            # opens it in the same synchronous step that puts the task in the
+            # registry — so this is the brief and every event the turn has
+            # produced, from its start.  A task's tap has no store id, so there
+            # is no snapshot that could already contain this turn and nothing
+            # to skip.
+            assert replay is not None
+            await send(replay.started)
+            for event in replay.events:
+                await send(event)
             while True:
                 item = await watcher.queue.get()
                 await send(item)

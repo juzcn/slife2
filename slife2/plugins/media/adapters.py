@@ -54,6 +54,11 @@ logger = logging.getLogger(__name__)
 #: The artifacts' directory inside one agent's own.
 MEDIA_DIR = "media"
 
+#: How much of an error body a refusal quotes.  **A bound, not a guess**: a
+#: vendor's HTML error page is kilobytes of markup whose first line is the whole
+#: fact, and the rest is a context nobody should pay for.
+ERROR_CHARS = 500
+
 
 def media_dir(agent: str, subagent: str = "") -> Path:
     """Where an artifact goes by default: `work_dir(agent, subagent)/media/`.
@@ -245,6 +250,44 @@ class _HttpClientMixin:
                         headers={"Authorization": f"Bearer {key}"} if key else {},
                     )
         return self._client
+
+    async def _answered(
+        self,
+        method: str,
+        url: str,
+        *,
+        what: str,
+        extra_headers: dict[str, str] | None = None,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One call, with every way it can fail turned into one exception.
+
+        **Three failures, and they read differently on purpose**: a transport
+        error, an HTTP status, and a body that is not a JSON object.  The
+        vendor's own error envelope — a `200` carrying `code`/`message` — is the
+        one a client that only checks the status gets wrong, and only DashScope
+        answers that shape, so `_request` adds that check rather than this.
+
+        `what` names the API in the sentence, because the same mixin serves an
+        image endpoint and a four-capability one and "the media request failed"
+        is the wrong half of that for a caller reading an image failure.
+        """
+        client = await self._ensure_client()
+        try:
+            response = await client.request(
+                method, url, headers=extra_headers, json=json_body
+            )
+        except httpx2.HTTPError as exc:
+            raise MediaAdapterError(
+                f"the {what} request failed ({method} {url}): {exc}"
+            ) from exc
+        if response.status_code >= 400:
+            raise MediaAdapterError(
+                f"the {what} API answered {response.status_code}: "
+                f"{response.text[:ERROR_CHARS]}",
+                status_code=response.status_code,
+            )
+        return _json_object(response, what)
 
     async def close(self) -> None:
         if self._client is not None:
@@ -443,10 +486,6 @@ AUDIO_MIME: dict[str, str] = {
 #: may not disagree about what a suffix means.
 IMAGE_MIME: dict[str, str] = MEDIA_TYPES
 
-#: How much of a provider's error text is passed on.  Long enough to carry the
-#: vendor's own words, short enough not to spend a context window doing it.
-ERROR_CHARS = 500
-
 
 class DashScopeAIGCAdapter(_HttpClientMixin):
     """Bailian's AIGC endpoints: image, video, TTS and ASR.
@@ -466,29 +505,20 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         extra_headers: dict[str, str] | None = None,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """One call, with every way it can fail turned into one exception.
+        """One call, and the vendor's `200` with an error envelope as a failure.
 
-        Four failures and they read differently on purpose: a transport error,
-        an HTTP status, a body that is not JSON, and a `200` carrying the
-        vendor's own error envelope (`code`/`message`) instead of a result —
-        the last being the one a client that only checks the status gets wrong.
+        The transport, the status and the body are `_answered`'s — one copy of
+        them for both adapters.  What is DashScope's own is the fourth failure:
+        a `200` carrying `code`/`message` instead of a result, the one a client
+        that only checks the status gets wrong.
         """
-        client = await self._ensure_client()
-        try:
-            response = await client.request(
-                method, url, headers=extra_headers, json=json_body
-            )
-        except httpx2.HTTPError as exc:
-            raise MediaAdapterError(
-                f"the media request failed ({method} {url}): {exc}"
-            ) from exc
-        if response.status_code >= 400:
-            raise MediaAdapterError(
-                f"the media API answered {response.status_code}: "
-                f"{response.text[:ERROR_CHARS]}",
-                status_code=response.status_code,
-            )
-        data = _json_object(response, "media")
+        data = await self._answered(
+            method,
+            url,
+            what="media",
+            extra_headers=extra_headers,
+            json_body=json_body,
+        )
         if data.get("code"):
             raise MediaAdapterError(
                 f"the media API returned an error: {data.get('code')} — "
@@ -866,20 +896,12 @@ class OpenAICompatAdapter(_HttpClientMixin):
         # (the server merges it in) and a config params.size may use it too.
         if isinstance(body.get("size"), str):
             body["size"] = _size_for(body["size"], "x")
-        client = await self._ensure_client()
-        try:
-            response = await client.post(
-                f"{self._config.base_url}/images/generations", json=body
-            )
-        except httpx2.HTTPError as exc:
-            raise MediaAdapterError(f"the image request failed: {exc}") from exc
-        if response.status_code >= 400:
-            raise MediaAdapterError(
-                f"the image API answered {response.status_code}: "
-                f"{response.text[:ERROR_CHARS]}",
-                status_code=response.status_code,
-            )
-        data = _json_object(response, "image")
+        data = await self._answered(
+            "POST",
+            f"{self._config.base_url}/images/generations",
+            what="image",
+            json_body=body,
+        )
         items = data.get("data")
         if not isinstance(items, list) or not items:
             raise MediaAdapterError(f"no image in the answer: {str(data)[:300]}")

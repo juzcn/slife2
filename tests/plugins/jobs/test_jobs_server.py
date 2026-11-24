@@ -9,6 +9,8 @@ restart and no second registry.
 from __future__ import annotations
 
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +20,13 @@ from fastmcp.exceptions import ToolError
 
 from slife2.libs.host.config import load
 from slife2.libs.plugin.protocol import CALL_SOURCE, LIST_SOURCES
-from slife2.plugins.jobs.server import CATEGORY, SERVER_NAME, SOURCE, build_server
+from slife2.plugins.jobs.server import (
+    CATEGORY,
+    SERVER_NAME,
+    SOURCE,
+    Registry,
+    build_server,
+)
 from tests.fakes import config_file
 
 pytestmark = pytest.mark.unit
@@ -469,3 +477,36 @@ async def test_a_slow_job_file_does_not_hold_the_event_loop(
             ticker.cancel()
 
     assert beat.is_set(), "the shared event loop was held by the job scan"
+
+
+def test_a_listing_is_a_snapshot_under_the_lock_a_write_uses(
+    isolated_runtime: Path,
+) -> None:
+    """**`list_sources` and `job_set` are two threads reading one dict.**
+
+    The listing is a sync tool FastMCP runs on a worker thread; the write runs
+    on the loop.  A snapshot that iterated the table while a write replaced an
+    entry is a "dictionary changed size during iteration" out of the tool, which
+    the hub reads as a source that cannot answer.  The lock is what makes the
+    listing wait for the write to finish; this holds it and proves the listing
+    does wait, rather than racing it and hoping a scheduler notices.
+    """
+    config_on_disk(isolated_runtime)
+    registry = Registry(load(), isolated_runtime / "jobs")
+    entered = threading.Event()
+    listed: list[list[Any]] = []
+
+    def snapshot() -> None:
+        entered.set()
+        listed.append(registry.values())
+
+    thread = threading.Thread(target=snapshot)
+    with registry._lock:
+        thread.start()
+        assert entered.wait(timeout=2), "the snapshot thread never ran"
+        time.sleep(0.05)  # timeouts: long enough for an unlocked snapshot
+        assert thread.is_alive(), "the listing ran without the lock"
+    thread.join(timeout=2)
+
+    assert not thread.is_alive(), "the listing did not resume after the write"
+    assert listed == [[]], "a fresh home has no jobs, and that is a snapshot"

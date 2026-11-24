@@ -560,6 +560,51 @@ async def test_a_new_login_takes_the_state_back_from_the_code_it_replaces(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_a_scan_that_lands_during_the_fetch_is_the_login(
+    monkeypatch: pytest.MonkeyPatch, fails: bool
+) -> None:
+    """**The replaced watch polls through the fetch, and a scan is the answer.**
+
+    Confirming adopts the token and finishes without an await, so a client that
+    is logged in when the fetch returns was confirmed while this call was out.
+    Resetting the state to `waiting` and drawing a replacement code would hide
+    a login already in hand behind a code nobody has to scan; the failed-fetch
+    branch has the same question, and the scan wins there too.
+    """
+    made = rig(monkeypatch)
+    session = made.plugin.session("jack")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fetch(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        # What the replaced watch does on a scan: adopt the token, then the
+        # state.  There is no await between them, exactly as `_confirmed`.
+        await session.client.start("bot-token-9", "https://example.test")
+        session.qr_state = "confirmed"
+        if fails:
+            raise OSError("the QR endpoint died")
+        return {
+            "qrcode": "QR-2",
+            "qrcode_img_content": "https://example.test/scan-2",
+        }
+
+    monkeypatch.setattr(session.client, "fetch_qrcode", fetch)
+    login = asyncio.create_task(made.plugin.login(session))
+    await entered.wait()
+    release.set()
+    answer = await login
+
+    assert answer["state"] == "connected", fails
+    assert answer["qr"] == "", "there is nothing to scan"
+    assert session.qr_state == "confirmed", "the scan was overwritten"
+    assert session.qr_task is None, "a watch was started for an unneeded code"
+    await made.close()
+
+
+@pytest.mark.asyncio
 async def test_a_login_that_exists_is_not_asked_to_scan_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

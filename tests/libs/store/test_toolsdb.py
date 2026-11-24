@@ -1329,6 +1329,27 @@ def test_a_tool_is_found_by_its_words_and_by_what_it_is_about(tmp_path) -> None:
     assert semantic["results"][0]["similarity"] == pytest.approx(1 / 2**0.5, abs=0.02)
 
 
+def test_a_blank_keyword_list_does_not_throw_away_the_sentence(tmp_path) -> None:
+    """**One leg having no term is not the other being absent.**
+
+    `keywords: [""]` is a non-empty sequence with no search term in it, so the
+    keyword leg is absent while the meaning leg is not.  Reading the list as
+    "there is a keyword leg" raised `EmptyQuery` out of `match_expression` and
+    the sentence never ran — the cabinet's search already answers this way, and
+    the catalogue now does too.  With no sentence beside it there is nothing to
+    search with, and the refusal stands.
+    """
+    store = store_at(tmp_path)
+    merge(store, "arxiv", "mcp", [tool("arxiv__search", "Find papers by keyword.")])
+
+    found = asyncio.run(
+        store.search(keywords=[""], sentences=["papers"], embedder=EMBEDDER)
+    )
+    assert [row["name"] for row in found["results"]] == ["arxiv__search"]
+    with pytest.raises(textindex.EmptyQuery):
+        asyncio.run(store.search(keywords=[""], embedder=EMBEDDER))
+
+
 def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path) -> None:
     """**A recorded index and a recorded identity are one fact.**
 

@@ -814,7 +814,7 @@ async def test_an_openai_image_below_dashscopes_floor_reaches_the_wire(
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             seen.update(json)
             return Response()
@@ -1221,6 +1221,21 @@ def _client_returning(client: Any):
     return ensure
 
 
+class _PostOnly:
+    """An httpx-shaped fake for an adapter that posts one JSON body.
+
+    The adapters call `request`, the one method both wires share, and the fakes
+    below spell only the one call their endpoint takes.  Delegating here keeps
+    each fake about its own answer rather than about an HTTP vocabulary.
+    """
+
+    async def post(self, url: str, json: dict[str, Any]) -> Any:
+        raise NotImplementedError
+
+    async def request(self, method: str, url: str, **options: Any) -> Any:
+        return await self.post(url, json=options.get("json"))
+
+
 def _posting(body: Any, status_code: int = 200, text: str = "{}"):
     """A client whose one POST answers with *body* as JSON.
 
@@ -1238,7 +1253,7 @@ def _posting(body: Any, status_code: int = 200, text: str = "{}"):
         def json() -> Any:
             return body
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             return Response()
 
@@ -1298,7 +1313,7 @@ async def test_an_openai_image_size_is_written_with_its_own_separator(
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             seen.update(json)
             return Response()
@@ -1333,7 +1348,7 @@ async def test_an_openai_image_size_survives_the_servers_extra_params(
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             seen.update(json)
             return Response()
@@ -1371,7 +1386,7 @@ async def test_the_openai_call_outranks_the_config(monkeypatch, tmp_path) -> Non
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": base64.b64encode(b"\x89PNG").decode()}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             seen.update(json)
             return Response()
@@ -1421,7 +1436,7 @@ async def test_an_openai_image_may_come_back_as_bytes(monkeypatch, tmp_path) -> 
         def json() -> dict[str, Any]:
             return {"data": [{"b64_json": encoded}]}
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             assert url.endswith("/images/generations")
             assert json["model"] == "img"
@@ -1450,7 +1465,7 @@ async def test_an_images_answer_that_is_not_json_is_a_failure_not_a_traceback(
         def json() -> Any:
             raise ValueError("Expecting value: line 1 column 1 (char 0)")
 
-    class Client:
+    class Client(_PostOnly):
         async def post(self, url: str, json: dict[str, Any]) -> Any:
             return Response()
 

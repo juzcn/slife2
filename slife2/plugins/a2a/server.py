@@ -1318,7 +1318,6 @@ async def _drain(
 
 
 def build_server(
-    config: Config,
     *,
     net: Net = REMOTE,
     window_client: Client | None = None,
@@ -3188,7 +3187,7 @@ def main(argv: list[str] | None = None, *, net: Net = REMOTE) -> int:
         argv,
         server_name=net.server_name,
         config_key=net.plugin_key,
-        build=lambda config: build_server(config, net=net),
+        build=lambda config: build_server(net=net),
         logger=logger,
         note=lambda config: server_note(config, net),
     )

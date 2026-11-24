@@ -3067,3 +3067,38 @@ async def test_a_diary_day_is_read_and_removed_in_any_accepted_spelling() -> Non
         # An invalid date is refused, consistent with the write.
         with pytest.raises(ToolError, match="is not a date"):
             await ask(client, "diary_read", date="not-a-date")
+
+
+@pytest.mark.asyncio
+async def test_a_diary_summary_takes_the_day_in_any_accepted_spelling() -> None:
+    """**A summary is a reader, and it uses the write's key rule.**
+
+    `diary_write` stores `2026-01-05`; a `cabinet_summarize` naming the same day
+    as `2026-W02-1` passed the caller's spelling straight to the row lookup, so
+    it refused a document that was there — the one corpus kind whose key has a
+    canonical spelling and the one tool that did not use it.
+    """
+    async with Client(cabinet()) as client:
+        await ask(client, "diary_write", content="the day", date="20260105")
+        written = await payload(
+            client,
+            "cabinet_summarize",
+            kind=DIARY,
+            key="2026-W02-1",
+            summary="about the migration",
+            tags="work",
+        )
+        read = await payload(client, "diary_read", date="2026-01-05")
+        with pytest.raises(ToolError, match="is not a date"):
+            await ask(
+                client,
+                "cabinet_summarize",
+                kind=DIARY,
+                key="not-a-date",
+                summary="x",
+            )
+
+    assert written["key"] == "2026-01-05"
+    assert written["summary"] == "about the migration"
+    assert read["summary"] == "about the migration", "the summary found the row"
+    assert read["tags"] == "work"

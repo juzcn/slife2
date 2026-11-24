@@ -536,7 +536,55 @@ def render_tool_result(content: Any) -> str:
     return as_tool_text(content)
 
 
-class ProviderClients:
+class Leased:
+    """A pool of clients a config change retires, closed when its last call ends.
+
+    **Retired is not closed.**  The edit that moves the config past a pool may
+    land while a call is still reading a client it built, and closing under that
+    call cuts a billed answer off.  So a pool that will not be handed out again
+    is closed by whichever holder finishes last.
+
+    **The hand-out and the count are one synchronous step** (`hold`), because a
+    rebuild landing between them would find no holders and close a client a call
+    is about to use.  `release` is the caller's, and a context manager
+    (`LiveProviders.lease`, `LiveEmbedding.lease`) is what keeps the pair from
+    being two statements somebody must remember.
+
+    The chat and embedding backends both used to spell this out — the same
+    counter, the same retired flag, the same last-holder rule — and the second
+    copy is the one that would have drifted.
+    """
+
+    def __init__(self) -> None:
+        self._holders = 0
+        self._retired = False
+
+    def hold(self) -> None:
+        """Count one more call as using this pool.  See the class docstring."""
+        self._holders += 1
+
+    async def release(self) -> None:
+        """One holder is done with this pool, closing it if it was retired."""
+        self._holders -= 1
+        await self._close_if_retired()
+
+    async def retire(self) -> None:
+        """Say this pool will not be handed out again; close it once it is idle."""
+        self._retired = True
+        await self._close_if_retired()
+
+    async def _close_if_retired(self) -> None:
+        if not self._retired or self._holders:
+            return
+        self._retired = False
+        await self._close()
+
+    async def _close(self) -> None:
+        """Close whatever this pool built; the subclass's one difference."""
+        raise NotImplementedError
+
+
+class ProviderClients(Leased):
     """The SDK clients of one process, one per configured provider, on first use.
 
     **The three wire adapters need the same two things and differ in one.**  A
@@ -563,36 +611,13 @@ class ProviderClients:
         server_name: str,
         make_client: Callable[[ProviderSettings, str], Any],
     ) -> None:
+        super().__init__()
         self._providers = providers
         self._server = server_name
         self._make_client = make_client
         self._clients: dict[str, Any] = {}
-        #: Streams holding this pool, and whether the config has moved past it.
-        #: A retired pool closes its SDK clients when its last holder is done —
-        #: see `LiveProviders.lease`.
-        self._holders = 0
-        self._retired = False
 
-    def hold(self) -> None:
-        """Count one more stream as using this pool.
-
-        **Synchronous on purpose**, and it must be: the hand-out and the count
-        have to happen with no await between them, or a rebuild landing in the
-        gap would find no holders and close a client a stream is about to use.
-        """
-        self._holders += 1
-
-    async def release(self) -> None:
-        """One holder is done with this pool, closing it if it was retired."""
-        self._holders -= 1
-        await self._close_if_retired()
-
-    async def retire(self) -> None:
-        """Say this pool will not be handed out again; close it once it is idle."""
-        self._retired = True
-        await self._close_if_retired()
-
-    async def _close_if_retired(self) -> None:
+    async def _close(self) -> None:
         """Close every SDK client this pool built, once nothing is using it.
 
         **A client owns a connection pool and its socket, and nothing else ever
@@ -607,9 +632,8 @@ class ProviderClients:
         `close()` closes the connection *under* a stream that may still be
         reading it, so a pool the config has moved past waits for its last
         holder: an edit must not cut off a model call that is half answered.
+        `Leased` is that wait.
         """
-        if not self._retired or self._holders:
-            return
         clients, self._clients = list(self._clients.values()), {}
         for client in clients:
             try:
@@ -914,12 +938,12 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
                 leaving every hop anonymous.
             subagent: Which of that agent's conversations, empty for its own.
             kind: What sort of call this is — `turn` for the loop's own model
-                calls (a compaction call included: it is the turn's own work),
-                `decision` for the recall decision, the one call that
-                reaches this server outside the loop's backend.  Nothing is
-                keyed on it; it is the word the usage line is read by, because
-                the two are separate prompt lineages and a cache-hit ratio that
-                averaged them could not say which one was missing.
+                calls, `decision` for the recall decision, and `compactor` for
+                the live-view selector.  The last two are the calls that reach
+                this server outside the loop's backend.  Nothing is keyed on it;
+                it is the word the usage line is read by, because they are
+                separate prompt lineages and a cache-hit ratio that averaged
+                them could not say which one was missing.
             tool_choice: The name of the one tool this call must use.  Empty
                 leaves the choice to the model; the decision calls name their
                 single decision tool, because a model left free in a tool-heavy

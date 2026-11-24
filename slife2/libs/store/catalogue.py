@@ -1800,15 +1800,24 @@ class ToolStore:
                 "listing is `ToolStore.page`"
             )
 
-        # **The words are a sentence when they are all there is.**  A
-        # keywords-only call used to reach the keyword leg alone, which found 23
-        # of the 36 tools callers ask for — the same 23 at 130 and at 253,
-        # because what it misses is word forms, not choice.  Routing the same
-        # words through both legs finds 34 to 36; the cost is one embedding call.
+        # **The words are a sentence when they are all there is**, but a
+        # keyword list with no term in it is no keyword leg.  The cabinet's
+        # search states the same rule: the two are different inputs to the two
+        # legs, and reading `keywords=[""]` beside a real sentence as the
+        # second would throw the sentence away (`EmptyQuery` out of
+        # `match_expression`).  With no sentence beside it there is nothing to
+        # search with at all, and the refusal is the answer.
         #
         # It lives here because it is a fact about the search, not about the
         # tool: a second caller of this method must not have to remember it.
-        if keywords and not any(s.strip() for s in sentences):
+        expression = ""
+        if keywords:
+            try:
+                expression = textindex.match_expression(list(keywords))
+            except textindex.EmptyQuery:
+                if not any(s.strip() for s in sentences):
+                    raise
+        if expression and not any(s.strip() for s in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
         # **`MAX_SQL_VARS` is not a depth cap.**  It bounds how many values one
@@ -1824,9 +1833,8 @@ class ToolStore:
         # the corpus without bound and could pass `sqlite-vec`'s 4096-candidate
         # ceiling, which fails the whole search rather than answering it.
         over = limit * _OVERFETCH
-        expression = textindex.match_expression(list(keywords)) if keywords else ""
         keyword_hits: list[int] | None = None
-        if keywords:
+        if expression:
             keyword_hits = await off_loop(
                 self._keyword_hits, expression, over, clauses, values
             )

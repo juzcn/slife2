@@ -33,6 +33,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from slife2.plugins.a2a.capacity import prune_to_cap
 from slife2.plugins.a2a.states import INTERRUPTED, TERMINAL_STATUSES, WORKING
 
 #: One mesh's inbound table is bounded; terminal records go first.
@@ -216,25 +217,12 @@ class InboundStore:
             if v.state in TERMINAL_STATUSES and now - v.updated > ttl
         ]:
             self._tasks.pop(task_id, None)
-        if len(self._tasks) <= MAX_INBOUND:
-            return
-        excess = len(self._tasks) - MAX_INBOUND + 50
-
-        def evictability(task: InboundTask) -> tuple[int, float]:
-            # **Terminal first, then live work, and a paused task last.**  The
-            # old key put `working` and `interrupted` in one class, so an older
-            # interrupted record — the one whose peer is waiting on an answer
-            # somebody has to give — went before a newer working round, which is
-            # the opposite of what this module promises.
-            rank = (
-                0
-                if task.state in TERMINAL_STATUSES
-                else 2
-                if task.state == INTERRUPTED
-                else 1
-            )
-            return rank, task.updated
-
-        ordered = sorted(self._tasks.values(), key=evictability)
-        for task in ordered[:excess]:
-            self._tasks.pop(task.task_id, None)
+        # **Terminal first, then live work, and a paused task last** — the one
+        # order, in `capacity.prune_to_cap`, shared with the outbound store.
+        prune_to_cap(
+            self._tasks,
+            MAX_INBOUND,
+            key=lambda task: task.task_id,
+            status=lambda task: task.state,
+            age=lambda task: task.updated,
+        )

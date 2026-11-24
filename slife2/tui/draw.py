@@ -21,9 +21,9 @@ the same sense:
   the window's status bar; a watched screen has no bar, and drawing either would
   put a fact about the window's chrome in somebody's transcript.
 
-`False` is the whole of what says "this one is yours"; anything left unmatched
-is a vocabulary this build was not taught, and `assert_never` turns that into a
-static error at the next variant rather than a line nobody draws.
+An event left unmatched is a vocabulary this build was not taught, and
+`assert_never` turns that into a static error at the next variant rather than a
+line nobody draws.
 """
 
 from __future__ import annotations
@@ -52,12 +52,13 @@ from slife2.libs.turn.tools import (
 from slife2.tui.widgets import ChatView
 
 
-def draw(chat: ChatView, event: TurnEvent) -> bool:
-    """Draw the display half of *event*; answer whether it was drawn.
+def draw(chat: ChatView, event: TurnEvent) -> None:
+    """Draw the display half of *event*; the window's own events draw nothing.
 
-    `False` means the event belongs to the view that owns the turn — see the
-    module docstring.  A caller that ignores the answer is a caller that has
-    decided it does not own any of them, which is exactly what a watcher is.
+    The three events that belong to the view running the turn are filtered by
+    the callers that own them — the window handles them before reaching here,
+    and the watcher does not ask for them — so an event that arrives anyway is
+    a no-op rather than a second answer.
     """
     match event:
         case ToolCallStarted(call_id=call_id, name=name, arguments=arguments) if (
@@ -67,7 +68,7 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
             # id is what tells the two apart: a model's own call to any harness tool —
             # `_check_new_input` included — falls through to the ordinary panel
             # below.
-            return True
+            return
         case ToolCallFinished(call_id=call_id, name=name, result_preview=text) if (
             is_harness(name) and is_harness_call(call_id)
         ):
@@ -79,7 +80,7 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
                 chat.add_note(
                     notes.unloaded(text) if name == FUNC_TOOL_UNLOAD else text
                 )
-            return True
+            return
         case MessageCutIn(text=text, channel=channel):
             # **A cut-in is a harness note like every other pair's answer.**  The
             # delivered words are the `_check_new_input` tool's own answer — from
@@ -119,7 +120,6 @@ def draw(chat: ChatView, event: TurnEvent) -> bool:
         case (
             ToolApprovalRequested() | ToolsCounted() | UsageReported() | TurnFinished()
         ):
-            return False
+            return
         case _:
             assert_never(event)
-    return True

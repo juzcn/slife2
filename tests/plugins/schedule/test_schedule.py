@@ -294,7 +294,6 @@ def build(
 ) -> FastMCP:
     """The plugin, wired to recorders and with its clock not running."""
     return build_server(
-        default_config(),
         window_client=window.client if window else None,
         tasks_client=tasks.client if tasks else None,
         polling=False,
@@ -2047,9 +2046,7 @@ async def test_a_dispatch_whose_peer_cannot_be_reached_closes_the_run(
     # machine with slife2 running dials its real agent-task server on the
     # configured port and the dispatch *succeeds* — the test passes only where
     # no stack is up, which is the opposite of what it says it proves.
-    async with Client(
-        build_server(config, polling=False, source=lambda: config)
-    ) as client:
+    async with Client(build_server(polling=False, source=lambda: config)) as client:
         await write(client)
         with pytest.raises(ToolError, match="could not be started"):
             await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})

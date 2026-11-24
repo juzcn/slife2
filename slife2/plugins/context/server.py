@@ -114,7 +114,7 @@ from slife2.libs.store.db import (
     user_message,
 )
 from slife2.libs.store.index import MAX_PAGE, Embedder, page_limit, time_window
-from slife2.libs.store.textindex import terms
+from slife2.libs.store.textindex import EmptyQuery, terms
 from slife2.libs.turn import context as decisions
 from slife2.libs.turn.context import Decision
 from slife2.libs.turn.messages import StreamChatResult, ToolSpec, Usage
@@ -1769,22 +1769,6 @@ def build_server(
             for sentence in (raw_sentences if isinstance(raw_sentences, list) else [])
             if str(sentence).strip()
         ]
-        if query and not terms(query):
-            # **A query with no term is not a keyword leg.**  The keyword leg
-            # refuses such a thing — `"***"`, `"—"` — with `EmptyQuery`, and the
-            # store's own contract is that an empty query reaching the full-text
-            # index is a syntax error and embeds to noise.  With a sentence
-            # beside it the recall still asks a question, so only the query is
-            # dropped; without one, dropping the query and running the period
-            # would be a different selection from the one the model asked for,
-            # so the whole recall is dropped and the decision's other half, the
-            # keep-list, runs on its own — SDD §5.5's outcome when a
-            # rebuild cannot do its job: keep the context it had.
-            if not sentences:
-                logger.info("recall_query_has_no_term")
-                return [], ""
-            logger.info("recall_query_dropped")
-            query = ""
         since = condition.get("since") or None
         until = condition.get("until") or None
         anchor = condition.get("anchor") or None
@@ -1823,22 +1807,34 @@ def build_server(
         # count cuts the selection afterwards.  The store applies its own page
         # bound to every query, so a configured width larger than one page is
         # capped there rather than here.
-        ranked = await store.recall(
-            query=query,
-            sentences=sentences,
-            embedder=asker,
-            since=since,
-            until=until,
-            anchor=anchor,
-            limit=policy.recall_page_limit,
-            # **What is in hand, not only what was kept.**  The decision model
-            # read every turn in the conversation, so a turn it dropped was
-            # dropped deliberately; and a turn in both would spend retrieval
-            # depth or budget on something already held.  The exclusion is what
-            # makes the recall the half that looks elsewhere.
-            exclude=in_hand,
-            keyword_weight=policy.keyword_weight,
-        )
+        try:
+            ranked = await store.recall(
+                query=query,
+                sentences=sentences,
+                embedder=asker,
+                since=since,
+                until=until,
+                anchor=anchor,
+                limit=policy.recall_page_limit,
+                # **What is in hand, not only what was kept.**  The decision
+                # model read every turn in the conversation, so a turn it
+                # dropped was dropped deliberately; and a turn in both would
+                # spend retrieval depth or budget on something already held.  The
+                # exclusion is what makes the recall the half that looks
+                # elsewhere.
+                exclude=in_hand,
+                keyword_weight=policy.keyword_weight,
+            )
+        except EmptyQuery:
+            # **A query with no term is not a keyword leg**, and the store is
+            # the one place that rule is written: beside a sentence it drops
+            # the leg and answers, and without one it refuses.  Dropping the
+            # query here and running the period instead would be a different
+            # selection from the one the model asked for, so the whole recall
+            # is dropped and the keep-list runs alone — SDD §5.5's outcome when
+            # a rebuild cannot do its job: keep the context it had.
+            logger.info("recall_query_has_no_term")
+            return [], ""
         gated = decisions.gate(ranked, policy.min_similarity)
         order = [turn_id for turn_id, _ in gated]
         if not order:

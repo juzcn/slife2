@@ -239,7 +239,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         """
         return homes.current().refreshed()
 
-    def supplied_for(name: str) -> dict[str, dict[str, str]]:
+    def supplied_for() -> dict[str, dict[str, str]]:
         """The `skills:` section as `skill_use` wants it — name → `env`."""
         return {
             one: settings.resolved_env()
@@ -284,7 +284,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                     f"operator's decision and not a fault. `skill_list` reports "
                     f"the state of every installed skill."
                 )
-        text, ok = await skills.use(name, environments=supplied_for(name))
+        text, ok = await skills.use(name, environments=supplied_for())
         if not ok:
             # **Raised, so the call is a failure the caller can see.**  `ok`
             # false is this system's word for a refusal — `slife2.clients.gateway`
@@ -360,9 +360,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                 return found
         return home_entries().get(name)
 
-    def _key_for(
-        name: str, skill: skills.Skill | None, entries: Mapping[str, SkillSettings]
-    ) -> str:
+    def _key_for(name: str, skill: skills.Skill | None) -> str:
         """Which `skills:` key names this skill.
 
         **The entry that is already there wins**, because that is the one the
@@ -489,7 +487,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             raise ToolError(f"could not write {name!r}: {exc}") from exc
         if env is not None:
             _write_env(target, env)
-        key = _key_for(target, skills.find(target), home_entries())
+        key = _key_for(target, skills.find(target))
         current = home_entries().get(key)
         logger.info("skill_set name=%s dir=%s", name, installed)
         return {
@@ -514,7 +512,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         written — references included — because that is what a reload produces;
         `resolved_env()` is the reader's job.
         """
-        key = _key_for(name, skills.find(name), home_entries())
+        key = _key_for(name, skills.find(name))
         written: dict[str, Any] = {}
 
         def change(current: dict[str, Any]) -> dict[str, Any] | None:
@@ -654,7 +652,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         skill = skills.find(name.strip())
         if skill is None and name.strip() not in home_entries():
             raise ToolError(f"'{name}' is not installed — see `skill_list`.")
-        key = _key_for(name.strip(), skill, home_entries())
+        key = _key_for(name.strip(), skill)
         if key in configfile.read_section(SECTION):
             configfile.set_enabled(SECTION, key, enabled)
         elif not enabled:

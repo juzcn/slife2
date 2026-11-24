@@ -1927,6 +1927,13 @@ def build_server(
         wanted = kind.strip()
         if wanted not in DOCUMENT_KINDS:
             raise ToolError(CORPUS_KIND_HINT)
+        # **A diary's key is the day every tool spells.**  `diary_write` and
+        # `diary_update` store the canonical `YYYY-MM-DD`, so a summarise naming
+        # `20260105` would describe a row the reader can never reach — the same
+        # day in its other accepted spelling.  The other kinds' keys are their
+        # callers' words and are taken as written.
+        if wanted == DIARY:
+            key = _diary_key(key)
         row = await opened.annotate(
             wanted,
             key,

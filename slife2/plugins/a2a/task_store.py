@@ -24,6 +24,7 @@ from __future__ import annotations
 import time as _time
 from dataclasses import dataclass, field
 
+from slife2.plugins.a2a.capacity import prune_to_cap
 from slife2.plugins.a2a.states import (
     CANCELLED,
     COMPLETED,
@@ -134,23 +135,19 @@ class TaskStore:
     # ── Maintenance ───────────────────────────────────────────────────
 
     def _maybe_prune(self) -> None:
-        """Drop oldest entries when over max — terminal status first, then the
-        oldest pending, so a burst of async sends to slow/hung peers can't grow
-        the in-memory store past the cap."""
-        if len(self._records) <= self.MAX_RECORDS:
-            return
-        excess = len(self._records) - self.MAX_RECORDS + 50
-        # Oldest first; terminal-status entries preferred for removal.
-        ordered = sorted(
-            self._records.values(),
-            key=lambda r: (
-                r.status not in TERMINAL_STATUSES,
-                r.created_at,
-            ),
+        """Apply the soft cap: terminal records first, a paused task last.
+
+        The order and the batch are `capacity.prune_to_cap`'s, shared with the
+        inbound table — the two are one policy about which record a peer is
+        most likely to still want.
+        """
+        prune_to_cap(
+            self._records,
+            self.MAX_RECORDS,
+            key=lambda record: record.task_id,
+            status=lambda record: record.status,
+            age=lambda record: record.created_at,
         )
-        to_remove = ordered[:excess]
-        for r in to_remove:
-            self._records.pop(r.task_id, None)
 
 
 # ── Module-level singleton ──────────────────────────────────────────────

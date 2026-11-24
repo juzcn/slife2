@@ -43,6 +43,18 @@ from typing import Any
 from slife2.libs.turn.context import with_note
 from slife2.libs.turn.messages import Message
 
+
+class Refusal(Exception):
+    """A `_turn_compact` call that cannot be applied, in the tool's own words.
+
+    **The sentence is shared; the exception type is the server's.**  The tool
+    body's refusal, the unreadable selection and the parser's own refusal are
+    one decision — the call is not applied — and both servers raise their own
+    tool error with this text, so the wording lives here and the type does not
+    leak between plugins.
+    """
+
+
 #: The refusal a `_turn_compact` call that names no selection gets.  **One
 #: sentence for the two servers that serve the tool** (the agent's and an agent
 #: task's): both bodies had their own copy, and it is model-facing text.

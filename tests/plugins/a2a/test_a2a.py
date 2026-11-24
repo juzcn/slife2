@@ -696,6 +696,29 @@ def test_the_task_store_forgets_terminal_records_first() -> None:
     assert store.get("pending50") is not None
 
 
+def test_the_task_store_evicts_a_paused_task_after_live_work() -> None:
+    """**The cap's order is one policy for both A2A tables.**
+
+    The inbound table already put an interrupted task after a live round,
+    because its peer is waiting on an answer somebody has to give.  The outbound
+    store's own copy of the order put every non-terminal record in one class, so
+    the oldest paused task went before a newer send still waiting for its first
+    reply.  Both now read `capacity.prune_to_cap`.
+    """
+    store = TaskStore()
+    for index in range(TaskStore.MAX_RECORDS - 1):
+        store.record_send(f"pending{index}", PEER)
+    store.record_send("paused", PEER)
+    store.record_interrupt("paused")
+    assert len(store._records) == TaskStore.MAX_RECORDS
+
+    store.record_send("last", PEER)
+
+    assert store.get("paused") is not None, "the paused task went first"
+    assert store.get("pending0") is None, "and the oldest live work went"
+    assert len(store._records) <= TaskStore.MAX_RECORDS
+
+
 # ── the broker: probed, started, or fatal ───────────────────────────────────
 
 
@@ -2287,7 +2310,7 @@ def build(**overrides: Any) -> FastMCP:
     config = default_config()
     if overrides.pop("on_the_mesh", False):
         object.__setattr__(config, "peer_agent", settings(**overrides))
-    return build_server(config, source=lambda: config, connecting=False)
+    return build_server(source=lambda: config, connecting=False)
 
 
 @pytest.mark.asyncio
@@ -2358,9 +2381,7 @@ async def test_the_local_instance_serves_the_local_network() -> None:
     network is named `subagent`, which is this project's word for it rather than
     the gloss the design talks about it with.
     """
-    tools = await build_server(
-        default_config(), net=LOCAL, connecting=False
-    ).list_tools()
+    tools = await build_server(net=LOCAL, connecting=False).list_tools()
     by_name = {t.name: t for t in tools}
 
     local_tools = [
@@ -2645,7 +2666,7 @@ async def test_join_puts_the_agent_on_the_mesh_and_says_nothing_about_it(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2683,7 +2704,7 @@ async def test_a_connect_that_failed_and_cannot_be_torn_down_is_named(
     monkeypatch.setattr(A2AMesh, "disconnect", disconnect)
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
-    mcp = build_server(config, source=lambda: config, connecting=False)
+    mcp = build_server(source=lambda: config, connecting=False)
 
     caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
     async with Client(mcp) as client:
@@ -2726,7 +2747,7 @@ async def test_a_mesh_that_will_not_disconnect_is_named_rather_than_swallowed(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     caplog.set_level(logging.ERROR, logger="slife2.plugins.a2a.server")
@@ -2779,7 +2800,7 @@ async def test_a_window_that_goes_away_takes_the_agent_off_the_mesh(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with served(mcp) as url:
@@ -2839,7 +2860,7 @@ async def test_a_call_does_not_keep_a_card_up_after_its_window_has_gone(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2878,7 +2899,7 @@ async def test_a_call_accepted_during_the_departure_gets_its_own_window(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2919,7 +2940,7 @@ async def test_a_window_that_comes_back_inside_the_departure_keeps_the_mesh(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -2976,7 +2997,7 @@ async def test_an_edited_mesh_address_reaches_a_member_that_already_exists(
     config = default_config()
     object.__setattr__(config, "peer_agent", old)
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -3126,7 +3147,7 @@ async def test_two_windows_showing_one_agent_are_two_holds(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -3192,7 +3213,7 @@ async def test_a_window_arriving_as_the_mesh_is_torn_down_gets_a_live_one(
     config = default_config()
     object.__setattr__(config, "peer_agent", settings())
     mcp = build_server(
-        config, source=lambda: config, window_client=window.client, connecting=False
+        source=lambda: config, window_client=window.client, connecting=False
     )
 
     async with Client(mcp) as client:
@@ -3474,7 +3495,7 @@ def local_build(**overrides: Any) -> FastMCP:
     object.__setattr__(
         config, "subagent", replace(config.subagent, network=settings(**overrides))
     )
-    return build_server(config, net=LOCAL, source=lambda: config, connecting=False)
+    return build_server(net=LOCAL, source=lambda: config, connecting=False)
 
 
 @pytest.mark.asyncio
@@ -4087,7 +4108,7 @@ async def test_the_remote_network_places_nothing_and_lists_only_cards(
         write_subagent(AGENT, PEER)
         config = default_config()
         object.__setattr__(config, "peer_agent", settings(configured=True))
-        server = build_server(config, source=lambda: config, connecting=False)
+        server = build_server(source=lambda: config, connecting=False)
         async with Client(server) as client:
             await client.call_tool(
                 PEER_SEND_MESSAGE,
@@ -4148,7 +4169,7 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
     no `peer_agent:` section — a key it does not have — and taught the word `A2A` for
     the network the rest of its tools call `subagent`.
     """
-    server = build_server(default_config(), net=LOCAL, connecting=False)
+    server = build_server(net=LOCAL, connecting=False)
     async with Client(server) as client:
         with pytest.raises(ToolError) as refused:
             await client.call_tool(
@@ -4227,7 +4248,7 @@ async def test_a_task_list_on_a_switched_off_network_names_its_own_section() -> 
     answers are about one switch — and it must not name the other network's
     section, which is a key this machine does not have.
     """
-    server = build_server(default_config(), net=LOCAL, connecting=False)
+    server = build_server(net=LOCAL, connecting=False)
     async with Client(server) as client:
         answer = await client.call_tool(
             LOCAL.tool(TASK_LIST), {}, meta=conversation_meta(AGENT)

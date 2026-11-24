@@ -1175,7 +1175,6 @@ async def poll_forever(
 
 
 def build_server(
-    config: Config,
     *,
     window_client: Client | None = None,
     tasks_client: Client | None = None,
@@ -1673,7 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
         argv,
         server_name=SERVER_NAME,
         config_key=CONFIG_KEY,
-        build=build_server,
+        build=lambda _config: build_server(),
         logger=logger,
         note=lambda _config: "the clock",
     )

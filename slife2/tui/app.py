@@ -1016,6 +1016,17 @@ class SlifeApp(App[None]):
                     await self._flush_events()
                     self._finish_entry(ticket)
                     self._transcript.add_error(str(exc))
+                    # **A transport that died is the bar's news too.**  The
+                    # turn's failure is in the transcript, but the bar is the
+                    # part that says whether the window still has a server —
+                    # and the client's own flag, not the exception, is what
+                    # tells a dropped link from a server that answered with a
+                    # failure.  `_ensure_connected` reconnects on the next
+                    # send; until then the bar says what is true.
+                    if self._client is not None and not self._client.connected:
+                        self._connected = False
+                        self._connecting = False
+                        self._connection_text = t("connection_disconnected", err=exc)
                 else:
                     # **The reply is the authority on whether this message ran a
                     # turn of its own.**  A folded message produces no events at

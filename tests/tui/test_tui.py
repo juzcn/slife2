@@ -2661,6 +2661,43 @@ async def test_a_dead_server_does_not_kill_the_app() -> None:
         assert "not connected" in shown(app)
 
 
+class DroppingTurn(FakeAgentClient):
+    """A client whose turn dies at the transport once the drain is waiting on it."""
+
+    def __init__(self) -> None:
+        super().__init__(answering("never"))
+        self.drop = asyncio.Event()
+
+    async def run_turn(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        await self.drop.wait()
+        self.connected = False
+        raise ConnectionError("the agent server went away")
+
+
+async def test_a_turn_that_loses_the_transport_disconnects_the_bar() -> None:
+    """**The transcript says the turn failed; the bar says the link did.**
+
+    A turn that dies at the transport closes the client, and nothing wrote the
+    window's own flag but a connect or a failed history read — so the bar went
+    on looking healthy until the next prompt reconnected, which is the one thing
+    it exists to prevent.  The client's `connected` is the authority: a server
+    that answered with a failure keeps the link, and a dropped one does not.
+    """
+    client = DroppingTurn()
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        await submit(pilot, "hi")
+        # The drain is now parked on the turn; the drop lands under it.
+        assert await settled(pilot, lambda: app._turn is not None)
+        client.drop.set()
+        assert await settled(pilot, lambda: "disconnected" in status(app))
+        assert "the agent server went away" in shown(app), "the turn said why"
+        text = status(app)
+
+    assert PALETTE["red"] in text, "a dropped link is the error colour"
+
+
 class PendingConnect(FakeAgentClient):
     """A client whose first connection stays pending until the test opens the gate."""
 

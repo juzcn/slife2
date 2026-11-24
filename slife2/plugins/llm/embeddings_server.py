@@ -50,7 +50,7 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.plugin.protocol import house_server, serve_plugin
-from slife2.plugins.llm.server_common import unresolved_key
+from slife2.plugins.llm.server_common import Leased, unresolved_key
 
 logger = logging.getLogger(__name__)
 
@@ -408,29 +408,14 @@ class EmbeddingClient:
                 )
 
 
-class _HeldEmbedding:
+class _HeldEmbedding(Leased):
     """One `EmbeddingClient` and the calls holding it."""
 
     def __init__(self, client: EmbeddingClient) -> None:
+        super().__init__()
         self.client = client
-        self._holders = 0
-        self._retired = False
 
-    def hold(self) -> None:
-        self._holders += 1
-
-    async def release(self) -> None:
-        self._holders -= 1
-        await self._close_if_retired()
-
-    async def retire(self) -> None:
-        self._retired = True
-        await self._close_if_retired()
-
-    async def _close_if_retired(self) -> None:
-        if not self._retired or self._holders:
-            return
-        self._retired = False
+    async def _close(self) -> None:
         await self.client.close()
 
 
@@ -447,8 +432,8 @@ class LiveEmbedding:
 
     **A retired client is closed when its last call ends**, not when the edit
     lands: a call in flight is a request somebody billed for, and closing its
-    pool cuts it off (`slife2.plugins.llm.server_common.ProviderClients` argues
-    the same for a stream).
+    pool cuts it off (`slife2.plugins.llm.server_common.Leased` is the one rule
+    for both backends).
     """
 
     def __init__(self) -> None:

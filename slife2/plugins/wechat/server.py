@@ -1114,6 +1114,34 @@ class Wechat:
 
     # ── The QR login ─────────────────────────────────────────────────────
 
+    @staticmethod
+    def _connected_login() -> dict[str, Any]:
+        """`wechat_login`'s answer when there is nothing to scan.
+
+        One shape for the three ways this call finds a login already in hand:
+        the saved one at the top, the scan that landed during the fetch, and
+        the scan that landed while a failed fetch was raising.
+        """
+        return {"state": "connected", "qr": "", "qr_url": "", "seconds_left": 0}
+
+    def _scan_landed_during_fetch(self, session: Session) -> bool:
+        """Whether the replaced watch confirmed its code while this login fetched.
+
+        **The replaced watch keeps polling through the fetch**, and a person
+        scanning the code already on their screen is exactly what that window is
+        for.  `_confirmed` adopts the token and finishes without an await between
+        its reads and its writes, so a logged-in client here is a login already
+        in hand — not a state this call may reset to `waiting` and replace with
+        a code nobody needs.  Cancelling the watch is then only tidying: it has
+        either finished or has no token to find.
+        """
+        client = session.client
+        if not (client.is_logged_in and not client.auth_failed):
+            return False
+        self._cancel(session.qr_task)
+        session.qr_task = None
+        return True
+
     def _remember_code(self, session: Session, content: str) -> str:
         """Draw *content* and keep it on the session, where a status can hand it out.
 
@@ -1150,7 +1178,7 @@ class Wechat:
         await self.ready(session)
         client = session.client
         if client.is_logged_in and not client.auth_failed:
-            return {"state": "connected", "qr": "", "qr_url": "", "seconds_left": 0}
+            return self._connected_login()
         if client.auth_failed:
             # A token the far end refused is not a session to build on; drop it
             # and let the scan replace it, rather than refusing the login.
@@ -1168,12 +1196,23 @@ class Wechat:
         try:
             data = await client.fetch_qrcode(ilink.BASE_URL)
         except Exception as exc:  # noqa: BLE001 — a failure the model reads
+            # **A failed fetch is not a failed login if the scan landed.**  The
+            # replaced watch may have confirmed while this call was out; the
+            # token is the answer then, and the fetch's failure is moot.
+            if self._scan_landed_during_fetch(session):
+                return self._connected_login()
             session.qr_state = ""
             logger.warning("wechat %s: QR fetch failed: %s", session.agent, exc)
             raise ToolError(
                 f"the login QR could not be fetched ({exc}); "
                 f"call `wechat_login` again in a moment."
             ) from exc
+        # **The fetch is the race window**, because the replaced watch polls
+        # through it.  A token here is the login this call was asked to start,
+        # already made; resetting the state to `waiting` below would hide it
+        # behind a code nobody has to scan.
+        if self._scan_landed_during_fetch(session):
+            return self._connected_login()
         qrcode = str(data.get("qrcode") or "")
         if not qrcode:
             session.qr_state = ""
