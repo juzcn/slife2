@@ -86,6 +86,14 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "no more and no less" in text
     assert "Decide in this order" in text
     assert "A follow-up" in text
+    # **The last message is the turn running, not a turn in hand.**  It has no
+    # turn id, so the follow-up names the turns in hand that carry its subject;
+    # the old wording told the model to name "the turns it continues", which
+    # read as naming the current turn.
+    assert "it has no turn id and is never named" in text
+    assert "turns in hand that carry the subject" in text
+    assert "never `clear` a follow-up" not in text
+    assert "A follow-up whose subject is no longer in hand" in text
     assert "A new subject" in text
     assert "empty object" in schema, "the no-change value is the field's"
     assert "keep" in schema
