@@ -345,6 +345,11 @@ mcp:
     headers:
       Authorization: Bearer ${GITEE_ACCESS_TOKEN}
     description: Gitee（码云）官方远程 MCP Server（https://api.gitee.com/mcp）— 仓库/Issue/PR/Release/通知/搜索，凭据经 GITEE_ACCESS_TOKEN 以 Bearer 注入。
+  arxiv-apify:
+    url: https://jakub-kopecky--arxiv-mcp-server.apify.actor/sse
+    headers:
+      Authorization: Bearer ${APIFY_TOKEN}
+    description: 'ArXiv MCP server (Apify actor jakub.kopecky/arxiv-mcp-server) — bridge to the public arXiv API: search by query/category/date range, download and read paper content, list locally stored papers. Auth: Apify token via APIFY_TOKEN. Standby actor, pay-per-usage, needs one-time permission approval in Apify console.'
 rest-api:
   # `spec:` expands into `uvx mcp-openapi-proxy`; every endpoint becomes a tool.
   # `command:` uses a proxy of your own instead. A large spec is worth
