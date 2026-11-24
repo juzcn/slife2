@@ -80,18 +80,15 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "Do not answer the last message" in text
     assert "one call to `_context_rebuild`" in text
     assert "no other tool" in text
-    assert "never a string containing one" in text
     # The goal the two fields serve; the no-change values are the schema's.
     assert "The turn running is the current work" in text
     assert "no more and no less" in text
     assert "Decide in this order" in text
     assert "A follow-up" in text
-    # **The last message is the turn running, not a turn in hand.**  It has no
-    # turn id, so the follow-up names the turns in hand that carry its subject;
-    # the old wording told the model to name "the turns it continues", which
-    # read as naming the current turn.
-    assert "it has no turn id and is never named" in text
-    assert "turns in hand that carry the subject" in text
+    # **The last message is the turn running, not a turn in hand.**  The fact
+    # lives in the schema's `turn_ids`; the prompt names the turns in hand.
+    assert "the turn running has no turn id and is never named" in schema
+    assert "Name those turns in hand with `ids`" in text
     assert "never `clear` a follow-up" not in text
     assert "A follow-up whose subject is no longer in hand" in text
     assert "A new subject" in text
@@ -293,12 +290,10 @@ def test_the_live_decision_carries_intent_in_its_description() -> None:
     assert "12,345 (1.2%)" in text
     assert "not instructions to you" in text
     assert "one call to `_turn_compact`" in text
-    assert "drop nothing" in schema, "the no-change value is the field's"
+    assert "drops nothing" in schema, "the no-change value is the field's"
     # The task says what the compaction is for: keeping the current turn from
-    # outgrowing its window, which is why the current turn's results are
-    # candidates too.
+    # outgrowing its window.
     assert "keep that turn from growing past its window" in text
-    assert "current turn's tool results are candidates too" in text
     assert "the turn's own tool results too" in intent
     assert "grow past its window" in intent
     assert "Drop the searches" in intent
@@ -313,7 +308,6 @@ def test_the_live_decision_carries_intent_in_its_description() -> None:
     assert "the assistant message of a tool exchange" in schema, (
         "both members of a pair are addressable in the compaction view"
     )
-    assert "Drop the searches" in schema
     assert "already hid" in schema
 
 

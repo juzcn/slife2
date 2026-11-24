@@ -80,29 +80,24 @@ DECISION_TEMPLATES = {
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
     "description": (
-        "The live messages this turn's later calls no longer need. `compact` "
-        "is required. The named messages leave this turn's view only; the "
-        "record keeps them."
+        "The live messages this turn's later calls no longer need. The named "
+        "messages leave this turn's view only; the record keeps them."
     ),
     "additionalProperties": False,
     "required": ["compact"],
     "properties": {
         "compact": {
             "description": (
-                "The live message ids to drop — any message carrying a "
-                '`[MESSAGE:{"id": …}]` annotation, historical or current. The '
-                "person's messages, tool results, and (in the compaction view) "
-                "the assistant message of a tool exchange carry one; the system "
-                "prompt and the turn's opening message do not. Name only ids an "
-                "annotation shows; never infer one, because an id the view does "
-                "not show is refused. Write the ids exactly as the annotation "
-                "shows them, as a JSON array of strings; [] means drop nothing. "
-                "**A tool exchange goes as a whole**: to drop one, name both "
-                "the assistant message that asked and every result of its "
-                "calls. Naming only part of it keeps that exchange in the view; "
-                "the rest of the selection still applies. Drop the searches and "
-                "reports the turn has already used. Naming an id this turn "
-                "already hid asks for the same view."
+                "The live message ids to drop: the ids the "
+                '`[MESSAGE:{"id": …}]` annotations show, historical or current. '
+                "Name only ids an annotation shows — never infer one, because "
+                "an id the view does not show is refused. A JSON array of "
+                "strings, never a string containing one; `[]` drops nothing. A "
+                "tool exchange goes as a whole: to drop one, name both the "
+                "assistant message of a tool exchange and every result of its "
+                "calls; a half-named exchange stays in the view and the rest of "
+                "the selection applies. An id this turn already hid asks for "
+                "the same view."
             ),
             "type": "array",
             "items": {"type": "string"},
@@ -119,36 +114,19 @@ LIVE_REPLY: dict[str, Any] = {
 #: optional `recall` made "keep" the one field a model had to fill, and a model
 #: asked to choose from the whole conversation took the shorthand instead of
 #: reading the turns.  The field's wording is what the model fills, which is why
-#: the relevance rule is here and not only in the instruction.
+#: the field rules are here; the decision order is the instruction's.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
     "description": (
-        "The context the turn running needs to continue the conversation. "
-        "`keep` decides the turns in hand: `ids` names the ones the current "
-        "work continues or needs, `clear` keeps none, and `keep` keeps all — "
-        "the answer only when every turn in hand serves the current work. "
-        "`recall` decides the earlier turns to add from the turn log: a query "
-        "condition, or {} for none. Both are answered every time; together they "
-        "are the context. When the last message starts a subject none of the "
-        "turns in hand is about, answer `clear` (or `ids` naming only the turns "
-        "it needs) and recall what it needs. The turn running is never part of "
-        "the selection — it has no turn id and is carried verbatim. A turn is "
-        'named by the id its `[TURN:{"turn_id": …}]` footnote carries.'
+        "The context the turn running needs: `keep` selects among the turns in "
+        "hand, and `recall` adds earlier turns from the turn log."
     ),
     "additionalProperties": False,
     "required": ["keep", "recall"],
     "properties": {
         "keep": {
             "type": "object",
-            "description": (
-                "What to do with the turns in hand. `ids` is the ordinary "
-                "answer: name the turns the current work continues or needs. "
-                "`clear` keeps none of them: the last message starts a subject "
-                "none of them is about, so only `recall` can serve it. `keep` "
-                "keeps all of them — only when every one serves the current "
-                "work; it is not the safe default, because a turn kept spends "
-                "the window on work this turn is not doing."
-            ),
+            "description": "What to do with the turns in hand.",
             "additionalProperties": False,
             "required": ["action"],
             "properties": {
@@ -156,16 +134,12 @@ RECALL_REPLY: dict[str, Any] = {
                     "type": "string",
                     "enum": ["ids", "clear", "keep"],
                     "description": (
-                        '"ids" keeps exactly `turn_ids` — the ones the current '
-                        'work continues or needs. "clear" keeps none of them: '
-                        "the last message starts a subject none of the turns in "
-                        "hand is about; say it only when the input stands on its "
-                        "own, because a turn dropped here cannot be recalled "
-                        "back — the recall searches only the turn log outside "
-                        'the turns in hand. "keep" keeps every turn in hand, and '
-                        "is right only when every one of them serves the current "
-                        "work; do not choose it because it looks safe — a turn "
-                        "kept spends the window on work this turn is not doing."
+                        '"ids" keeps exactly `turn_ids` — the turns the '
+                        'current work continues or needs. "clear" keeps '
+                        "none of them; a turn dropped here cannot be recalled "
+                        'back. "keep" keeps every turn in hand. It is not the '
+                        "safe default: a turn kept spends the window on work "
+                        "this turn is not doing."
                     ),
                 },
                 "turn_ids": {
@@ -175,13 +149,13 @@ RECALL_REPLY: dict[str, Any] = {
                         'The turns to keep when `action` is "ids"; read for '
                         "that action only. A non-empty JSON array of integers — "
                         "for example [14, 15] — never a string containing one "
-                        '(`"[14, 15]"` is refused). Name every turn the current '
-                        "work continues or needs; a turn of a finished subject "
-                        "the work has left behind is not named. A follow-up "
-                        "keeps the turn in hand it continues, even when the "
-                        "input brings a new word and does not name it. An id "
-                        "no longer in hand is ignored, and a keep-list naming "
-                        "none of the turns in hand keeps the context as it is."
+                        '(`"[14, 15]"` is refused). Name only turns in hand, by '
+                        'the id their `[TURN:{"turn_id": …}]` footnote carries; '
+                        "the turn running has no turn id and is never named. A "
+                        "follow-up keeps the turn in hand it continues, even "
+                        "when the input brings a new word. An id no longer in "
+                        "hand is ignored; a list naming none of the turns in "
+                        "hand keeps the context as it is."
                     ),
                 },
             },
@@ -191,21 +165,19 @@ RECALL_REPLY: dict[str, Any] = {
             "description": (
                 "The earlier turns the current work needs and that are not in "
                 "hand: questions (`sentences`), words (`query`), a period "
-                "(`since`/`until`), and which end survives (`anchor`). Answer it "
-                "every time; an empty object `{}` says nothing outside is "
-                "needed. The recall searches only the turn log outside the "
-                "turns in hand."
+                "(`since`/`until`), and which end survives (`anchor`). An empty "
+                "object `{}` says nothing outside is needed. The recall "
+                "searches only the turn log outside the turns in hand."
             ),
             "additionalProperties": False,
             "properties": {
                 "sentences": {
                     "description": (
                         "What the current work needs from the earlier turns, in "
-                        "your own words, one sentence per idea. Read by meaning. "
-                        "Several sentences are several questions: another "
-                        "question is another chance to be found, and cannot cost "
-                        "a turn an earlier one found. A follow-up whose subject "
-                        "is no longer in hand carries it into the sentence."
+                        "your own words, one sentence per idea. Read by meaning; "
+                        "several sentences are several questions. A follow-up "
+                        "whose subject is no longer in hand carries it into the "
+                        "sentence."
                     ),
                     "type": "array",
                     "items": {"type": "string"},
