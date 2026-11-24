@@ -253,22 +253,14 @@ TURN_COMPACT = "_turn_compact"
 
 #: The model-facing description of `_turn_compact`, and the decision call's
 #: tool description — **one text for both callers**, for `CONTEXT_REBUILD_TEXT`'s
-#: reason.  The field rules are the schema's (`slife2.libs.turn.context.LIVE_REPLY`).
+#: reason.  **The rules are the schema's** (`slife2.libs.turn.context.LIVE_REPLY`):
+#: the model's own call sees this description and the parameters, never the
+#: template.
 TURN_COMPACT_TEXT = (
-    "Drop what this turn no longer needs from the view it is running on — the "
-    "turn's own tool results too, because a turn that keeps every result can "
-    "grow past its window. Call it with `compact` — the live message ids to "
-    'drop, a JSON array of strings such as ["cur.1"], never a string '
-    "containing one; [] means drop nothing. Name only ids the "
-    '`[MESSAGE:{"id": …}]` annotations show; never invent one. A tool '
-    "exchange goes as a whole: to drop one, name both the assistant message "
-    "that asked and every result of its calls — a half-named exchange stays in "
-    "the view, and the rest of your selection still applies. Drop the searches "
-    "and reports the turn has already used. The answer says how many messages "
-    "left the view; the "
-    "turn's record and the conversation's live list keep every one, and the "
-    "next turn starts from the full conversation. `_context_rebuild` is the "
-    "tool that edits the durable context."
+    "Drop messages from the view the turn running's later calls are sent. The "
+    "answer says how many left the view; the record and the live list keep "
+    "every one, and the next turn starts from the full conversation. "
+    "`_context_rebuild` edits the durable context instead."
 )
 
 #: The durable counterpart of `_turn_compact`: the tool that edits the
@@ -283,25 +275,13 @@ CONTEXT_REBUILD = "_context_rebuild"
 #: The model-facing description of `_context_rebuild`, **one text for both
 #: callers**: the model in a turn (which may call it with a selection of its
 #: own) and the decision call (which is forced to fill the same selection).
-#: A call with no selection is refused in both cases; the field rules are the
-#: schema's (`slife2.libs.turn.context.RECALL_REPLY`).
+#: A call with no selection is refused in both cases; the task, the decision
+#: order and the field rules are the schema's (`slife2.libs.turn.context.RECALL_REPLY`).
 CONTEXT_REBUILD_TEXT = (
-    "Rebuild the conversation's live context — the turns this turn runs on. "
-    "Decide two things for the turn running's current work, and answer both "
-    "every time: `keep` says what to do with the turns in hand — `ids` names "
-    "the ones its work continues or needs, in `turn_ids`: a JSON array of "
-    "integers such as [14, 15], never a string containing one (the ordinary "
-    "answer); `clear` keeps none when the last message starts a subject none "
-    "of them is about; and `keep` keeps all only when every one of them "
-    "serves the work — and `recall` names the earlier turns to add from the "
-    "turn log by meaning, by words, or by a period. Together they are the "
-    "context. A turn kept spends "
-    "the window: a turn of a finished subject is not kept for a new one, and a "
-    "follow-up keeps the turns in hand it continues. The turn running has no "
-    "turn id and is carried verbatim. A turn is named by the id its "
-    '`[TURN:{"turn_id": …}]` footnote carries. The answer reports `kept K/M`, '
-    "`recalled R/O` and the context's `token usage`; a selection that cannot "
-    "be applied is the tool's error, with its reason."
+    "Rebuild the conversation's live context — the historical turns this turn "
+    "runs on. The answer reports `kept K/M`, `recalled R/O` and the context's "
+    "`token usage`; a selection that cannot be applied is the tool's error, "
+    "with its reason."
 )
 
 #: **The tools that act on a live turn's own message list.**  They are the four

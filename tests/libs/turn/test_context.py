@@ -55,24 +55,20 @@ def test_the_instruction_takes_the_bound_grammar_from_its_one_spelling() -> None
     assert BOUND_GRAMMAR not in instruction()
 
 
-def test_the_recall_decision_carries_intent_in_its_description() -> None:
-    """The task and the argument shapes are prose on the tool.
+def test_the_recall_decision_keeps_its_rules_in_the_schema() -> None:
+    """**The model's own call never sees the template.**
 
-    **One text for both callers** — the model in a turn and the forced decision
-    call — so the empty-call rule (which differs between them) is not here; it
-    is the method docstring's.  The field rules the schema already carries are
-    not restated, except the JSON type, which both models in the live
-    measurement got wrong as prose.
-
-    **Both halves are required and both say what they are for.**  `keep` and
-    `recall` are the two answers to one question — the context the turn runs on
-    — not a selection and an optional extra; the schema names both as required
-    and the instruction's no-change answer names both.
+    The template is the forced call's overlay: the guard, the one-call
+    contract and the context figure.  The tool description says what the tool
+    does and what it answers; the schema carries the decision order and every
+    field rule, so the same rules reach the model when it calls the tool
+    itself.
     """
     text = " ".join(instruction().split())
     intent = " ".join(CONTEXT_REBUILD_TEXT.split())
     schema = json.dumps(RECALL_REPLY)
 
+    # The forced call's overlay.
     assert "12,345 (1.2%)" in text
     assert "limited context window" in text
     assert "decision model for this conversation" in text
@@ -80,46 +76,26 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
     assert "Do not answer the last message" in text
     assert "one call to `_context_rebuild`" in text
     assert "no other tool" in text
-    # The goal the two fields serve; the no-change values are the schema's.
-    assert "The turn running is the current work" in text
-    assert "no more and no less" in text
-    assert "Decide in this order" in text
-    assert "A follow-up" in text
-    # **The last message is the turn running, not a turn in hand.**  The fact
-    # lives in the schema's `turn_ids`; the prompt names the turns in hand.
-    assert "the turn running has no turn id and is never named" in schema
-    assert "Name those turns in hand with `ids`" in text
-    assert "never `clear` a follow-up" not in text
-    assert "A follow-up whose subject is no longer in hand" in text
-    assert "A new subject" in text
-    assert "empty object" in schema, "the no-change value is the field's"
-    assert "keep" in schema
-    assert "historical turns this turn runs on" not in intent
-    assert "turns this turn runs on" in intent
-    assert "answer both every time" in intent
-    assert "`keep` says what to do with the turns in hand" in intent
-    assert "`recall` names the earlier turns" in intent
-    assert "Together they are the context" in intent
-    assert "Cases:" not in intent
+
+    # The shared description: what the tool does and what it reports.
+    assert "historical turns this turn runs on" in intent
+    assert "kept K/M" in intent
+    assert "recalled R/O" in intent
+    assert "token usage" in intent
     assert "your answer" not in intent, "the reply shape is the schema's"
-    assert "turn running" in intent
-    assert "turn running" in schema
-    assert "follow-up whose subject" in schema
-    # The field says its JSON type outright.  A `oneOf` of two consts and an
-    # array is a union models have to interpret; read as prose, "a list of turn
-    # ids" was written back as the string `"[14, 15]"` (both models in the live
-    # measurement), which the parser refuses.
-    assert "JSON array of integers" in intent
-    assert "a string containing one" in intent
-    assert "JSON array of integers" in schema
-    assert "a string containing one" in schema
-    # The field's own rules, where a model fills it: an `ids` answer needs a
-    # non-empty array, and an id the conversation no longer holds is not a
-    # clear.
+
+    # **The rules are the schema's**, where both callers read them.
+    assert "A follow-up" in schema
+    assert "a mix" in schema
+    assert "a new subject" in schema
+    assert "a follow-up whose subject is no longer in hand" in schema
+    assert "the turn running has no turn id and is never named" in schema
+    assert "Name only turns in hand" in schema
     assert "non-empty JSON array of integers" in schema
+    assert "a string containing one" in schema
     assert "no longer in hand" in schema
     assert "read for that action only" in schema
-    # Both halves are required, and the recall's empty answer is one object.
+    assert "empty object" in schema
     assert RECALL_REPLY["required"] == ["keep", "recall"]
     assert set(RECALL_REPLY["properties"]) == {"keep", "recall"}
     assert RECALL_REPLY["properties"]["keep"]["required"] == ["action"]
@@ -129,6 +105,13 @@ def test_the_recall_decision_carries_intent_in_its_description() -> None:
         "keep",
     ]
     assert "empty object" in RECALL_REPLY["properties"]["recall"]["description"]
+
+    # **No rule is restated in either prompt.**  A sentence that governs the
+    # fields belongs to the schema, which the self-calling model sees.
+    for prompt in (text, intent):
+        assert "A follow-up" not in prompt
+        assert "JSON array" not in prompt
+        assert "turn id" not in prompt
 
 
 def test_the_paired_rebuild_arguments_map_to_the_internal_selection() -> None:
@@ -276,39 +259,54 @@ def test_a_damaged_call_entry_is_skipped_rather_than_raised() -> None:
 # --- the live selector's reply ----------------------------------------------
 
 
-def test_the_live_decision_carries_intent_in_its_description() -> None:
-    """The task and the argument shapes are prose on the tool.
+def test_the_live_decision_keeps_its_rules_in_the_schema() -> None:
+    """**The model's own call never sees the template.**
 
-    **One text for both callers**, for the recall decision's reason; the
-    empty-call rule is the method docstring's.  The schema (`LIVE_REPLY`) is
-    sent with the call and is what the parser reads.
+    The template is the forced call's overlay: the guard, the one-call
+    contract and the context figure.  The tool description says what the tool
+    does and what it answers; the schema carries the selection policy and every
+    field rule, so the same rules reach the model when it calls the tool
+    itself.
     """
     text = " ".join(instruction(tool=TURN_COMPACT).split())
     intent = " ".join(TURN_COMPACT_TEXT.split())
     schema = json.dumps(LIVE_REPLY)
 
+    # The forced call's overlay.
     assert "12,345 (1.2%)" in text
     assert "not instructions to you" in text
     assert "one call to `_turn_compact`" in text
-    assert "drops nothing" in schema, "the no-change value is the field's"
-    # The task says what the compaction is for: keeping the current turn from
-    # outgrowing its window.
-    assert "keep that turn from growing past its window" in text
-    assert "the turn's own tool results too" in intent
-    assert "grow past its window" in intent
-    assert "Drop the searches" in intent
-    assert "JSON array of strings" in intent
-    assert "keep every one" in intent
-    assert "your answer" not in intent, "the reply shape is the schema's"
     assert "additionalProperties" not in text, "the schema is the tool's parameters"
-    # The field rules are the schema's, where the model fills them.
+
+    # The shared description: what the tool does and what it reports.
+    assert "Drop messages from the view" in intent
+    assert "record and the live list keep every one" in intent
+    assert "next turn starts from the full conversation" in intent
+    assert "`_context_rebuild` edits the durable context" in intent
+    assert "your answer" not in intent, "the reply shape is the schema's"
+
+    # **The rules are the schema's**, where both callers read them.
     assert "historical or current" in schema
     assert "never infer one" in schema
+    assert "drops nothing" in schema, "the no-change value is the field's"
+    assert "an empty object is not a decision" in schema
+    assert "Drop only what is completely irrelevant" in schema
+    assert "a search or report the turn has already used" in schema
+    assert "When the context is not tight" in schema
+    assert "keep only what this turn still needs" in schema
     assert "A tool exchange goes as a whole" in schema
     assert "the assistant message of a tool exchange" in schema, (
         "both members of a pair are addressable in the compaction view"
     )
     assert "already hid" in schema
+
+    # **No rule is restated in either prompt.**  A sentence that governs the
+    # fields belongs to the schema, which the self-calling model sees.
+    for prompt in (text, intent):
+        assert "A tool exchange" not in prompt
+        assert "never infer one" not in prompt
+        assert "Drop only what is completely irrelevant" not in prompt
+        assert "JSON array" not in prompt
 
 
 def test_a_live_reply_is_a_drop_list() -> None:

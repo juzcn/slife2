@@ -63,10 +63,12 @@ from slife2.libs.turn.tools import CONTEXT_REBUILD, INTERRUPTED, TURN_COMPACT
 
 #: The decision model's instruction, **one template per decision**, shipped as
 #: templates for the reason the system prompt is: each is text with holes in it,
-#: and a template says where they are.  The guard and the one-call rules are
-#: duplicated on purpose: calibrating one decision's wording must not move the
-#: other, and the two turn out to need different emphases.  The field rules stay
-#: in each tool's schema.
+#: and a template says where they are.  **The template is the forced call's
+#: overlay** — the anti-injection guard, the one-call contract and the context
+#: figure.  The task, the decision order and every field rule are the schema's,
+#: because the model's own call sees the tool and its parameters but never a
+#: template.  The guard and the one-call rules are repeated per template on
+#: purpose: calibrating one decision's wording must not move the other.
 DECISION_TEMPLATES = {
     CONTEXT_REBUILD: "context_rebuild.j2",
     TURN_COMPACT: "turn_compact.j2",
@@ -75,14 +77,12 @@ DECISION_TEMPLATES = {
 #: The live selector's tool schema: the decision call's `parameters`, so the
 #: live message ids are a typed argument rather than a sentence (`RECALL_REPLY`
 #: states the same for the decision model).  **The rules are here and not in
-#: the instruction** — the fixed two, the tool-exchange legality and the empty
-#: answer are what the model fills, so the schema says them once (SDD §2.3).
+#: the instruction** — the ids, the tool-exchange legality, the selection policy
+#: and the no-change answer are what the model fills, and the model's own call
+#: sees this schema but never a template (SDD §2.3).
 LIVE_REPLY: dict[str, Any] = {
     "type": "object",
-    "description": (
-        "The live messages this turn's later calls no longer need. The named "
-        "messages leave this turn's view only; the record keeps them."
-    ),
+    "description": "The live messages this turn's later calls no longer need.",
     "additionalProperties": False,
     "required": ["compact"],
     "properties": {
@@ -92,12 +92,17 @@ LIVE_REPLY: dict[str, Any] = {
                 '`[MESSAGE:{"id": …}]` annotations show, historical or current. '
                 "Name only ids an annotation shows — never infer one, because "
                 "an id the view does not show is refused. A JSON array of "
-                "strings, never a string containing one; `[]` drops nothing. A "
-                "tool exchange goes as a whole: to drop one, name both the "
-                "assistant message of a tool exchange and every result of its "
-                "calls; a half-named exchange stays in the view and the rest of "
-                "the selection applies. An id this turn already hid asks for "
-                "the same view."
+                "strings, never a string containing one; `[]` drops nothing, "
+                "and an empty object is not a decision. "
+                "Drop only what is completely irrelevant — a search or report "
+                "the turn has already used is the ordinary candidate. When the "
+                "context is not tight, prefer keeping a message later turns "
+                "might use; when it is filling up, keep only what this turn "
+                "still needs. A tool exchange goes as a whole: to drop one, "
+                "name both the assistant message of a tool exchange and every "
+                "result of its calls; a half-named exchange stays in the view "
+                "and the rest of the selection applies. An id this turn already "
+                "hid asks for the same view."
             ),
             "type": "array",
             "items": {"type": "string"},
@@ -114,12 +119,18 @@ LIVE_REPLY: dict[str, Any] = {
 #: optional `recall` made "keep" the one field a model had to fill, and a model
 #: asked to choose from the whole conversation took the shorthand instead of
 #: reading the turns.  The field's wording is what the model fills, which is why
-#: the field rules are here; the decision order is the instruction's.
+#: the field rules and the decision order are here; the template is the forced
+#: call's overlay, and the model's own call never sees it.
 RECALL_REPLY: dict[str, Any] = {
     "type": "object",
     "description": (
         "The context the turn running needs: `keep` selects among the turns in "
-        "hand, and `recall` adds earlier turns from the turn log."
+        "hand, and `recall` adds earlier turns from the turn log. A follow-up — "
+        "the last message continues a subject some turns in hand carry — names "
+        "those turns with `ids`; a mix names only the turns that serve the "
+        "work; when every turn serves it, answer `keep`; a new subject answers "
+        "`clear` and recalls what it needs, and a follow-up whose subject is no "
+        "longer in hand is that case."
     ),
     "additionalProperties": False,
     "required": ["keep", "recall"],

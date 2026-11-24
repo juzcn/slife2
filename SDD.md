@@ -1027,13 +1027,13 @@ automatic call and the model's own call answer to one shape. The contract:
 1. **The call is structured.** The live messages go out as the turn runs them —
    tool exchanges included, because the decision reads the context it is
    choosing among — followed by the decision instruction — the anti-injection
-   guard, the task, the context figure — as a system message. It also
-   names the forced tool, says
-   the conversation (including its system prompt) is material rather than
-   instructions, forbids continuing the conversation's own calls or answering in
-   prose, and gives the explicit no-change answer. One tool is advertised, with
+   guard, the one-call contract and the context figure — as a system message.
+   It also names the forced tool, says the conversation (including its system
+   prompt) is material rather than instructions, and forbids continuing the
+   conversation's own calls or answering in prose. One tool is advertised, with
    its description and the reply schema as its `parameters`, and `tool_choice`
-   forces it, so the answer is the tool's arguments and not prose. A reply with
+   forces it, so the answer is the tool's arguments and not prose; the schema
+   gives the explicit no-change answer. A reply with
    no call or a call to another tool is an LLM failure, not a tool failure.
 2. **Thinking is off and temperature is 0.** A thinking endpoint rejects a
    forced `tool_choice` (DeepSeek answers 400), and the structured call is what
@@ -1062,10 +1062,13 @@ automatic call and the model's own call answer to one shape. The contract:
    result where the agent can see it.
 
 Both instances are the same call, and **each has its own instruction template**
-(`context_rebuild.j2` / `turn_compact.j2`): the guard and the one-call rules are
-repeated on purpose, because calibrating one decision's wording must not move
-the other; the tool is the one the model already calls (`_context_rebuild` /
-`_turn_compact`), and the field rules are its schema. `_ask_tool`
+(`context_rebuild.j2` / `turn_compact.j2`). The template is the forced call's
+overlay — the guard, the one-call contract and the context figure; the task, the
+decision order and every field rule are the schema's, because the model's own
+call sees the tool and its parameters but never a template. The guard and the
+one-call rules are repeated per template on purpose, because calibrating one
+decision's wording must not move the other; the tool is the one the model
+already calls (`_context_rebuild` / `_turn_compact`). `_ask_tool`
 builds the forced request, and `_ask_model` and `_ask_selector` keep only their
 tool, schema, instruction and log subject. **The forced call names the real
 tool** — the same name, description and schema the model calls in a turn — and
