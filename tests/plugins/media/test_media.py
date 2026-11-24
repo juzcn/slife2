@@ -1103,6 +1103,76 @@ async def test_a_provider_with_no_key_sends_no_authorization_header() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_poll_cuts_a_hung_request_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The caller's `timeout` bounds each request, not only the gaps.**
+
+    The clock was checked at the top of the loop and the request carried its own
+    180 s transport timeout, so `timeout: 5` could take minutes when one GET
+    hung near the boundary.  The sleep was not clipped either, so the deadline
+    was overshot by a whole poll period.
+    """
+    import slife2.helpers.timeouts as _T
+
+    monkeypatch.setattr(_T.timeouts.pacing, "media_poll", 0.01)
+    adapter = dashscope()
+
+    async def slow_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        await asyncio.sleep(0.2)
+        return {"output": {"task_status": "RUNNING"}}
+
+    monkeypatch.setattr(adapter, "_request", slow_request)
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(MediaAdapterError, match="did not finish within"):
+        await adapter._poll("t-1", 0.05)
+    assert asyncio.get_running_loop().time() - started < 0.15
+
+
+@pytest.mark.asyncio
+async def test_a_poll_clips_its_sleep_to_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = dashscope()
+    slept: list[float] = []
+
+    async def running_request(
+        method: str, url: str, *, extra_headers=None, json_body=None
+    ):
+        return {"output": {"task_status": "RUNNING"}}
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    monkeypatch.setattr(adapter, "_request", running_request)
+    monkeypatch.setattr(adapters.asyncio, "sleep", fake_sleep)
+    with pytest.raises(MediaAdapterError, match="did not finish within"):
+        await adapter._poll("t-1", 0.05)
+
+    assert slept and max(slept) <= 0.05, (
+        "the pause ran past the caller's deadline by a whole poll period"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_submit_answer_whose_output_is_not_an_object_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`_json_object` only guarantees the top level; a nested value of the
+    wrong shape reached `.get` and escaped as `AttributeError`."""
+    adapter = dashscope()
+
+    async def bad_request(method: str, url: str, *, extra_headers=None, json_body=None):
+        return {"output": "oops"}
+
+    monkeypatch.setattr(adapter, "_request", bad_request)
+    with pytest.raises(MediaAdapterError, match="without an id"):
+        await adapter._submit("m", {}, {})
+
+
+@pytest.mark.asyncio
 async def test_a_video_that_outruns_its_timeout_names_the_job_it_left_running(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

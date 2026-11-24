@@ -83,6 +83,7 @@ from slife2.plugins.agent_task.server import (
     CHANNEL,
     MARKER_PREFIX,
     build_server,
+    task_id_for,
 )
 from slife2.plugins.tui import server as control
 
@@ -602,6 +603,27 @@ async def test_the_task_runs_as_the_agent_on_the_rendered_template(
     }
 
 
+async def test_a_task_of_an_unattended_agent_carries_the_unattended_prompt(
+    hub: Client, store: Store, window: Window
+) -> None:
+    """**The maker's head is `opening_messages`'s, claim and all.**
+
+    The task rendered the agent's prompt by hand, so it lacked the `headless`
+    paragraph an ordinary turn of the same conversation carries — a task is
+    never more attended than the agent it stands in for.
+    """
+    from slife2.libs.host.runtime import AgentClaim, write_claim
+
+    write_claim(AgentClaim.now(AGENT, headless=True))
+    built = build(text_turn("three tries"), hub=hub, context=store, window=window)
+    await start(built)
+    await settle(built)
+
+    system = built.messages()[0]
+    assert system.role == "system"
+    assert "Nobody is watching this conversation" in str(system.content)
+
+
 async def test_the_context_is_rebuilt_exactly_once(
     hub: Client, store: Store, window: Window
 ) -> None:
@@ -923,6 +945,7 @@ async def test_a_cancelled_task_holds_no_handle(
 
     assert made[0].handle is None, "a cancelled task still holds its coroutine"
     assert made[0].text == ""
+    assert made[0].tap is None, "a finished task still holds its whole event stream"
 
 
 async def test_the_cap_refuses_the_task_past_it(hub: Client, store: Store) -> None:
@@ -1214,6 +1237,7 @@ async def test_a_name_nobody_knows_answers_unknown(hub: Client, store: Store) ->
         asked = await ask(client, AGENT_TASK_STATUS, {"name": "nothing"})
     assert stopped["status"] == "unknown"
     assert asked["status"] == "unknown"
+    assert stopped["task_id"] == asked["task_id"] == task_id_for("nothing")
 
 
 # ── the way back ─────────────────────────────────────────────────────────────

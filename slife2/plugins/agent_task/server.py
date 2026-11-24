@@ -155,11 +155,7 @@ from slife2.libs.turn.context import (
 from slife2.libs.turn.events import TurnEvent, TurnObserver
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message
-from slife2.libs.turn.prompt import (
-    SUBAGENT_PROMPT,
-    render_instruction,
-    render_system_prompt,
-)
+from slife2.libs.turn.prompt import opening_messages, render_instruction
 from slife2.libs.turn.runtime import (
     ModelRef,
     TurnRuntime,
@@ -442,6 +438,18 @@ class TaskTurn:
     live: AgentLoop | None = None
 
 
+def task_id_for(name: str) -> str:
+    """The id a task's name derives, `agent-task:<name>`.
+
+    **One spelling for the held and the unknown answer.**  An `AgentTask`'s
+    report and `unknown_report` are one shape by design; they were two
+    `f"{CHANNEL}:…"` literals, so a format change could make a name the
+    registry does not hold answer with an id different from the one the same
+    name would have had.
+    """
+    return f"{CHANNEL}:{name}"
+
+
 def unknown_report(name: str) -> dict[str, Any]:
     """The report for a name this process does not hold.
 
@@ -453,7 +461,7 @@ def unknown_report(name: str) -> dict[str, Any]:
     held is still named the way the answer would have named it.
     """
     return {
-        "task_id": f"{CHANNEL}:{name}",
+        "task_id": task_id_for(name),
         "name": name,
         "status": UNKNOWN,
         "started_at": "",
@@ -471,7 +479,7 @@ def channel_for(task: AgentTask) -> str:
     footnote hands the model (SDD §5.5) — so a result says which task it came from
     outside the marker as well as inside it.
     """
-    return f"{CHANNEL}:{task.name}"
+    return task_id_for(task.name)
 
 
 def marker(task: AgentTask, *, status: str = "") -> str:
@@ -750,21 +758,14 @@ def build_server(
             record at all.
             """
             if arguments.get("compact") is None:
-                raise ToolFailed(
-                    "a compaction needs a selection: pass `compact` (the live "
-                    "message ids to drop, or [] for none). An empty call is not "
-                    "a decision."
-                )
+                raise ToolFailed(compact.NO_SELECTION)
             if isinstance(arguments.get("compact"), str):
                 # **The automatic pass stops, exactly as it does on a
                 # keep-all**: an unreadable selection is a decision about the
                 # whole view, and re-asking it at every boundary would pay for
                 # the same failure.
                 turn.compact_hold = True
-                raise ToolFailed(
-                    "the compaction selection could not be read: "
-                    + str(arguments["compact"])
-                )
+                raise ToolFailed(compact.unreadable_selection(arguments["compact"]))
             result = await runtime.compact_turn(
                 task.identity,
                 turn.messages,
@@ -935,18 +936,13 @@ def build_server(
         spec = subagent_spec(task.agent, task.subagent, strict=True)
         name, provider, settings = current.resolve(spec.model)
         model = ModelRef(f"{name}/{settings.model}", name, provider.api, settings.model)
-        if task.subagent:
-            system = render_system_prompt(
-                SUBAGENT_PROMPT,
-                agent_name=task.subagent,
-                agent=task.agent,
-                role=spec.role,
-            )
-        else:
-            system = render_system_prompt(
-                current.agent.system_prompt, agent_name=task.agent
-            )
-        head = [Message(role="system", content=system)]
+        # **The maker's own head, built by the one builder** — including the
+        # claim's `headless` paragraph and the empty-prompt case.  Rendering it
+        # here by hand diverged from `opening_messages` on both: a task of an
+        # unattended agent was told it had a person, and a template that
+        # rendered empty produced a `content: ""` system message where an
+        # ordinary turn sends none.
+        head = opening_messages(task.agent, task.subagent, current, spec)
         opening = render_instruction(
             OPENING_TEMPLATE, name=task.name, description=task.description
         )
@@ -1250,6 +1246,13 @@ def build_server(
             # the contract saying the same thing.
             retire(task)
             task.handle = None
+            # **The tap goes with the handle.**  Dropping it from the hub is
+            # not enough: this task holds the object, and `Tap.events` keeps
+            # every `TextDelta`, every reasoning delta and every tool preview
+            # the turn produced.  The answer is the part worth megabytes, but
+            # the event stream can be larger still, and 32 retired tasks
+            # outlive it until the cap forgets them.
+            task.tap = None
             # **The answer is let go of here, and this line is the design rather
             # than tidiness.**  A finished task's message list, its loop and its
             # tool registry are locals of `run_loop` and die with it; what

@@ -195,6 +195,29 @@ def test_a_required_key_is_refused_with_its_own_sentence() -> None:
     assert str(refused.value) == "media.providers.p: needs `api` — the wire adapter"
 
 
+def test_a_required_key_written_empty_is_the_same_absence() -> None:
+    """**A key present but empty is not a value.**  `read_text` answers `None`
+    for `api: ""` and `api:` — both are how a person clears a key — and the
+    required sentence is the one this loader owes them.
+
+    Leaving it out of the dict made the entry constructors splat an incomplete
+    mapping: `TypeError: ProviderSettings.__init__() missing 'api'`, a
+    traceback past every `ConfigError` handler rather than the section's own
+    refusal.
+    """
+    fields = (Field("api", read_text, required="needs `api`"),)
+    for raw in ({}, None, {"api": ""}, {"api": "   "}, {"api": None}):
+        with pytest.raises(SectionError, match="needs `api`"):
+            read_section(raw, "providers.p", fields)
+
+
+def test_a_required_key_that_was_read_is_accepted() -> None:
+    fields = (Field("api", read_text, required="needs `api`"),)
+    assert read_section({"api": "openai-completions"}, "p", fields) == {
+        "api": "openai-completions"
+    }
+
+
 def test_keys_are_read_in_registry_order_not_the_files() -> None:
     """Which refusal a file with two mistakes gets is the registry's answer."""
     with pytest.raises(SectionError) as refused:

@@ -314,9 +314,14 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     would be whichever home this process happened to be started in.
     """
 
-    def entry_of(name: str) -> CliConfig:
-        """One entry's canonical object, or this family's miss."""
-        raw = configfile.read_section(SECTION).get(name)
+    async def entry_of(name: str) -> CliConfig:
+        """One entry's canonical object, or this family's miss.
+
+        The file read hops, for `cli_set`'s reason: a full YAML parse on the one
+        loop this plugin serves every conversation from stalls turns that have
+        nothing to do with the command list.
+        """
+        raw = (await off_loop(configfile.read_section, SECTION)).get(name)
         if not isinstance(raw, dict):
             raise ToolError(
                 f"'{name}' is not recorded under `cli:` — `cli_set` records "
@@ -346,7 +351,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             and `total`, `limit` and `offset`, so
             `offset + len(commands) < total` says whether more remain.
         """
-        written = configfile.read_section(SECTION)
+        written = await off_loop(configfile.read_section, SECTION)
         rows = [_describe(name, raw) for name, raw in written.items()]
         return listed(rows, "commands", limit, offset, cap=LIST_PAGE)
 
@@ -362,7 +367,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         Args:
             name: The key it is recorded under.
         """
-        config = entry_of(name)
+        config = await entry_of(name)
         answer: dict[str, Any] = {
             "name": name,
             "config": config.model_dump(),
@@ -416,13 +421,13 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         Returns:
             `name` and `removed`, which a success makes true.
         """
-        if name not in configfile.read_section(SECTION):
+        if name not in await off_loop(configfile.read_section, SECTION):
             # **Refused by raising, for `cli_set`'s reason**: returned as
             # ordinary text this arrives with `ok` true and reads as a removal
             # that happened.  Nothing was written, so the call is a failure the
             # caller can see.
             raise ToolError(f"'{name}' is not recorded under `cli:` — see `cli_list`.")
-        configfile.remove(SECTION, name)
+        await off_loop(configfile.remove, SECTION, name)
         homes.current().forgotten(name)
         logger.info("cli_removed name=%s", name)
         return {"name": name, "removed": True}
@@ -440,7 +445,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             `name`, `enabled`, and `state` — `on` or `off` — which is the same
             word the listing's rows carry.
         """
-        if name not in configfile.read_section(SECTION):
+        if name not in await off_loop(configfile.read_section, SECTION):
             # The same refusal as `cli_remove`'s, and for the same reason: a
             # switch answered as ordinary text arrives with `ok` true and reads
             # as one that was set.
@@ -448,7 +453,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
                 f"'{name}' is not recorded under `cli:` — `cli_set` records one, "
                 f"`cli_list` shows what is there."
             )
-        configfile.set_enabled(SECTION, name, enabled)
+        await off_loop(configfile.set_enabled, SECTION, name, enabled)
         # No `make`: an entry this process is not holding is one another instance
         # wrote, and it is the file's answer that counts until the next start.
         homes.current().switched(name, enabled)

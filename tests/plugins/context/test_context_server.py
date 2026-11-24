@@ -731,6 +731,42 @@ async def test_a_summary_makes_an_old_turn_findable_by_its_words() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_annotation_keeps_the_half_it_did_not_name() -> None:
+    """`None` is "not named"; `""` is "clear this field".
+
+    The tool coerced an omitted argument to `""`, and the store reads `""` as
+    an explicit clear — so a tags-only call erased the summary (and vice
+    versa), and the word the summary was findable by went out of the keyword
+    index with it.
+    """
+    meta = conversation_meta("jack")
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("q0", "a0"))
+        await client.call_tool(
+            "turn_summarize",
+            {"turn_id": 1, "summary": "the quarterly forecast", "tags": "planning"},
+            meta=meta,
+        )
+        await client.call_tool(
+            "turn_summarize", {"turn_id": 1, "tags": "budget"}, meta=meta
+        )
+        tags_only = await client.call_tool("turn_read", {"turn_id": 1}, meta=meta)
+        await client.call_tool(
+            "turn_summarize", {"turn_id": 1, "summary": "the annual plan"}, meta=meta
+        )
+        summary_only = await client.call_tool("turn_read", {"turn_id": 1}, meta=meta)
+
+    assert (tags_only.data["summary"], tags_only.data["tags"]) == (
+        "the quarterly forecast",
+        "budget",
+    )
+    assert (summary_only.data["summary"], summary_only.data["tags"]) == (
+        "the annual plan",
+        "budget",
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_current_turns_annotation_is_captured_not_written() -> None:
     """No id means the turn being run; it has no row yet to write."""
 
@@ -1160,6 +1196,28 @@ async def test_a_kept_context_over_the_budget_is_fitted_and_published() -> None:
     assert (answer.data["kept"], answer.data["in_hand"]) == (1, 2)
     assert answer.data["recalled"] == 0
     assert restored.data["turn_ids"] == [ids[1]], "the fitted list is what persists"
+
+
+@pytest.mark.asyncio
+async def test_a_keep_list_is_fitted_in_time_order_not_the_models_array_order() -> None:
+    """**The fit's axis is time, whatever order the JSON array came in.**  A
+    keep-list preserved the model's order and `fit_recent` walks from the end
+    assuming time order, so a list written newest-first cut the newest turn and
+    kept the oldest — the opposite of what the ceiling is for."""
+    config = _config_with_window(1000)
+    # The store is fresh for this test, so the two seeds are turns 1 and 2; the
+    # decision names them newest-first.
+    reply = '{"keep": {"action": "ids", "turn_ids": [2, 1]}, "recall": {}}'
+
+    async with Client(
+        build_server(config, embedder=EMBEDDER, ask=Replies(reply))
+    ) as client:
+        ids = await _seed(client, "jack", ("word " * 1200, "1"), ("trump " * 10, "2"))
+        answer = await _rebuild(client, "", turn_ids=ids, messages=[SYSTEM])
+
+    assert ids == [1, 2]
+    assert answer.data["fitted"] == 1
+    assert answer.data["turn_ids"] == [ids[1]], "the newest turn survives the cut"
 
 
 @pytest.mark.asyncio

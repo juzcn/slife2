@@ -328,8 +328,23 @@ async def test_a_call_that_does_not_say_whose_it_is_gets_nowhere() -> None:
     read as a success.
     """
     async with Client(served()) as client:
-        with pytest.raises(ToolError, match="did not say which conversation"):
-            await ask(client, "wechat_check_status", agent="")
+        # **All four tools, one guard.**  They each carried their own copy of
+        # the read-and-raise, so one could answer differently from the rest.
+        for tool, arguments in (
+            ("wechat_login", {}),
+            ("wechat_check_status", {}),
+            (
+                "wechat_send_message",
+                {
+                    "peer_wechat_id": "peer-1",
+                    "context_token": "ctx-1",
+                    "text": "hi",
+                },
+            ),
+            ("wechat_logout", {}),
+        ):
+            with pytest.raises(ToolError, match="did not say which conversation"):
+                await ask(client, tool, agent="", **arguments)
         named = await ask(client, "wechat_check_status", agent="jack")
 
     assert named["connected"] is False, "and no login was ever scanned"

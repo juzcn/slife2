@@ -44,6 +44,8 @@ from openai.types.responses import (
     ResponseReasoningSummaryTextDeltaEvent,
     ResponseReasoningSummaryTextDoneEvent,
     ResponseReasoningTextDoneEvent,
+    ResponseRefusalDeltaEvent,
+    ResponseRefusalDoneEvent,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
 )
@@ -116,6 +118,23 @@ def test_openai_text_delta() -> None:
         choices=[{"index": 0, "delta": {"content": "hi"}, "finish_reason": None}]
     )
     assert openai_translate(event) == [Chunk(text="hi")]
+
+
+def test_openai_a_refusal_is_the_answer() -> None:
+    """**The protocol's refusal channel is output, not an absence.**  Reading
+    only `content` made a refusal `text=""`, and the loop then failed the turn
+    saying the provider answered with nothing — the model's only words
+    discarded, on the one path where it did answer."""
+    event = _oa(
+        choices=[
+            {
+                "index": 0,
+                "delta": {"refusal": "I cannot help with that."},
+                "finish_reason": None,
+            }
+        ]
+    )
+    assert openai_translate(event) == [Chunk(text="I cannot help with that.")]
 
 
 def test_openai_tool_call_fragments_carry_index_id_and_name() -> None:
@@ -804,6 +823,55 @@ def test_responses_text_delta() -> None:
     assert responses_translate(_text_delta("hi")) == [Chunk(text="hi")]
 
 
+def _refusal_delta(text: str) -> ResponseRefusalDeltaEvent:
+    return ResponseRefusalDeltaEvent.model_validate(
+        {
+            "type": "response.refusal.delta",
+            "content_index": 0,
+            "delta": text,
+            "item_id": "i",
+            "output_index": 0,
+            "sequence_number": 1,
+        }
+    )
+
+
+def _refusal_done(text: str) -> ResponseRefusalDoneEvent:
+    return ResponseRefusalDoneEvent.model_validate(
+        {
+            "type": "response.refusal.done",
+            "content_index": 0,
+            "item_id": "i",
+            "output_index": 0,
+            "refusal": text,
+            "sequence_number": 2,
+        }
+    )
+
+
+def test_responses_a_refusal_is_the_answer() -> None:
+    assert responses_translate(_refusal_delta("I cannot.")) == [Chunk(text="I cannot.")]
+    assert responses_translate(_refusal_done("I cannot.")) == [Chunk(text="I cannot.")]
+    assert responses_translate(_refusal_done("I cannot."), streamed={0}) == []
+
+
+def test_responses_fills_in_a_refusal_that_never_streamed() -> None:
+    """The assembled message may carry a `refusal` part where a normal answer
+    has `output_text`; reading only the text half recorded an empty answer."""
+    item = {
+        "type": "message",
+        "id": "m1",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "refusal", "refusal": "I cannot."}],
+    }
+    event = _completed(output=[item])
+    assert responses_translate(event) == [
+        Chunk(text="I cannot."),
+        Finish(stop_reason="stop"),
+    ]
+
+
 def test_responses_reasoning_summary_is_its_own_kind() -> None:
     """A reasoning summary must arrive as `thinking`, never as the answer.
 
@@ -929,7 +997,14 @@ def test_responses_fills_in_arguments_that_never_streamed() -> None:
 
     assert responses_translate(event) == [
         Chunk(
-            tool_call_deltas=(ToolCallDelta(index=0, arguments_delta='{"e": "6*7"}'),)
+            tool_call_deltas=(
+                ToolCallDelta(
+                    index=0,
+                    id="c1",
+                    name="calc",
+                    arguments_delta='{"e": "6*7"}',
+                ),
+            )
         ),
         Finish(stop_reason="tool_calls"),
     ]

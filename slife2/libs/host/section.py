@@ -110,7 +110,11 @@ def read_section(raw: Any, where: str, fields: Iterable[Field]) -> dict[str, Any
     how somebody happened to order the YAML.
     """
     if raw is None:
-        return {}
+        # A null *entry* (`p:` with nothing under it) is an empty mapping to
+        # this reader, so its required keys get their sentence below rather
+        # than a constructor's `TypeError`.  A whole absent *section* never
+        # reaches here: `parse_section` answers its base first.
+        raw = {}
     if not isinstance(raw, dict):
         raise SectionError(f"{where}: expected a mapping")
     fields = tuple(fields)
@@ -130,6 +134,14 @@ def read_section(raw: Any, where: str, fields: Iterable[Field]) -> dict[str, Any
             pairs = [(field.attrs[0], value)]
         else:
             pairs = list(zip(field.attrs, value, strict=True))
+        # **A required key written empty is still an absence.**  A reader
+        # answers `None` for "not written" — absent, `null`, or an empty
+        # scalar — and the entry constructors then splat a dict without the
+        # attribute, which is a `TypeError` rather than this section's
+        # refusal.  So the same sentence absence gets is answered here, where
+        # the key is being read.
+        if field.required and all(one is None for _attr, one in pairs):
+            raise SectionError(f"{where}: {field.required}")
         for attr, one in pairs:
             if one is None:
                 continue

@@ -459,6 +459,40 @@ async def test_an_entry_with_no_command_is_refused_before_anything_is_written(
 
 
 @pytest.mark.asyncio
+async def test_a_cli_write_hops_off_the_loop(
+    monkeypatch: pytest.MonkeyPatch, isolated_runtime: Path
+) -> None:
+    """**The config lock is up to 30 s, on the one loop every conversation shares.**
+
+    `cli_remove` and `cli_set_enabled` called the file writer directly, while
+    `cli_set` already hopped it; a write waiting for another process's lock
+    stalled every turn this plugin served.
+    """
+    import threading
+
+    from slife2.plugins.cli import server as cli_server
+
+    seen: list[threading.Thread] = []
+    for attribute in ("remove", "set_enabled"):
+        real = getattr(cli_server.configfile, attribute)
+
+        def spy(*args: Any, _real=real, **kwargs: Any) -> Any:
+            seen.append(threading.current_thread())
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(cli_server.configfile, attribute, spy)
+
+    async with Client(build_server(config_for(isolated_runtime))) as client:
+        await ask(client, "cli_remove", name="yt-dlp")
+        await ask(client, "cli_set_enabled", name="iflow", enabled=True)
+
+    assert len(seen) == 2
+    assert all(thread is not threading.main_thread() for thread in seen), (
+        "the config write ran on the event loop"
+    )
+
+
+@pytest.mark.asyncio
 async def test_the_switch_takes_the_row_out_without_taking_the_entry(
     isolated_runtime: Path,
 ) -> None:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
@@ -134,8 +135,23 @@ class ToolCall:
         The same reading is in `read_arguments`, and it is the same sentence the
         LLM server uses when it assembles a damaged provider stream: one rule,
         whichever hop the call came through.
+
+        **The nesting is checked too.**  A `function` that is not a mapping is
+        not a call this build can read: reaching into it raised
+        `AttributeError`, which is not the `KeyError` the model client turns
+        into its named "a model server from another build" refusal.  It is a
+        shape refusal, so it raises `KeyError` rather than inventing a call.
         """
-        function = raw.get("function") or {}
+        if not isinstance(raw, Mapping):
+            raise KeyError(f"a tool call is not an object but {type(raw).__name__}")
+        function = raw.get("function")
+        if function is None:
+            function = {}
+        elif not isinstance(function, Mapping):
+            raise KeyError(
+                "a tool call's `function` is not an object but "
+                f"{type(function).__name__}"
+            )
         call_id = str(raw.get("id") or "")
         name = str(function.get("name") or "")
         raw_args = function.get("arguments")
@@ -531,6 +547,22 @@ class StreamChatResult:
             raise KeyError("stream_chat result has a tool call that is not an object")
         if raw["reasoning"] and not isinstance(raw["reasoning"].get("blocks"), list):
             raise KeyError("stream_chat result has no readable reasoning")
+        # **The usage counts are integers, not text a cast accepts.**  The
+        # shape table only says the usage is a mapping; `int("12")` would read
+        # a foreign build's string as a measurement and `int("abc")` raised a
+        # `ValueError` past the client's `KeyError` guard.  A hole or a
+        # non-integer is this build's "cannot read it" sentence.
+        bad = sorted(
+            key
+            for key in Usage().to_wire()
+            if not isinstance(raw["usage"].get(key), int)
+            or isinstance(raw["usage"].get(key), bool)
+        )
+        if bad:
+            raise KeyError(
+                "stream_chat result has no readable usage "
+                + ", ".join(f"`{key}`" for key in bad)
+            )
         return cls(
             text=raw["text"],
             tool_calls=tuple(ToolCall.from_wire(c) for c in raw["tool_calls"]),

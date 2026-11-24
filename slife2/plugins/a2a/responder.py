@@ -215,7 +215,6 @@ class Responder(abc.ABC):
         #: its state lives in the store, not in a coroutine.
         self._rounds: dict[str, asyncio.Task] = {}
         self._stopping = False
-        self._client: aiomqtt.Client | None = None
 
     @abc.abstractmethod
     async def on_request(
@@ -287,9 +286,12 @@ class Responder(abc.ABC):
             **self._mqtt.client_kwargs(
                 identifier=f"{self._topics.org}/{self._topics.unit}/{self._agent_id}",
                 will=will,
+                # The same bound the probe and the outbound loop carry: a TCP
+                # connection that never sends CONNACK would hold the responder
+                # for ever, and the member would never resubscribe.
+                timeout=_T.timeouts.deliver.mqtt_connect,
             ),
         ) as client:
-            self._client = client
             try:
                 await client.subscribe(request_topic, qos=1)
                 online_props = Properties(PacketTypes.PUBLISH)
@@ -324,7 +326,6 @@ class Responder(abc.ABC):
                 # interrupted or terminal task keeps its state: the peer can
                 # still continue it, and a retry replays the last answer.
                 self._inbound.forget_working()
-                self._client = None
                 try:
                     offline_props = Properties(PacketTypes.PUBLISH)
                     offline_props.UserProperty = [

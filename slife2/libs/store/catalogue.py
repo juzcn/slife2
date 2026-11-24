@@ -30,6 +30,7 @@ and this is a set of rows the servers can be asked again.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import re
 import sqlite3
@@ -526,6 +527,26 @@ def _listing_dict(row: sqlite3.Row) -> dict[str, Any]:
     this layer answers facts.
     """
     return {column: str(row[column]) for column in _SEARCH_COLUMNS}
+
+
+def tool_row(
+    *, name: str, description: str, remote_name: str, schema: Any
+) -> dict[str, Any]:
+    """One tool as the catalogue's row — the one spelling of the merge contract.
+
+    **Two callers build this row**: the hub for its own plugins' tools, and a
+    family plugin for the tools of a server somebody else runs.  They had copies
+    that already disagreed (`ensure_ascii`, the field the schema came off, `if
+    schema` against `if parameters`), and a new column would have to be added to
+    both.  A name is opaque here; `remote_name` is what the far end calls it and
+    the schema is the model's JSON Schema as text — empty when there is none.
+    """
+    return {
+        "name": name,
+        "description": description,
+        "remote_name": remote_name,
+        "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
+    }
 
 
 class ToolStore:

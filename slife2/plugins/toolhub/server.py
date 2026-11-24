@@ -139,12 +139,14 @@ OpenAPI is just how a REST API becomes one.
 
 What this deliberately does not do
 ----------------------------------
-The gateway deliberately does not let the *model* add and remove servers
-through `mcp_set` or friends, or write its own `tools.yaml`.  slife2's config is
-one file read by every process and by the launcher, and the launcher already
-refuses to let a command line name an arbitrary program; a language model
-choosing one is the same capability with a worse author.  The tools a model may
-reach are the operator's decision, made in a file, once.
+The gateway does not own the operator's file.  `mcp_set`, `rest_api_set` and
+`cli_set` exist and are the model's (`slife2.plugins.mcp_tools`,
+`slife2.plugins.restapi`, `slife2.plugins.cli`), and an entry one writes is
+connected through this hub like any other — but the *write* is the family's,
+behind the audience gate and the model's `_approve`, and this process only
+reads what is declared to it.  What it still refuses is a source taking a name
+another source holds (a plugin's, or a document source's): one merge is the
+whole truth about a source, and two holders would purge each other's rows.
 
 The failure rules, all four
 ---------------------------
@@ -236,7 +238,12 @@ from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE as _SKILLS_SOURCE,
 )
 from slife2.libs.store.answer import search_answer
-from slife2.libs.store.catalogue import CATEGORIES, ToolStore, unknown_category
+from slife2.libs.store.catalogue import (
+    CATEGORIES,
+    ToolStore,
+    tool_row,
+    unknown_category,
+)
 from slife2.libs.store.index import Embedder
 from slife2.libs.store.textindex import terms
 from slife2.libs.turn.tools import FUNC_TOOL_UNLOAD as _FUNC_TOOL_UNLOAD
@@ -824,6 +831,12 @@ class Catalogue:
         """
         here = home_key()
         await off_loop((await self.store()).set_source_state, source, state)
+        # **A successful verdict heals the home it reached.**  The merge path
+        # (`_write`) clears its failure after any successful write; this one
+        # only recorded, so one transient fan-out failure failed that home's
+        # whole `list_tools` for the life of the process — a down source never
+        # merges, so no later write would have cleared it.
+        self._failed.get(here, {}).pop(source, None)
         if not fan_out:
             return
         async with self._opening:
@@ -842,6 +855,8 @@ class Catalogue:
                         source,
                         exc,
                     )
+                else:
+                    self._failed.get(key, {}).pop(source, None)
 
     async def forget_source(self, source: str) -> list[str]:
         """Delete a source's rows, because nothing will declare it again.
@@ -1184,18 +1199,16 @@ class Upstream:
         transport: Callable[[ToolServerSettings], Any],
         catalogue: Catalogue,
         client_factory: ClientFactory | None = None,
-        required: bool = False,
     ) -> None:
         self.settings = settings
         #: Where this server's tools are *recorded*.
         self._catalogue = catalogue
-        #: **Ours, rather than somebody else's.**  An optional upstream that
-        #: cannot be reached is a tool the model does not have; a required one
-        #: that cannot be reached is this system coming apart, and `list_tools`
-        #: refuses rather than quietly serving a shorter list.  Read for that
-        #: failure rule and for whether this server's tools must ask before the
-        #: model is given them (`_offered`).
-        self.required = required
+        #: **Ours, rather than somebody else's.**  Every upstream is a server
+        #: slife2 starts: one that cannot be reached is this system coming
+        #: apart, and `list_tools` refuses rather than quietly serving a shorter
+        #: list.  Somebody else's servers are declared by a family plugin, not
+        #: held here — which is why this is no longer a per-upstream switch.
+        self._declares = False
         #: **Whether this source declares catalogue rows**, which is a fact
         #: about the listing and not a second copy of it: the one tool name
         #: `LIST_SOURCES` either is or is not in what the server offered.  See
@@ -1276,7 +1289,9 @@ class Upstream:
             counts=counts,
             description=self.settings.description,
             error=self._connection.error,
-            required=self.required,
+            # Every upstream is a plugin slife2 starts; `list_tools` treats one
+            # that is not answering as this system coming apart.
+            required=True,
         )
 
     def connecting(self) -> None:
@@ -1332,7 +1347,7 @@ class Upstream:
         #: that means *ours*.  Somebody else's server that happens to define a
         #: tool with this name gets nothing, which matters because the hub takes
         #: every tool an entry under `mcp:` offers.
-        self._declares = self.required and any(
+        self._declares = any(
             getattr(tool, "name", "") == LIST_SOURCES for tool in listed
         )
         offered = self._offered(listed)
@@ -2573,12 +2588,12 @@ def _row_of(tool: UpstreamTool) -> dict[str, Any]:
     An empty `schema` means "nothing to declare", and the catalogue keeps it
     empty: absence is the empty string there, and only a real schema is text.
     """
-    return {
-        "name": tool.name,
-        "description": tool.description,
-        "remote_name": tool.tool,
-        "schema": json.dumps(tool.parameters) if tool.parameters else "",
-    }
+    return tool_row(
+        name=tool.name,
+        description=tool.description,
+        remote_name=tool.tool,
+        schema=tool.parameters,
+    )
 
 
 def _from_row(row: Mapping[str, Any]) -> UpstreamTool:
@@ -2641,8 +2656,8 @@ def plugin_settings(config: Config, name: str) -> ToolServerSettings:
     **Written here rather than under `mcp:` because it is ours.**  An entry in
     `mcp:` is somebody else's process, which slife2 may fail to reach without
     anything being wrong; a plugin is one slife2 starts, and the hub treats it
-    accordingly (`required` on an `Upstream`, which is also what makes its tools
-    ask before they are offered to the model).
+    accordingly — one that is not answering fails the tool list, and its tools
+    must declare themselves the model's before they are offered (`_offered`).
 
     What it shares with every other entry is the mechanism — a URL, a connection,
     a tool list — and that is the point of the hub having two *sources* rather
@@ -2867,7 +2882,6 @@ def build_server(
             transport=(transports or {}).get(name, default_transport),
             catalogue=catalogue,
             client_factory=client_factory,
-            required=True,
         )
         for name in config.plugins()
         if name != CONFIG_KEY
@@ -3388,7 +3402,7 @@ def build_server(
         # budget is the catalogue's — and the failed ones are asked once more.
         # This is the "next ask" the comment above promises, made here because
         # the start-up build is the one ask that cannot leave it to a turn.
-        if wait and any(one.required and not one.usable for one in upstreams):
+        if wait and any(not one.usable for one in upstreams):
             dialing = [
                 attempt for one in upstreams if (attempt := one.attempt) is not None
             ]
@@ -3398,10 +3412,7 @@ def build_server(
             await settle()
 
         missing = [
-            row
-            for one in upstreams
-            if one.required and not one.usable
-            for row in (one.snapshot(),)
+            row for one in upstreams if not one.usable for row in (one.snapshot(),)
         ]
         if missing:
             raise ConnectionError(

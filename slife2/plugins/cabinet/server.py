@@ -457,9 +457,13 @@ def _download_name(url: str, mime: str) -> str:
     name = _UNSAFE_NAME.sub("-", urllib.parse.unquote(segment)).strip(" .-")
     if not name:
         name = "download"
+    # **A device name is reserved with any extension at all.**  Windows reads
+    # `NUL`, `NUL.txt` and `NUL.tar.gz` as the same device, so the check is on
+    # the part before the *first* dot — `Path.stem` strips only the last suffix
+    # and let the multi-part names through.
+    if name.split(".", 1)[0].upper() in _RESERVED_FILE_NAMES:
+        name = f"_{name}"
     stem, suffix = Path(name).stem, Path(name).suffix[:16]
-    if stem.upper() in _RESERVED_FILE_NAMES:
-        stem = f"_{stem}"
     if not suffix and mime:
         suffix = (mimetypes.guess_extension(mime) or "")[:16]
     return f"{stem[:80] or 'download'}{suffix}"

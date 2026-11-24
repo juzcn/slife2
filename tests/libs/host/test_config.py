@@ -450,6 +450,24 @@ providers:
     assert provider.model("silent").cache_control == ""
 
 
+def test_the_prompt_budget_is_one_rule() -> None:
+    """The server's `ModelSettings` and the TUI's picker compute one figure.
+
+    It was two subtractions (`ModelSettings.prompt_window` and the picker's
+    copy of the expression); a reserve or a different clamp added to one would
+    leave the picker's bar describing a window the server does not use.
+    """
+    from slife2.libs.host.config import prompt_budget
+
+    assert prompt_budget(1000, 400) == 600
+    assert prompt_budget(1000, None) == 1000
+    assert prompt_budget(100, 200) == 0
+    assert (
+        ModelSettings(model="m", context_window=1000, max_tokens=400).prompt_window
+        == 600
+    )
+
+
 def test_a_provider_with_nowhere_to_send_is_refused(tmp_path) -> None:
     """The hole the embedding provider always guarded, closed on the chat side.
 
@@ -470,6 +488,51 @@ providers:
 """,
     )
     with pytest.raises(ConfigError, match="needs `base_url`"):
+        load(path)
+
+
+@pytest.mark.parametrize(
+    ("section", "entry"),
+    [
+        ("mcp", "command: npx"),
+        ("rest-api", "spec: https://example.test/openapi.json"),
+    ],
+)
+@pytest.mark.parametrize("name", ["skills", "cli", "job"])
+def test_an_entry_named_after_a_document_source_is_refused(
+    tmp_path, section: str, entry: str, name: str
+) -> None:
+    """**A source is a name, and one hub source may not take another's.**
+
+    The management tools refuse it, and a hand edit reached the loader: the hub
+    then dropped one of the two declarations, and if the document plugin failed
+    that refresh the entry's whole-list merge replaced the playbook rows.  The
+    ship's own `skills`, `cli` and `job` sources are the names.
+    """
+    with pytest.raises(ConfigError, match="shadow that source"):
+        load(write(tmp_path, f"{section}:\n  {name}:\n    {entry}\n"))
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        'p:\n    api: ""\n    base_url: https://x/v1\n    models: [{model: m, context_window: 1000}]\n',
+        'p:\n    api: openai-completions\n    base_url: ""\n    models: [{model: m, context_window: 1000}]\n',
+        "p:\n",
+    ],
+)
+def test_a_required_entry_key_written_empty_is_a_refusal_not_a_traceback(
+    tmp_path, entry: str
+) -> None:
+    """**An empty required key is an absence, and the section owns its sentence.**
+
+    `api: ""` (or a provider entry written as a bare `p:`) used to be left out
+    of the mapping the settings object was built from, so the loader raised
+    `TypeError: ProviderSettings.__init__() missing 'api'` — past every
+    `ConfigError` handler, out of `slife2` as a traceback.
+    """
+    path = write(tmp_path, "providers:\n  " + entry, required=False)
+    with pytest.raises(ConfigError, match="needs `"):
         load(path)
 
 
@@ -1104,6 +1167,22 @@ def test_non_mapping_top_level_is_fatal(tmp_path) -> None:
         load(write(tmp_path, "- one\n- two\n", required=False))
 
 
+@pytest.mark.parametrize("text", ["[]\n", '""\n', "false\n", "0\n"])
+def test_a_falsy_non_mapping_top_level_is_refused_too(tmp_path, text: str) -> None:
+    """`load(...) or {}` read a list, a string, a boolean and a number as a
+    file with no sections, so the refusal that followed blamed `providers:`
+    for a file whose top level is not a mapping at all."""
+    with pytest.raises(ConfigError, match="mapping at the top level"):
+        load(write(tmp_path, text, required=False))
+
+
+def test_an_empty_document_is_a_file_with_no_sections(tmp_path) -> None:
+    """`null` and an empty file are the one falsy shape that really is empty;
+    they are refused for the section they lack, not for their top level."""
+    with pytest.raises(ConfigError, match="providers:"):
+        load(write(tmp_path, "", required=False))
+
+
 def test_partial_file_keeps_the_other_defaults(tmp_path) -> None:
     """A file that sets one thing must not blank everything else."""
     config = load(write(tmp_path, "agent:\n  max_iterations: 5\n"))
@@ -1414,6 +1493,26 @@ def test_a_tool_servers_reference_is_not_resolved_by_the_load(
     )
 
 
+def test_an_unresolved_header_is_left_out_the_same_way(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The environment and the headers are one rule with two field names.
+
+    `resolved_env` and `resolved_headers` had their own copies of the resolve,
+    test, warn and omit loop; the header's half was untested, so a change to
+    one could have sent a reference as a credential.
+    """
+    caplog.set_level("WARNING")
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    monkeypatch.setattr(slife2.libs.host.config, "_credstore_lookup", lambda key: None)
+
+    headers = load(write(tmp_path, MCP)).mcp["arxiv"].resolved_headers()
+
+    assert "Authorization" not in headers
+    assert "left out of the headers" in caplog.text
+    assert "SLIFE2_TEST_KEY" in caplog.text
+
+
 def test_a_literal_tool_setting_is_passed_through(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1533,6 +1632,26 @@ def test_an_entry_with_two_transports_is_refused(tmp_path) -> None:
     text = "mcp:\n  both:\n    command: uvx\n    url: https://example.test/mcp\n"
     with pytest.raises(ConfigError, match="both"):
         load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize(
+    ("entry", "field"),
+    [
+        ("command: npx\n    headers: {Authorization: 'Bearer x'}", "headers"),
+        ("url: https://example.test/mcp\n    args: [--x]", "args"),
+        ("url: https://example.test/mcp\n    env: {A: b}", "env"),
+        ("url: https://example.test/mcp\n    cwd: /tmp", "cwd"),
+    ],
+)
+def test_a_field_of_the_other_transport_is_refused_not_silently_ignored(
+    tmp_path, entry: str, field: str
+) -> None:
+    """**A key nobody reads is a switch nobody throws.**  The fields are scoped
+    to one transport by their own descriptions, and the loader accepted them on
+    the other and dropped them: a header credential the operator believed was
+    sent, or a `cwd` a stdio child would have used."""
+    with pytest.raises(ConfigError, match=f"must not name `{field}`"):
+        load(write(tmp_path, f"mcp:\n  x:\n    {entry}\n"))
 
 
 def test_a_rest_api_with_neither_spec_nor_command_is_refused(tmp_path) -> None:

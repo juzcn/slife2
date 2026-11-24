@@ -524,6 +524,16 @@ class Plugin:
     api: bool = False
 
 
+#: The source names the **document plugins** file their rows under — a
+#: playbook's rows and a command's, and the jobs folder's code.  They live here
+#: rather than in `slife2.libs.plugin.protocol` because the loader is one of
+#: their readers: a hand-written `mcp:` entry under one of these names shadows a
+#: document source, and the file is refused at load (`_reserved_source`).  The
+#: protocol re-exports them, so no caller has two spellings.
+SKILLS_SOURCE = "skills"
+CLI_SOURCE = "cli"
+JOB_SOURCE = "job"
+
 #: Every server slife2 starts, in the order they are described in.
 #:
 #: **The order of the two halves is load-bearing.**  The model backends come
@@ -1078,6 +1088,24 @@ def is_loopback_host(host: str) -> bool:
         return False
 
 
+def prompt_budget(context_window: int, max_tokens: int | None) -> int:
+    """The tokens a request's messages may occupy: the window minus the
+    completion request.
+
+    **One arithmetic, because a second caller reads the two components off a
+    wire.**  `ModelSettings.prompt_window` is the server side and the TUI's
+    model picker computes the same figure from the row it is handed; a change
+    here (a reserve, a different clamp) has to reach both, and a second
+    subtraction would not.
+
+    A model that states no `max_tokens` has the whole window; an entry whose
+    completion request is wider than its window has none (`0`), a config
+    mistake the budgets answer as "nothing fits" rather than by inventing a
+    fraction.
+    """
+    return max(0, int(context_window) - (int(max_tokens) if max_tokens else 0))
+
+
 @dataclass(frozen=True)
 class ModelSettings:
     """One model a provider serves, and how to call it.
@@ -1181,9 +1209,10 @@ class ModelSettings:
         A model that states no `max_tokens` has the whole window; an entry whose
         completion request is wider than its window has none (`0`), which is a
         config mistake the budgets answer as "nothing fits" rather than by
-        inventing a fraction.
+        inventing a fraction.  The arithmetic is `prompt_budget`'s, because the
+        TUI's picker reads the same two fields off its wire row.
         """
-        return max(0, int(self.context_window) - (self.max_tokens or 0))
+        return prompt_budget(self.context_window, self.max_tokens)
 
 
 @dataclass(frozen=True)
@@ -1565,6 +1594,33 @@ class ToolServerSettings:
         """`"http"` or `"stdio"` — read off which field is set."""
         return "http" if self.url else "stdio"
 
+    def _resolved(
+        self, values: dict[str, str], *, where: str, consequence: str
+    ) -> dict[str, str]:
+        """One environment-or-headers mapping with its references resolved.
+
+        **One rule, two fields.**  A value that is still a reference is left
+        out — never sent as itself — and the omission is warned about with the
+        entry and the reference.  The only words that differ between the two
+        callers are the field and what an absent key means to the server, so
+        they are the arguments; the policy is this body.
+        """
+        found: dict[str, str] = {}
+        for key, value in values.items():
+            one = resolve_deferred(value)
+            if reference := unresolved_reference(one):
+                logger.warning(
+                    "%s: %s is still %s — left out of the %s, so %s",
+                    self.name,
+                    key,
+                    reference,
+                    where,
+                    consequence,
+                )
+                continue
+            found[key] = one
+        return found
+
     def resolved_env(self) -> dict[str, str]:
         """The environment to hand the child, ``${VAR}`` resolved now.
 
@@ -1581,20 +1637,11 @@ class ToolServerSettings:
         absent variable is the answer each of them already knows how to read,
         and the omission is warned about with the name rather than raised.
         """
-        found: dict[str, str] = {}
-        for key, value in self.env.items():
-            one = resolve_deferred(value)
-            if reference := unresolved_reference(one):
-                logger.warning(
-                    "%s: %s is still %s — left out of the environment, so the "
-                    "server starts without it",
-                    self.name,
-                    key,
-                    reference,
-                )
-                continue
-            found[key] = one
-        return found
+        return self._resolved(
+            self.env,
+            where="environment",
+            consequence="the server starts without it",
+        )
 
     def resolved_headers(self) -> dict[str, str]:
         """The headers to send, resolved for :meth:`resolved_env`'s reason.
@@ -1603,20 +1650,11 @@ class ToolServerSettings:
         credential is the honest "not configured" request, and the reference
         text would be sent as the credential if it stayed in.
         """
-        found: dict[str, str] = {}
-        for key, value in self.headers.items():
-            one = resolve_deferred(value)
-            if reference := unresolved_reference(one):
-                logger.warning(
-                    "%s: %s is still %s — left out of the headers, so the "
-                    "server is asked without it",
-                    self.name,
-                    key,
-                    reference,
-                )
-                continue
-            found[key] = one
-        return found
+        return self._resolved(
+            self.headers,
+            where="headers",
+            consequence="the server is asked without it",
+        )
 
 
 #: How many function tools the model's list may hold before the least recently
@@ -2596,9 +2634,15 @@ def load(explicit: str | Path | None = None) -> Config:
 
     yaml = YAML(typ="safe")
     try:
-        raw = yaml.load(path) or {}
+        # **Only a null document is an empty one.**  `load(...) or {}` also
+        # turned `[]`, `""`, `false` and `0` into `{}`: a file whose top level
+        # is not a mapping was then refused by the *next* check with
+        # "providers: needs at least one provider", which blames a section for
+        # a file that has none.
+        document = yaml.load(path)
     except (YAMLError, OSError) as exc:
         raise ConfigError(f"cannot read {path}: {exc}") from exc
+    raw = {} if document is None else document
 
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
@@ -2798,6 +2842,24 @@ def _assemble(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
                 f"rest-api.{name}: already configured under `mcp:`; the two "
                 f"would collide as tool names"
             )
+    # **A document source's name is not an entry's either.**  The hub merges a
+    # plugin's rows under these names, and an `mcp:` entry with the same one
+    # would shadow it: the hub drops one of the two declarations, and if the
+    # document plugin happened to fail that refresh the entry's whole-list
+    # merge replaced the playbook or command rows.  The management tools
+    # refuse the name; a hand edit reaches the loader, so the refusal is here.
+    reserved = {
+        SKILLS_SOURCE: "the skills plugin files its rows under it",
+        CLI_SOURCE: "the cli plugin files its rows under it",
+        JOB_SOURCE: "the jobs plugin files the model's code under it",
+    }
+    for section_name, entries in (("mcp", mcp), ("rest-api", rest_apis)):
+        for name in entries:
+            if name in reserved:
+                raise ConfigError(
+                    f"{section_name}.{name}: {reserved[name]}; an entry with this "
+                    f"name would shadow that source — choose another name"
+                )
 
     # **The subagent network is parsed first, because the remote one's broker
     # defaults from it.**  A machine has one broker by default — the local one,

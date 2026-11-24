@@ -166,6 +166,27 @@ def test_decode_chunk_returns_none_for_foreign_text() -> None:
     assert decode_chunk('{"k": "other"}') is None
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        '{"k":"chunk","d":42}',
+        '{"k":"chunk","th":42}',
+        '{"k":"chunk","t":"x"}',
+        '{"k":"chunk","t":[{"i":"x"}]}',
+        '{"k":"chunk","t":[{"i":0,"a":5}]}',
+        '{"k":"chunk","u":{"prompt_tokens":"lots"}}',
+        '{"k":"chunk","u":{"prompt_tokens":1}}',
+    ],
+)
+def test_a_malformed_chunk_is_dropped_not_raised(line: str) -> None:
+    """**The sentinel is the whole contract.**  The decoder exists for a line
+    from another build; coercing its fields read `{"d": 42}` as text `"42"`,
+    and casting its index or usage raised out of the progress handler — a
+    display line failing the model call streaming beside it.
+    """
+    assert decode_chunk(line) is None
+
+
 def test_assistant_message_with_tool_calls_round_trips() -> None:
     """Including the `content: ""` normalisation `to_wire` introduces."""
     message = Message(
@@ -368,6 +389,29 @@ def test_a_stream_chat_result_with_a_malformed_tool_call_is_refused() -> None:
     wire = StreamChatResult(text="answer").to_wire()
     wire["tool_calls"] = [None]
     with pytest.raises(KeyError, match="tool call"):
+        StreamChatResult.from_wire(wire)
+
+
+def test_a_tool_call_whose_function_is_not_an_object_is_refused() -> None:
+    """**The nesting is checked, so damage is a `KeyError` and not an
+    `AttributeError`.**  The model client turns `KeyError` into its named
+    "a model server from another build" refusal; `AttributeError` escaped the
+    turn as a Python traceback instead, on the hop that exists for exactly
+    this case.
+    """
+    for function in ("calc", 5, ["calc"]):
+        with pytest.raises(KeyError, match="function"):
+            ToolCall.from_wire({"id": "c1", "function": function})
+
+
+@pytest.mark.parametrize("value", ["12", 1.5, True, None])
+def test_a_stream_chat_result_with_a_non_integer_usage_is_refused(value) -> None:
+    """`int("12")` is a measurement nobody made, and `int("abc")` raised a
+    `ValueError` past the client's `KeyError` guard.  The four counts are
+    integers in this build's shape, so anything else is unreadable."""
+    wire = StreamChatResult(text="answer").to_wire()
+    wire["usage"]["prompt_tokens"] = value
+    with pytest.raises(KeyError, match="usage"):
         StreamChatResult.from_wire(wire)
 
 

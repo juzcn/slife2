@@ -68,7 +68,11 @@ import sqlite_vec
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import at
-from slife2.helpers.timeutil import normalize_bound
+from slife2.helpers.timeutil import (
+    BOUND_GRAMMAR,
+    InvalidTimeBound,
+    normalize_bound,
+)
 from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 
@@ -485,36 +489,51 @@ def time_window(
     """
     clauses: list[str] = []
     params: list[Any] = []
+
+    def refused(role: str, value: str, exc: Exception) -> InvalidTimeBound:
+        """The bound could not be turned into a parameter, so it is unplaceable."""
+        return InvalidTimeBound(
+            f"invalid {role} bound {value!r} — expected {BOUND_GRAMMAR}"
+        )
+
     if since:
         bound = normalize_bound(since, role="since")
-        if day:
-            clauses.append(f"{axis} >= ?")
-            params.append(bound[:10])
-        else:
-            # **By instant, not by string.**  A timestamp carries a local offset,
-            # and two rows written on either side of a DST change do not sort as
-            # strings in the order they happened: `01:15+00:00` is later than
-            # `01:30+01:00`, but it is smaller as text.  `julianday` reads the
-            # offset and compares the moments.
-            clauses.append(f"julianday({axis}) >= julianday(?)")
-            params.append(instant_bound(bound))
+        try:
+            if day:
+                clauses.append(f"{axis} >= ?")
+                params.append(bound[:10])
+            else:
+                # **By instant, not by string.**  A timestamp carries a local
+                # offset, and two rows written on either side of a DST change
+                # do not sort as strings in the order they happened:
+                # `01:15+00:00` is later than `01:30+01:00`, but it is smaller
+                # as text.  `julianday` reads the offset and compares the
+                # moments.
+                clauses.append(f"julianday({axis}) >= julianday(?)")
+                params.append(instant_bound(bound))
+        except (OverflowError, OSError, ValueError) as exc:
+            raise refused("since", since, exc) from exc
     if until:
         bound = normalize_bound(until, role="until")
-        if day:
-            last = date.fromisoformat(bound[:10])
-            bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
-            clauses.append(f"{axis} < ?")
-            params.append(bound)
-        else:
-            # **A date-only `until` stops *before* the next midnight.**  It was
-            # advanced by one day to name the end of its day, and comparing `<=`
-            # then included the first instant of the following day — a row saved
-            # at exactly midnight belonged to a day the caller excluded.  A
-            # datetime names an instant and stays inclusive.
-            clauses.append(
-                f"julianday({axis}) {'<' if len(bound) == 10 else '<='} julianday(?)"
-            )
-            params.append(instant_bound(bound))
+        try:
+            if day:
+                last = date.fromisoformat(bound[:10])
+                bound = (last + timedelta(days=1) if "T" in bound else last).isoformat()
+                clauses.append(f"{axis} < ?")
+                params.append(bound)
+            else:
+                # **A date-only `until` stops *before* the next midnight.**  It
+                # was advanced by one day to name the end of its day, and
+                # comparing `<=` then included the first instant of the
+                # following day — a row saved at exactly midnight belonged to a
+                # day the caller excluded.  A datetime names an instant and
+                # stays inclusive.
+                clauses.append(
+                    f"julianday({axis}) {'<' if len(bound) == 10 else '<='} julianday(?)"
+                )
+                params.append(instant_bound(bound))
+        except (OverflowError, OSError, ValueError) as exc:
+            raise refused("until", until, exc) from exc
     return clauses, params
 
 
@@ -653,8 +672,17 @@ def rebuild_vector_index(
     # **The comparison is inside the transaction too.**  It is a read, and what
     # it decides is whether to delete the vectors a concurrent save may be
     # committing right now (`begin_rebuild` is `BEGIN IMMEDIATE` for this).
+    #
+    # **A recorded identity whose table is gone is a rebuild, not a no-op.**
+    # The identity is written in the same transaction as the table, so the pair
+    # disagreeing means the table went outside a rebuild.  Returning early on
+    # the matching identity left the table absent, the surviving chunk rows
+    # looking "already placed", and the advice "restart to rebuild" false — a
+    # restart could never repair it.
     begin_rebuild(connection)
-    if index_meta(connection, meta_table).get("vector_identity", "") == identity:
+    if index_meta(connection, meta_table).get(
+        "vector_identity", ""
+    ) == identity and table_exists(connection, vec_table):
         return False
     connection.execute(f"DROP TABLE IF EXISTS {vec_table}")
     connection.execute(f"DELETE FROM {chunk_table}")

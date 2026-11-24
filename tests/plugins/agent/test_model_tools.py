@@ -1042,3 +1042,10 @@ async def test_a_reference_is_the_same_reference_however_it_is_spaced(
         answer = await ask(client, "model_switch", ref="local / small")
         assert read_default(path=isolated_runtime / "slife2.yaml") == ("local/small")
         assert answer["previous"] == "local/big"
+
+        # `model_get` reads the same reference, and answers about the model it
+        # found: the padded spelling is the default, and the ref it echoes is
+        # the canonical one.
+        found = await ask(client, "model_get", ref="local / small")
+        assert found["default"] is True
+        assert found["ref"] == "local/small"

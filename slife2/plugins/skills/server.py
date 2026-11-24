@@ -266,7 +266,15 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
         # Found here to read the switch off it: a skill may be filed under either
         # its own name or its directory's, and only the folder knows which, so
         # this is the same both-names lookup `catalogue` makes.
-        skill = skills.find(name.strip())
+        #
+        # **A folder that cannot be listed is `use`'s answer, not this lookup's
+        # exception.**  `skills.use` documents `(text, ok)` for anything the
+        # directory can be, and `find` scanning the same directory raised
+        # `OSError` out of the tool before it got there.
+        try:
+            skill = skills.find(name.strip())
+        except OSError:
+            skill = None
         if skill is not None:
             found = skills.entry_for(skill, home_entries())
             if found is not None and not found.enabled:

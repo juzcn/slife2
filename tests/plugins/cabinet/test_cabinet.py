@@ -871,6 +871,13 @@ def test_a_fetched_name_is_the_sites_name_and_never_a_path() -> None:
     )
     assert cabinet_server._download_name("https://e.test/a/a%2Fb.txt", "") == "a-b.txt"
     assert cabinet_server._download_name("https://e.test/a/CON", "") == "_CON"
+    # **A device name is reserved with any extension**, not only the last one:
+    # Windows reads `NUL.tar.gz` as the device too, and `Path.stem` stripped
+    # only `.gz`, so the save target was the device namespace.
+    assert (
+        cabinet_server._download_name("https://e.test/NUL.tar.gz", "") == "_NUL.tar.gz"
+    )
+    assert cabinet_server._download_name("https://e.test/CON.a.b", "") == "_CON.a.b"
 
 
 def test_a_url_that_points_at_this_machine_is_refused() -> None:

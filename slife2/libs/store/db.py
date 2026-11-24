@@ -90,9 +90,10 @@ import sqlite_vec
 from slife2.helpers.clock import now
 from slife2.helpers.threads import off_loop
 from slife2.libs.host.paths import TURNS_DB, work_path
-from slife2.libs.paging import MAX_SQLITE_INT
+from slife2.libs.paging import MAX_SQLITE_INT, page_window
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
+    MAX_PAGE,
     MAX_SQL_VARS,
     SYNC_BATCH,
     Embedder,
@@ -190,7 +191,13 @@ def safe_agent_name(name: str) -> str:
     if not cleaned:
         raise ValueError(f"agent name {name!r} cannot name a database file")
     if cleaned != name:
-        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:_DIGEST_CHARS]
+        # **`storable` first, because the digest is of text a provider can
+        # emit.**  A lone surrogate cannot be UTF-8 encoded, and a name reaches
+        # here from a model (`subagent_create`); the same normalisation every
+        # other stored string gets is what makes the hash of it possible.
+        digest = hashlib.sha256(storable(name).encode("utf-8")).hexdigest()[
+            :_DIGEST_CHARS
+        ]
         keep = MAX_AGENT_NAME - _DIGEST_CHARS - 1
         return f"{cleaned[:keep]}-{digest}"
     if len(cleaned) <= MAX_AGENT_NAME:
@@ -1150,8 +1157,11 @@ class TurnStore:
         Raises:
             InvalidTimeBound: If a bound is in no known grammar.
         """
-        limit = page_limit(limit)
-        offset = max(0, int(offset))
+        # **The same window every listing uses.**  The offset was floored but
+        # not capped, so an offset past SQLite's signed 64-bit range raised
+        # `OverflowError` at the bind instead of answering the empty page the
+        # number means (`page_window`).
+        limit, offset = page_window(limit, offset, unset=1, cap=MAX_PAGE)
         clauses, params = time_window(since, until)
         where = filter_clause(clauses)
         with self._connect() as connection:
@@ -1698,8 +1708,7 @@ class TurnStore:
         if vector_gone:
             problems.append(
                 "the vector index is recorded in this file but its table "
-                "`turn_vec` is gone and there is no migration — delete the file "
-                "and let it be recorded afresh"
+                "`turn_vec` is gone — restart to rebuild the derived index"
             )
         if pending:
             problems.append(f"{pending} of {turns} turns have no vector")
@@ -1920,6 +1929,12 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
     reads this list and appends to it, so a damaged list read as `[]` becomes a
     **one-turn context** on the next save, permanently and without a word.
     `_structural` is the refusal, and SDD Appendix C is the rule it follows.
+
+    An integer past SQLite's signed 64-bit range is not that kind of damage: no
+    row can have it, the list still says what it says, and the registered answer
+    is to drop the unaddressable id and count it.  It is dropped here so every
+    reader of the list — the restore, a recall's exclusion table — gets ids it
+    can bind.
     """
     row = connection.execute("SELECT turn_ids FROM context WHERE id = 1").fetchone()
     if row is None:
@@ -1939,7 +1954,22 @@ def read_context(connection: sqlite3.Connection) -> list[int]:
         raise ValueError(
             f"a stored value did not read as turn ids: context.turn_ids ({parsed!r})"
         )
-    return normalise_ids(parsed)
+    # **An id SQLite cannot bind is an id no row has.**  The type check above
+    # accepts any integer, and a value past the signed 64-bit range raises out
+    # of the first query that binds it (`turns_by_ids`, a recall's exclusion
+    # table).  It is dropped and counted here, where the list is read, rather
+    # than left to break every reader — and dropping it also keeps
+    # `append_context` from writing it back.
+    bindable = [value for value in parsed if _row_id(value) is not None]
+    if len(bindable) != len(parsed):
+        logger.warning(
+            "%d of %d live-context id(s) are outside SQLite's integer range and "
+            "were dropped: %s",
+            len(parsed) - len(bindable),
+            len(parsed),
+            [value for value in parsed if _row_id(value) is None],
+        )
+    return normalise_ids(bindable)
 
 
 def write_context(connection: sqlite3.Connection, turn_ids: Sequence[int]) -> list[int]:

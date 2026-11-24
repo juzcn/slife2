@@ -991,6 +991,24 @@ async def test_a_recorded_vector_table_that_is_gone_is_not_ready(tmp_path) -> No
     assert any("turn_vec" in problem for problem in status["problems"])
 
 
+@pytest.mark.asyncio
+async def test_a_restart_rebuilds_a_vector_table_that_went_missing(tmp_path) -> None:
+    """**The advice a damaged index gives has to be true.**  It says "restart
+    to rebuild"; the rebuild returned early because the recorded identity still
+    matched, and the surviving chunks made every row look already placed — so a
+    restart changed nothing and the message repeated for ever."""
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    embedder = StubEmbedder()
+    await _corpus(store, embedder)
+    with db.connection_to(path) as connection:
+        connection.execute("DROP TABLE turn_vec")
+
+    await store.sync_indexes(embedder)
+
+    assert store.index_status(embedder)["ready"] is True
+
+
 # --- and the loop is not held while it happens --------------------------------
 
 

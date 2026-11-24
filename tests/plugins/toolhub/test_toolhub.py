@@ -4042,6 +4042,58 @@ async def test_a_verdict_is_written_into_every_homes_catalogue(
 
 
 @pytest.mark.asyncio
+async def test_a_fan_out_failure_that_later_heals_is_forgotten(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A transient verdict write must not fail a home for the process's life.**
+
+    `_write` clears its failure after any successful merge; `source_state` only
+    recorded one.  A source that is down never merges, so the only write that
+    could heal the entry was the one that did not — every later `list_tools` in
+    that home raised "the tool catalogue is not working".
+    """
+    from slife2.plugins.toolhub.server import Catalogue
+
+    mine, theirs = tmp_path / "mine", tmp_path / "theirs"
+    monkeypatch.setenv("SLIFE2_DATA_DIR", str(mine))
+
+    async def open_store() -> ToolStore:
+        return ToolStore(catalogue_db(), threshold=100)
+
+    async def embedder() -> Any:
+        return StubEmbedder()
+
+    catalogue = Catalogue(open_store, embedder)
+    rows = [{"name": "serper__search", "description": "Search the web."}]
+    for home in (mine, theirs):
+        with in_home(home):
+            await catalogue.store()
+            await catalogue.merge("serper", "mcp", rows)
+
+    with in_home(theirs):
+        their_store = await catalogue.store()
+    real_write = their_store.set_source_state
+    broken = {"on": True}
+
+    def flaky(source: str, state: str, **kwargs: Any) -> Any:
+        if broken["on"]:
+            raise RuntimeError("their disk hiccup")
+        return real_write(source, state, **kwargs)
+
+    monkeypatch.setattr(their_store, "set_source_state", flaky)
+    with in_home(mine):
+        await catalogue.source_state("serper", "error")
+    with in_home(theirs):
+        assert "their disk hiccup" in catalogue.failure
+
+    broken["on"] = False
+    with in_home(mine):
+        await catalogue.source_state("serper", "enabled")
+    with in_home(theirs):
+        assert catalogue.failure == "", "a later successful verdict heals that home"
+
+
+@pytest.mark.asyncio
 async def test_a_homes_disabled_switch_is_not_written_into_another_home(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

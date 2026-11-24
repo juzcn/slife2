@@ -89,6 +89,7 @@ from mcp.shared._httpx_utils import create_mcp_http_client
 
 import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
+import slife2.libs.host.config as config
 from slife2 import __version__
 from slife2.helpers.proactor import tolerate_reset_on_close
 from slife2.libs.host.config import (
@@ -166,35 +167,36 @@ LIST_SOURCES = "list_sources"
 #: caller's identity is forwarded on through, exactly as the hub forwards it.
 CALL_SOURCE = "call_source"
 
-#: The two source names the *documents* are filed under — a playbook's rows and
-#: a command's.  A source is a name and not a process, so these are not the
-#: plugins' own names (`skills-server` serves, `skills` is what its rows are
-#: filed under), and they are contract rather than any one plugin's business
-#: for the same reason `LIST_SOURCES` is: the hub merges under them, the two
-#: declaring plugins write them, and the family plugins that hold *other*
-#: people's servers refuse a name that would collide with one.  Three copies of
-#: `"cli"` and a test to hold them together is what this replaces.
-SKILLS_SOURCE = "skills"
-CLI_SOURCE = "cli"
-
-#: The source name the **jobs** are filed under — code the model wrote in the
-#: home's `jobs/` folder, each file becoming a tool named `job__<name>`.  It is
-#: a source rather than a set of plugin tools because the hub must re-read the
-#: folder as the model changes it, and `list_sources` is the one answer the hub
-#: refreshes before every search; and it is a *function* source, so its rows are
-#: callable, unlike the two document sources above.
-JOB_SOURCE = "job"
+#: The three source names the *documents* are filed under — a playbook's rows,
+#: a command's, and the jobs folder's code.  A source is a name and not a
+#: process, so these are not the plugins' own names (`skills-server` serves,
+#: `skills` is what its rows are filed under), and they are contract rather than
+#: any one plugin's business for the same reason `LIST_SOURCES` is: the hub
+#: merges under them, the declaring plugins write them, the family plugins that
+#: hold *other* people's servers refuse a name that would collide with one, and
+#: the loader refuses an `mcp:`/`rest-api:` entry under one because it would
+#: shadow the document source.  **Defined in `slife2.libs.host.config`** — the
+#: loader cannot import this module (this one imports it) — and re-exported here
+#: so every caller still has one spelling.
+SKILLS_SOURCE = config.SKILLS_SOURCE
+CLI_SOURCE = config.CLI_SOURCE
+JOB_SOURCE = config.JOB_SOURCE
 
 
 def describe(conversation: ConversationId) -> str:
     """A conversation id as one readable token, for a log line.
 
+    **The trace's spelling, not a second one.**  `slife2.helpers.logcontext.describe`
+    writes the prefix every log record inside a turn carries; message subjects
+    and the a2a lines go through this function, and the two used to be copies —
+    a change to how a conversation is named for logs could move one surface and
+    not the other.
+
     `jack` rather than `jack/` for an agent's own conversation, because that is
     what a person calls it — and the worker form keeps the slash, so the two are
     never confusable in a log.
     """
-    agent, subagent = conversation
-    return f"{agent}/{subagent}" if subagent else agent
+    return logcontext.describe(*conversation)
 
 
 def close_names(name: str, known: Iterable[str], *, limit: int = 3) -> list[str]:

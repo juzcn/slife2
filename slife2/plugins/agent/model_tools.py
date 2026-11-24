@@ -247,7 +247,12 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
         Args:
             ref: The model, as `provider/model`.
         """
-        ref = ref.strip()
+        # **The canonical reference, for `_model_ref`'s reason.**  Comparing
+        # the raw spelling to `providers.default` made `local / small` a model
+        # that is not the default — the entry was found by `_model_config`,
+        # which splits and strips, and the answer beside it said `false`.
+        provider, model = _model_ref(ref)
+        ref = f"{provider}/{model}"
         providers = _providers()
         return {
             "ref": ref,

@@ -32,7 +32,6 @@ answer that does not block.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import threading
 from collections.abc import Callable, Iterable, Mapping
@@ -69,6 +68,7 @@ from slife2.libs.plugin.protocol import (
     SKILLS_SOURCE,
     house_server,
 )
+from slife2.libs.store.catalogue import tool_row
 
 logger = logging.getLogger(__name__)
 
@@ -284,14 +284,14 @@ class Link:
         from, which is why they, and only they, carry one.
         """
         schema = getattr(tool, "input_schema", None)
-        return {
-            "name": proxied_name(self.settings.name, str(getattr(tool, "name", ""))),
-            "description": str(getattr(tool, "description", "") or ""),
+        return tool_row(
+            name=proxied_name(self.settings.name, str(getattr(tool, "name", ""))),
+            description=str(getattr(tool, "description", "") or ""),
             # What the far end calls it, which is not what the model calls it:
             # the advertised name is sanitised and carries the server in front.
-            "remote_name": str(getattr(tool, "name", "")),
-            "schema": json.dumps(schema, ensure_ascii=False) if schema else "",
-        }
+            remote_name=str(getattr(tool, "name", "")),
+            schema=schema,
+        )
 
 
 class Links:
@@ -1326,13 +1326,27 @@ class Documents:
         """
         current = self.entries.get(name)
         if current is not None:
-            self.entries[name] = replace(current, enabled=enabled)
+            updated = dict(self.entries)
+            updated[name] = replace(current, enabled=enabled)
+            self.entries = updated
         elif make is not None:
-            self.entries[name] = make()
+            updated = dict(self.entries)
+            updated[name] = make()
+            self.entries = updated
 
     def forgotten(self, name: str) -> None:
-        """Drop one entry from the mirror, after the file has been changed."""
-        self.entries.pop(name, None)
+        """Drop one entry from the mirror, after the file has been changed.
+
+        **Copy-on-write**, because `list_sources` is a sync tool FastMCP runs on
+        a worker thread and this runs on the loop: `pop` on the dict that thread
+        is iterating raises "dictionary changed size during iteration".  A
+        reader keeps whichever complete dict it captured; the mirror moves to a
+        new one.
+        """
+        if name in self.entries:
+            self.entries = {
+                key: value for key, value in self.entries.items() if key != name
+            }
 
 
 class Homes[T]:

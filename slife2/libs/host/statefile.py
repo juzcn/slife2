@@ -32,14 +32,14 @@ from __future__ import annotations
 
 import contextlib
 import os
-import tempfile
 from collections.abc import Mapping
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
 
-from slife2.libs.host.paths import replace_file
+from slife2.libs.host.paths import replace_file, stage
 
 
 def reader() -> YAML:
@@ -67,17 +67,17 @@ def write(path: Path, payload: Mapping[str, Any]) -> None:
     disk — because what to do about it is the caller's: a receive path logs it
     and carries on, while a write the caller asked for by name lets it fail.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    stream = StringIO()
+    reader().dump(dict(payload), stream)
+    # The flush/fsync and the fresh temporary are `stage`'s, the one mechanic
+    # the home registry, a record and this file share; what is this caller's is
+    # the block-style document above and the raised failure below.
+    tmp = stage(path, stream.getvalue())
     try:
-        with os.fdopen(handle, "w", encoding="utf-8") as opened:
-            reader().dump(dict(payload), opened)
-            opened.flush()
-            os.fsync(opened.fileno())
         # `replace_file`, not `os.replace`: the poll loop and a reader on the
         # other side of this file overlap, and Windows refuses the rename for as
         # long as that reader holds it (`slife2.libs.host.paths.replace_file`).
-        replace_file(Path(tmp), path)
+        replace_file(tmp, path)
     except BaseException:
         # **The temporary file does not outlive the attempt**: a write that
         # failed leaves the old file standing and nothing else beside it, which

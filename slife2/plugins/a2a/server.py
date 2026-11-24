@@ -1550,7 +1550,6 @@ def build_server(
         (SDD §9.2): the offline card is how a peer is told this member left,
         and a failure here leaves it advertised with nobody to retire it.
         """
-        sessions.pop(key, None)
         writer, session.writer = session.writer, None
         if writer is not None and writer is not asyncio.current_task():
             writer.cancel()
@@ -1565,6 +1564,13 @@ def build_server(
                 describe((session.agent, session.subagent)),
                 e,
             )
+        # **Last, and only if it is still this session's entry.**  Popping
+        # first let a call arriving during either await build a second session
+        # and mesh for the same name while the predecessor was still connected;
+        # by identity, a successor's entry is not removed by the teardown it
+        # replaced.
+        if sessions.get(key) is session:
+            sessions.pop(key, None)
 
     async def connected(agent: str, reason: str, subagent: str = "") -> Session:
         """This member's mesh, connected — or a refusal naming why it is not.

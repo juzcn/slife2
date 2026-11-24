@@ -42,7 +42,6 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
-import tempfile
 from collections.abc import Callable, Collection, Mapping
 from io import StringIO
 from pathlib import Path
@@ -50,12 +49,12 @@ from typing import Any, cast
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap, CommentedSeq
-from ruamel.yaml.error import YAMLError
+from ruamel.yaml.error import StringMark, YAMLError
 from ruamel.yaml.tokens import CommentToken
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import Config, ConfigError, find_config_path, load
-from slife2.libs.host.paths import replace_file
+from slife2.libs.host.paths import replace_file, stage
 from slife2.libs.host.runtime import config_key, exclusive
 
 logger = logging.getLogger(__name__)
@@ -122,33 +121,24 @@ def _stage(path: Path, text: str) -> Path:
 
     A temp file in the same directory, so the rename that follows is atomic on
     the filesystem the file lives on and a reader sees the old document or the
-    new one.  The mode is copied from the file being replaced because `mkstemp`
+    new one.  The write itself is `slife2.libs.host.paths.stage`'s; what is this
+    caller's is the mode, copied from the file being replaced because `mkstemp`
     creates `0600`, which would silently tighten a config somebody had made
     group-readable.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if path.exists():
-            try:
-                os.chmod(tmp, path.stat().st_mode & 0o7777)
-            except OSError as exc:
-                # **Said out loud, because the mode is a promise this makes.**
-                # SDD §11.8 states the swap as preserving the file's mode;
-                # swallowing this left the config at `mkstemp`'s `0600`, which
-                # *tightens* a file somebody had made group-readable — an
-                # unreadable config for another user of the same machine, and
-                # nothing anywhere to say why (SDD Appendix C).
-                logger.warning("%s: the file's mode was not kept: %s", path, exc)
-        return Path(tmp)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
+    tmp = stage(path, text)
+    if path.exists():
+        try:
+            os.chmod(tmp, path.stat().st_mode & 0o7777)
+        except OSError as exc:
+            # **Said out loud, because the mode is a promise this makes.**
+            # SDD §11.8 states the swap as preserving the file's mode;
+            # swallowing this left the config at `mkstemp`'s `0600`, which
+            # *tightens* a file somebody had made group-readable — an
+            # unreadable config for another user of the same machine, and
+            # nothing anywhere to say why (SDD Appendix C).
+            logger.warning("%s: the file's mode was not kept: %s", path, exc)
+    return tmp
 
 
 def _edit(
@@ -521,8 +511,72 @@ def _put_intro(container: CommentedMap, name: str, block: Any) -> None:
         slot[at] = block
 
 
-def _as_pending(block: Any) -> Any:
-    """*block*, in the shape a mapping's pending slot holds.
+def _inline_head(block: Any) -> Any:
+    """The inline comment a trailing token opens with, or `None`.
+
+    ruamel merges "the comment on this line" and "the block introducing the
+    next entry" into one token; a token that begins with a newline has no
+    inline head.  `_put_intro` splits it the same way when it writes.
+    """
+    if block is None:
+        return None
+    value = str(block.value)
+    if value.startswith("\n"):
+        return None
+    return CommentToken(
+        value.split("\n", 1)[0] + "\n",
+        block.start_mark,
+        block.end_mark,
+        block.column,
+    )
+
+
+def _still_holds(holder: Any, key: Any) -> bool:
+    """Whether the slot's node survived the mutation in `_move_intro`."""
+    if isinstance(holder, CommentedMap):
+        return key in holder
+    if isinstance(holder, CommentedSeq):
+        return isinstance(key, int) and 0 <= key < len(holder)
+    return False
+
+
+def _move_intro(container: CommentedMap, name: str, change: Callable[[], None]) -> None:
+    """Run *change* on one entry and keep the block introducing the next one after it.
+
+    **`set_enabled` changes which key is last**, and ruamel keeps the next
+    entry's comment trailing the old last value.  Adding `enabled: false` after
+    an `args:`-ending entry left that comment between the sequence and the new
+    switch — inside the entry, describing nothing — and removing a last
+    `enabled:` key took it away with the key.  So the token is lifted, the
+    change runs, and the token is re-hung where the entry now ends.
+
+    **The inline comment is not the block.**  If the old last value carried
+    `# keep me` on its line and survives the change, that head goes back where
+    it was; only the block moves.  A last key that *is* removed takes its inline
+    comment with it, exactly as `_drop_entry` says.
+    """
+    holder, key, at = _tail_of(container, name)
+    slot = holder.ca.items.get(key)
+    taken = None
+    if slot is not None and len(slot) > at:
+        taken = slot[at]
+        slot[at] = None
+    change()
+    if taken is None:
+        return
+    head = _inline_head(taken)
+    if head is not None and _still_holds(holder, key):
+        slot = holder.ca.items.setdefault(key, [None, None, None, None])
+        while len(slot) <= at:
+            slot.append(None)
+        slot[at] = head
+    block = _without_inline(taken)
+    if block is not None:
+        _put_intro(container, name, block)
+
+
+def _as_pending(block: Any, column: int) -> Any:
+    """*block*, in the shape a mapping's pending slot holds, at *column*.
 
     **The two slots do not hold the same shape**, and the difference is
     invisible until it is wrong.  What ruamel keeps *after* an entry's value
@@ -531,13 +585,23 @@ def _as_pending(block: Any) -> Any:
     (`"# a\\n  # b\\n"`) — there the renderer supplies the first line's indent
     itself and writes every later line verbatim.  Moved across unchanged, a
     comment renders as a blank line or lands at column zero.
+
+    **`column` is the first key's own column, not the token's old one.**  A block
+    that trailed a list item was marked at that item's column (13 in the shape
+    `mcp:` writes); the pending renderer writes the first line at the mark's
+    column, so a block moved to the first key has to be re-marked where that key
+    begins or it prints indented to the middle of nowhere.
     """
     value = str(block.value)
     if value.startswith("\n"):
         value = value[1:]
         indent = len(value) - len(value.lstrip(" "))
         value = value[indent:]
-    return CommentToken(value, block.start_mark, block.end_mark, block.column)
+    mark = block.start_mark
+    start = StringMark(
+        mark.name, mark.index, mark.line, column, mark.buffer, mark.pointer
+    )
+    return CommentToken(value, start, block.end_mark, column)
 
 
 def _put_first(
@@ -554,7 +618,13 @@ def _put_first(
     one writes it.  Setting only one leaves the comment that was already there,
     which is the bug this is here to fix.
     """
-    token = None if block is None else _as_pending(block)
+    token = None
+    if block is not None:
+        # **The first key's own column**, which is where the comment belongs;
+        # the block's old mark points at whatever entry it used to trail.
+        first = next(iter(current), None)
+        column = current.lc.key(first)[1] if first is not None else 2
+        token = _as_pending(block, column)
     current.ca.comment = [None, [token] if token is not None else None]
     slot = document.ca.items.setdefault(section, [None, None, None, None])
     while len(slot) < 4:
@@ -628,6 +698,25 @@ def _drop_entry(
         _put_intro(current, names[index - 1], survivor)
 
 
+def _commented(value: Any) -> Any:
+    """*value* as ruamel nodes, so a comment can be hung off its last item.
+
+    **A plain `list` or `dict` stops the walk in `_tail_of`.**  `upsert` and
+    `update_entry` hand `_swap_entry` plain Python values, and ruamel renders
+    them but keeps no comment slots for them: `_put_intro` then wrote the block
+    introducing the *next* entry onto the edited entry's last key, and the
+    renderer printed it at the head of that plain container — inside `args:`,
+    above its first item, where it describes nothing.  A later `remove` of the
+    entry took it with the container.  The conversion is recursive for the same
+    reason: the last value may itself be a list of mappings (`models:`).
+    """
+    if isinstance(value, Mapping):
+        return CommentedMap((key, _commented(one)) for key, one in value.items())
+    if isinstance(value, (list, tuple)):
+        return CommentedSeq(_commented(one) for one in value)
+    return value
+
+
 def _swap_entry(current: CommentedMap, name: str, values: Mapping[str, Any]) -> None:
     """Put *values* under `name` in *current*, keeping the entry below it whole.
 
@@ -641,11 +730,15 @@ def _swap_entry(current: CommentedMap, name: str, values: Mapping[str, Any]) -> 
     the entry being replaced, write the new one, and hang the block back where
     the entry it introduces now begins.
 
+    **The new value is commented all the way down** (`_commented`): the walk
+    that hangs the block needs a node with comment slots, and the caller's
+    plain lists and mappings have none.
+
     Nothing is lifted when the name is not there yet — a fresh entry has no
     comment of its own to lose, and `_tail_of` needs the key to exist.
     """
     survivor = _take_intro(current, name) if name in current else None
-    current[name] = CommentedMap(_without_empties(values))
+    current[name] = _commented(_without_empties(values))
     if survivor is not None:
         _put_intro(current, name, survivor)
 
@@ -696,10 +789,14 @@ def set_enabled(
                 f"`{section}.{name}:` is not a mapping, so there is no entry to "
                 "switch. Fix the entry, or take it out."
             )
-        if enabled:
-            entry.pop("enabled", None)
-        else:
+
+        def switch_off() -> None:
             entry["enabled"] = False
+
+        def switch_on() -> None:
+            entry.pop("enabled", None)
+
+        _move_intro(current, name, switch_on if enabled else switch_off)
         found = True
 
     _edit(target, mutate)
@@ -814,9 +911,15 @@ def _read(target: Path) -> dict[str, Any]:
     """
     text = target.read_text(encoding="utf-8")
     try:
-        document = YAML(typ="safe").load(text) or {}
+        # **Only a null document is empty.**  `or {}` read `[]`, `""`, `false`
+        # and `0` as an empty file, so a listing answered `{}` for a file the
+        # loader refuses — the "a section that has four entries reported as
+        # one that has none" disagreement this reader exists to prevent.
+        document = YAML(typ="safe").load(text)
     except YAMLError as exc:
         raise ConfigError(f"{target} is not YAML: {exc}") from exc
+    if document is None:
+        document = {}
     if not isinstance(document, dict):
         raise ConfigError(f"{target} is not a mapping, so it has no sections")
     return document

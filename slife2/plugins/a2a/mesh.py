@@ -1151,6 +1151,11 @@ class A2AMesh:
             identifier=(
                 f"{self._topics.org}/{self._topics.unit}/{self.agent_name}-out"
             ),
+            # **The CONNACK wait has a bound, as it does on the probe.**  A
+            # broker that accepts TCP and never answers would otherwise block
+            # this reconnect loop for ever, so the member never resubscribes
+            # its request/reply/event topics and cannot heal on its own.
+            timeout=_T.timeouts.deliver.mqtt_connect,
         )
         while not self._closing:
             try:
@@ -2343,7 +2348,6 @@ class A2AMesh:
         Pure state read: nothing here dials and nothing is written down.
         """
         rows: list[dict] = []
-        now = time.monotonic()
         for task_id, send in self._sends.items():
             if not send.record:
                 continue
@@ -2351,8 +2355,12 @@ class A2AMesh:
             if record is not None and record.status in TERMINAL_STATUSES:
                 continue  # a cancelled/ended send is no longer open
             if send.interrupt:
-                if now - send.updated > _T.timeouts.pacing.a2a_task_ttl:
-                    continue
+                # **An interrupted task stays open until it is answered.**  It
+                # used to disappear from this listing after
+                # `pacing.a2a_task_ttl`, while `continue_task` still accepted
+                # the id and the peer still held the question — so the one read
+                # a model has for "what is waiting on me" stopped naming a task
+                # that was."
                 rows.append(
                     {
                         "task_id": task_id,

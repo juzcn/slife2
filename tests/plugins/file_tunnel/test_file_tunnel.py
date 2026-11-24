@@ -1034,3 +1034,41 @@ def test_the_shipped_config_reaches_the_plugin() -> None:
     config = load(root / "slife2.yaml")
     assert config.server("file-tunnel").port == 24038
     assert "file-tunnel" in config.plugins()
+
+
+@pytest.mark.asyncio
+async def test_the_lifespan_does_not_start_over_an_inherited_tunnel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The eager attempt ran before `inherited` was ever consulted.**  A
+    process handed a live tunnel by `SLIFE2_FILE_TUNNEL_URL` started a second
+    one on load, overwrote the variable, and from then on handed out links the
+    parent's listener did not serve."""
+    monkeypatch.setenv(_TUNNEL_URL_ENV, "https://inherited.test")
+    provider = FakeTunnel(inherited=True, url="https://inherited.test")
+
+    async with Client(server_for(provider)):
+        pass
+
+    assert provider.started == [], "the lifespan minted a second tunnel"
+    assert os.environ[_TUNNEL_URL_ENV] == "https://inherited.test"
+
+
+def test_the_live_token_is_not_written_to_the_log(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The token is the whole capability**, and its 30 hex characters are
+    deliberately under what a generic redactor masks.  The debug line therefore
+    wrote a live share URL capability into a log `slife2 logs` shows."""
+    import logging
+
+    from slife2.plugins.file_tunnel.server import Exposed
+
+    path = tmp_path / "private.txt"
+    path.write_text("not for everybody", encoding="utf-8")
+    exposed = Exposed()
+
+    with caplog.at_level(logging.DEBUG, logger="slife2.plugins.file_tunnel.server"):
+        exposure = exposed.register(str(path), None)
+
+    assert exposure.token not in caplog.text

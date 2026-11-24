@@ -317,6 +317,20 @@ def test_an_unresolved_token_is_reported_as_missing(monkeypatch) -> None:
         tunnel.start(9090)
 
 
+def test_a_reference_inside_a_larger_token_is_still_unresolved(monkeypatch) -> None:
+    """**A reference in a prefix counts.**  `resolve_secret` substitutes
+    `${VAR}` anywhere in a value, so `Bearer ${NGROK_AUTHTOKEN}` with the
+    variable absent stays a reference; the anchored regex this module carried
+    read it as a real token and would have sent the literal text as the
+    credential."""
+    monkeypatch.delenv("NGROK_AUTHTOKEN", raising=False)
+    assert providers._auth_token({"token": "Bearer ${NGROK_AUTHTOKEN}"}) is None
+
+    tunnel = NgrokTunnel({"token": "Bearer ${NGROK_AUTHTOKEN}"})
+    with pytest.raises(RuntimeError, match="auth token not found"):
+        tunnel.start(9090)
+
+
 def test_the_environment_is_the_fallback_for_a_bare_entry(monkeypatch) -> None:
     """`ngrok: {}` on a machine that exports the variable reads it from the
     environment."""
@@ -992,3 +1006,27 @@ def test_the_edge_address_is_really_read_from_the_child(monkeypatch) -> None:
     tunnel.start(24038)
     assert tunnel.edge_ip == "203.0.113.7"
     tunnel.stop()
+
+
+def test_a_missing_or_public_edge_does_not_probe_the_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The fake-ip probe is a synchronous `getaddrinfo`.**  `tunnel_status`
+    reads `edge_via_proxy` on the event loop, and the probe ran before the
+    address was even parsed — so an ngrok or localhost.run tunnel (no edge
+    address, or a public one) stalled every share download for a DNS timeout on
+    a question whose answer could not change the verdict."""
+    calls: list[int] = []
+
+    def probe() -> bool:
+        calls.append(1)
+        return True
+
+    monkeypatch.setattr(providers, "_resolver_uses_fake_ip", probe)
+
+    assert providers._is_fake_ip_answer("") is False
+    assert providers._is_fake_ip_answer("8.8.8.8") is False
+    assert calls == [], "the resolver was probed for an address it cannot judge"
+
+    assert providers._is_fake_ip_answer("198.18.0.1") is True
+    assert calls == [1]

@@ -136,7 +136,7 @@ import sqlite_vec
 from slife2.helpers.clock import now
 from slife2.helpers.fs import confined
 from slife2.libs.host.paths import home, work_dir
-from slife2.libs.paging import MAX_SQLITE_INT
+from slife2.libs.paging import page_window
 from slife2.libs.store import textindex
 from slife2.libs.store.index import (
     _OVERFETCH,
@@ -1603,13 +1603,12 @@ class CabinetStore:
             clauses.append(r"file_path LIKE ? ESCAPE '\'")
             values.append(f"{_like_literal(category)}/%")
         where = filter_clause(["kind = ?", *clauses])
-        limit = page_limit(limit, MAX_PAGE)
-        # **A page start is bound to SQLite, and it holds a signed 64-bit
-        # integer.**  A model can write more digits than that; the bind raises
-        # `OverflowError` out of a call that means "past the end", so the
-        # largest bindable start is the empty page it becomes (`page_window`
-        # states the same rule for the listings that go through it).
-        start = min(max(0, offset), MAX_SQLITE_INT)
+        # **One window for every listing.**  A page start is bound to SQLite,
+        # and it holds a signed 64-bit integer: a model can write more digits
+        # than that, and the bind raises `OverflowError` out of a call that
+        # means "past the end".  `page_window` floors, caps and states the
+        # rule once; this store had a hand copy of it.
+        limit, start = page_window(limit, offset, unset=1, cap=MAX_PAGE)
         with self._connect() as connection:
             # **One read snapshot for the count and the page**, because two
             # autocommit statements let a write between them put a row on the

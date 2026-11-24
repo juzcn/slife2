@@ -1391,6 +1391,20 @@ class Wechat:
         """
         return unaddressed("WeChat login to act on", "the login")
 
+    def caller(self, ctx: Context) -> str:
+        """The agent a model's call is on behalf of — or the refusal.
+
+        **One guard for the four tools**, because they are one rule: a shared
+        process cannot guess whose login a call means, so a call that names no
+        conversation is refused rather than answered about somebody else's.
+        The four bodies each spelled the read-and-raise out, which is four
+        chances for one of them to answer differently.
+        """
+        agent = self.who(ctx)
+        if not agent:
+            raise ToolError(self.unaddressed())
+        return agent
+
     async def status(self, session: Session) -> dict[str, Any]:
         """`wechat_check_status`: the link, why it is not working when it is
         not, and who a reply goes to.
@@ -1678,9 +1692,7 @@ def build_server(
             which is a machine that cannot draw one), and `seconds_left`, how
             long the code lasts.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.login(plugin.session(agent))
 
     @mcp.tool(name="wechat_check_status", meta=FOR_THE_MODEL)
@@ -1704,9 +1716,7 @@ def build_server(
             `heard_from` is whether they wrote to you — false means nobody has,
             and that peer is the account this login belongs to.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.status(plugin.session(agent))
 
     @mcp.tool(name="wechat_send_message", meta=FOR_THE_MODEL)
@@ -1732,9 +1742,7 @@ def build_server(
         Returns:
             `sent` — true, because a send that did not land raises.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.send(
             plugin.session(agent), peer_wechat_id, context_token, text
         )
@@ -1752,9 +1760,7 @@ def build_server(
             file is gone. When it is not, `login_file` says where it is, so a
             person can remove it by hand.
         """
-        agent = plugin.who(ctx)
-        if not agent:
-            raise ToolError(plugin.unaddressed())
+        agent = plugin.caller(ctx)
         return await plugin.logout(plugin.session(agent))
 
     return mcp

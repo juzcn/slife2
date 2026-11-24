@@ -261,7 +261,7 @@ class Exposed:
         exposure = Exposure(token, path, owner)
         self._by_token[token] = exposure
         self._by_path[key] = token
-        logger.debug("exposed path=%s token=%s", path, token)
+        logger.debug("exposed path=%s", path)
         return exposure
 
     def token_for(self, path: str, owner: ConversationKey | None) -> str:
@@ -622,13 +622,23 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         finish, so a failed start costs a log line rather than the plugin.
         """
         port = await share.start()
-        eager = asyncio.create_task(_start(tunnel, port, why="eager"))
+        # **An inherited tunnel is left alone.**  `SLIFE2_FILE_TUNNEL_URL` is
+        # another process's published tunnel; starting one here minted a second
+        # tunnel and overwrote the variable the parent passed down, so every
+        # link handed out afterwards belonged to a hostname the parent did not
+        # know — and `inherited` stopped refusing exposures it exists to refuse.
+        eager = (
+            None
+            if tunnel.inherited
+            else asyncio.create_task(_start(tunnel, port, why="eager"))
+        )
         tunnel.start_monitor(port)
         try:
             yield {}
         finally:
             tunnel.stop_monitor()
-            eager.cancel()
+            if eager is not None:
+                eager.cancel()
             try:
                 # `stop` kills a child and waits for it — up to the kill timeout.
                 await asyncio.to_thread(tunnel.stop)
@@ -767,7 +777,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             raise ToolError(
                 f"the token {wanted!r} belongs to another conversation's link."
             )
-        logger.info("unexposed token=%s", wanted)
+        logger.info("unexposed one link")
         return {"token": wanted}
 
     # ── Not for the model ────────────────────────────────────────────────

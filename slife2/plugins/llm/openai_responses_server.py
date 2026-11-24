@@ -422,6 +422,23 @@ def translate(event: Any, *, streamed: set[int] | None = None) -> list[ProviderE
             _note_streamed(streamed, event)
             events.append(Chunk(thinking=thinking))
 
+    elif kind == "response.refusal.delta":
+        # **A refusal is the answer, not a missing one.**  This protocol has a
+        # channel of its own for it (`response.refusal.delta` / `.done`, and a
+        # `refusal` content part on the assembled message), and the answer text
+        # is null beside it.  Ignoring the channel made a refusal into an empty
+        # answer and failed the turn.
+        text = getattr(event, "delta", "") or ""
+        if text:
+            _note_streamed(streamed, event)
+            events.append(Chunk(text=text))
+
+    elif kind == "response.refusal.done":
+        text = getattr(event, "refusal", "") or ""
+        if text and read_int(event, "output_index") not in (streamed or set()):
+            _note_streamed(streamed, event)
+            events.append(Chunk(text=text))
+
     elif kind == "response.output_item.added":
         # A function call opens as its own output item, which is where its
         # `call_id` and name are announced; the arguments stream afterwards.
@@ -538,10 +555,14 @@ def _text_that_never_streamed(
     for index, item in enumerate(getattr(response, "output", None) or []):
         if getattr(item, "type", "") != "message" or index in seen:
             continue
+        # **A refusal part is answer text too.**  The assembled message can
+        # carry `{"type": "refusal", "refusal": …}` where a normal answer has
+        # `output_text`; reading only `text` dropped the model's whole output
+        # from the back-fill and recorded an empty answer.
         text = "".join(
-            str(getattr(part, "text", "") or "")
+            str(getattr(part, "text", None) or getattr(part, "refusal", None) or "")
             for part in getattr(item, "content", None) or []
-            if getattr(part, "type", "") == "output_text"
+            if getattr(part, "type", "") in ("output_text", "refusal")
         )
         if text:
             events.append(Chunk(text=text))
@@ -655,7 +676,18 @@ def _arguments_that_never_streamed(
             events.append(
                 Chunk(
                     tool_call_deltas=(
-                        ToolCallDelta(index=index, arguments_delta=str(arguments)),
+                        ToolCallDelta(
+                            index=index,
+                            # **The whole call, not only its arguments.**  An
+                            # endpoint that assembles the call sends no
+                            # `output_item.added`, so this is the only place
+                            # the accumulator can learn the call's id and name;
+                            # without them the model's legitimate call arrives
+                            # as `name=""` and is answered "unknown tool".
+                            id=getattr(item, "call_id", None),
+                            name=getattr(item, "name", None),
+                            arguments_delta=str(arguments),
+                        ),
                     )
                 )
             )

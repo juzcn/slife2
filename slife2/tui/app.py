@@ -69,7 +69,7 @@ import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import ToolCounts
 from slife2.libs.harness import notes
 from slife2.libs.harness.i18n import t
-from slife2.libs.host.config import DEFAULT_AGENT
+from slife2.libs.host.config import DEFAULT_AGENT, prompt_budget
 from slife2.libs.plugin.vocabulary import NOTE, RUNNING, Handover
 from slife2.libs.turn.events import (
     MessageCutIn,
@@ -231,10 +231,9 @@ def model_choices(rows: Sequence[Mapping[str, Any]]) -> list[ModelChoice]:
                 ref=str(row.get("ref") or ""),
                 label="" if name == model else name,
                 context_window=int(row.get("context_window") or 0),
-                prompt_window=max(
-                    0,
-                    int(row.get("context_window") or 0)
-                    - int(row.get("max_tokens") or 0),
+                prompt_window=prompt_budget(
+                    int(row.get("context_window") or 0),
+                    int(row.get("max_tokens") or 0),
                 ),
                 thinking="reasoning" in marks,
                 vision="image" in marks,

@@ -463,18 +463,15 @@ class Unanswered(RuntimeError):
     to the model, so the reason is reported and no arguments are handed on; the
     harness passes the failure to the tool instead of an empty call.
 
-    `previous` is the model's own argument text, or the prose it answered with
-    when it called nothing, and `answered_with` is the tool it called, when it
-    called one.
+    **The reason is the payload**, and it is the only one read: the two callers
+    (`_decide`, `_select_live`) log it and the tool reports it.  The model's own
+    argument text and the tool it called instead were computed and carried
+    here, and no reader ever took them.
     """
 
-    def __init__(
-        self, reason: str, *, previous: str = "", answered_with: str = ""
-    ) -> None:
+    def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
-        self.previous = previous
-        self.answered_with = answered_with
 
 
 def decision_arguments(result: StreamChatResult, expected: str) -> str:
@@ -488,22 +485,10 @@ def decision_arguments(result: StreamChatResult, expected: str) -> str:
     names what was wrong.
     """
     if not result.tool_calls:
-        raise Unanswered(
-            "the reply held no tool call",
-            previous=str(result.text or ""),
-        )
+        raise Unanswered("the reply held no tool call")
     call = result.tool_calls[0]
     if call.name != expected:
-        previous = (
-            call.raw_arguments
-            if call.raw_arguments is not None
-            else json.dumps(call.arguments, ensure_ascii=False)
-        )
-        raise Unanswered(
-            f"the reply called {call.name!r}, not {expected!r}",
-            previous=previous,
-            answered_with=call.name,
-        )
+        raise Unanswered(f"the reply called {call.name!r}, not {expected!r}")
     if call.raw_arguments is not None:
         return call.raw_arguments
     return json.dumps(call.arguments, ensure_ascii=False)
@@ -1019,8 +1004,12 @@ def build_server(
             written now — and `turn_id`, which is `null` for a captured one.
         """
         agent, subagent = _caller(ctx)
-        summary = (summary or "").strip()
-        tags = (tags or "").strip()
+        # **`None` means "not named", `""` means "clear this field".**  The
+        # coercion to `""` made a tags-only call an explicit clear of the
+        # summary (and the reverse), because the store reads `None` as "keep
+        # what is there" — the documented rule the tool was erasing.
+        summary = None if summary is None else summary.strip()
+        tags = None if tags is None else tags.strip()
         if not summary and not tags:
             raise ToolError(f"{TURN_SUMMARIZE} needs a summary and/or tags")
         if turn_id is None:
@@ -1586,7 +1575,7 @@ def build_server(
             base = (
                 list(turn_ids)
                 if decision.keep is None
-                else [turn_id for turn_id in decision.keep if turn_id in in_hand]
+                else sorted(turn_id for turn_id in decision.keep if turn_id in in_hand)
             )
             unknown = (
                 []

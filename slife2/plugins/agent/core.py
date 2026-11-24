@@ -58,8 +58,7 @@ from slife2.libs.harness.dumps import Compress
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import CABINET_SERVER_NAME, Config
 from slife2.libs.host.paths import home, subagent_file
-from slife2.libs.host.runtime import read_claim
-from slife2.libs.host.subagents import SubagentSpec, subagent_spec
+from slife2.libs.host.subagents import subagent_spec
 from slife2.libs.plugin.audience import (
     FOR_THE_MODEL,
     ConversationId,
@@ -105,7 +104,9 @@ from slife2.libs.turn.events import (
 )
 from slife2.libs.turn.loop import AgentLoop, AutoCall, TurnResult
 from slife2.libs.turn.messages import Message, ToolCall, Usage
-from slife2.libs.turn.prompt import SUBAGENT_PROMPT, render_system_prompt
+from slife2.libs.turn.prompt import (
+    opening_messages,
+)
 from slife2.libs.turn.runtime import (
     ModelRef,
     TurnRuntime,
@@ -251,10 +252,16 @@ def log_turn(
         # loop could open, whose clock `keep_opening` takes.
         return
     result = outcome.result
-    if result is not None:
+    # **A failure outranks a result.**  The refused-record path has an answer
+    # in hand — the model did reply — but rolls the turn back and raises, so
+    # the line must say `failed` with the refusal rather than the stop reason
+    # of a turn the conversation no longer holds.
+    if failure is not None:
+        ending = (
+            "cancelled" if isinstance(failure, asyncio.CancelledError) else "failed"
+        )
+    elif result is not None:
         ending = result.stop_reason or "stop"
-    elif isinstance(failure, asyncio.CancelledError):
-        ending = "cancelled"
     else:
         ending = "failed"
     # **From the outcome, not the result.**  A cancelled turn has no result but
@@ -388,68 +395,6 @@ class Conversations:
             yield
         finally:
             self._removing.discard(key)
-
-
-def opening_messages(
-    agent: str, subagent: str, live: Config, spec: SubagentSpec
-) -> list[Message]:
-    """What a conversation starts with: its system prompt, and nothing else.
-
-    Rendered when the conversation starts rather than once at startup,
-    because the agent name is a property of the *key* — the server is shared,
-    so two agents are two names asking one process — and it is rendered from
-    the config a conversation *starts* from, so a prompt edited since boot
-    reaches the next one.
-
-    **A subagent is told its own name, its agent's, and where its work comes
-    from.**  Each follows from what it is: the name in the prompt is the one
-    it answers to (its agent's alone would be a model told it is somebody
-    else), the agent's name is whose subagent it is — and with it the member
-    it answers — and a subagent has no window at all, not a terminal and not
-    a headless one, so what reaches it comes from another member rather than
-    from a person at its own keyboard.
-
-    **It is told which tools carry a reply, not their schema.**  What the
-    call takes — `task_response`, `message_type`, the task's id — is what
-    the tool's own description says; a prompt that repeated the arguments
-    would be a second schema kept in step by hand.  The prompt's job is the
-    part no tool can state: what this conversation is.
-
-    **And it is told what it is, from its own file** (`subagent_spec`): the
-    `role` the agent named it with is the one thing from that file the prompt
-    uses.  Its prompt is `subagent.j2` and not the config's
-    (`SUBAGENT_PROMPT`), because the two say different things.
-
-    **And an agent's own prompt is rendered with whether anybody is
-    watching**, read off the claim the client under that name wrote
-    (`AgentClaim.headless`).  A prompt is where a model is told who it is
-    talking to, and an unattended agent has nobody: a tool call put up for
-    approval is granted without being read, so a model that asks is spending
-    the turn it was given.  **The unattended sentence names the tools a
-    reply leaves by** — the peer network's and the channel's own send tool —
-    because nobody is there to read prose.  Two ways for nobody to be there,
-    and they are one answer: the instance holding the name has no terminal
-    (`slife2 --headless`), or **no instance is holding it at all** — a peer
-    that asks something of an agent nobody is running is told so rather than
-    served (`slife2.libs.harness.handover`), and a turn that runs here
-    anyway is unattended for the same reason.  A subagent is not one of
-    those cases: it is always unattended, so its prompt has no claim to read.
-    """
-    if subagent:
-        system = render_system_prompt(
-            SUBAGENT_PROMPT,
-            agent_name=subagent,
-            agent=agent,
-            role=spec.role,
-        )
-    else:
-        claim = read_claim(agent)
-        system = render_system_prompt(
-            live.agent.system_prompt,
-            agent_name=agent,
-            headless=claim is None or claim.headless,
-        )
-    return [Message(role="system", content=system)] if system else []
 
 
 class AgentCore:
@@ -1232,7 +1177,9 @@ class AgentCore:
                 # writing an error pair at every boundary.
             if loop.inbox:
                 waiting = loop.inbox[0]
-                if not waiting.images:
+                if not waiting.images and (
+                    agent_loop is not None and agent_loop.declares(CHECK_NEW_INPUT)
+                ):
                     return AutoCall(
                         CHECK_NEW_INPUT,
                         channel=waiting.channel,
@@ -2162,6 +2109,14 @@ class AgentCore:
                         # messages back to the prefix the turn began on and
                         # un-answer the callers it had folded in; the refusal is
                         # what the caller sees.
+                        #
+                        # **The `failure` is what the turn's own log line reads.**
+                        # This `raise` sits in the `else` of the try/except
+                        # above, so the `except BaseException` that records a
+                        # failure never sees it: without this line `log_turn`
+                        # saw the successful result and wrote `stop=stop` about
+                        # a turn that was rolled back and raised.
+                        failure = refusal
                         logger.warning(
                             "the turn of %s was not recorded (%s); rolling it back",
                             describe((loop.agent, loop.subagent)),
@@ -2765,11 +2720,7 @@ class AgentCore:
         if at is None:
             return "This turn has no opening message; nothing to compact."
         if compact is None:
-            raise ToolError(
-                "a compaction needs a selection: pass `compact` (the live "
-                "message ids to drop, or [] for none). An empty call is not a "
-                "decision."
-            )
+            raise ToolError(compact_view.NO_SELECTION)
         if isinstance(compact, str):
             # **A string is the harness's failure selection**, carrying why the
             # selector could not answer.  The tool result names it; the parser
@@ -2778,7 +2729,7 @@ class AgentCore:
             # selection is a decision about the whole view, and re-asking it at
             # every boundary would pay for the same failure.
             loop.compact_hold = True
-            raise ToolError(f"the compaction selection could not be read: {compact}")
+            raise ToolError(compact_view.unreadable_selection(compact))
         result = await self.runtime.compact_turn(
             conversation_id,
             loop.messages,
@@ -2998,11 +2949,39 @@ def _reply(
     fewer pictures than the call asked for — is the one thing a caller cannot
     detect and a person cannot explain.
     """
+    return _reply_fields(
+        text=result.text,
+        usage=result.usage,
+        iterations=result.iterations,
+        stop_reason=result.stop_reason,
+        model=model,
+        injected=injected,
+        refused=refused,
+    )
+
+
+def _reply_fields(
+    *,
+    text: str,
+    usage: Usage,
+    iterations: int,
+    stop_reason: str,
+    model: str,
+    injected: bool,
+    refused: list[str],
+) -> dict[str, Any]:
+    """The one dict every reply is made of, whatever produced its values.
+
+    **One literal, because the key set is the promise.**  `_reply` and
+    `_injected_reply`'s no-answer case both build a reply, and a second
+    literal — which the injected case used to carry — means adding a key to
+    one leaves a hole in the other.
+    """
     return {
-        "text": result.text,
-        "usage": result.usage.to_wire(),
-        "iterations": result.iterations,
-        "stop_reason": result.stop_reason,
+        "text": text,
+        "usage": usage.to_wire(),
+        "iterations": iterations,
+        "stop_reason": stop_reason,
         "model": model,
         "injected": injected,
         "refused": refused,
@@ -3039,15 +3018,15 @@ def _injected_reply(item: Pending) -> dict[str, Any]:
     # so an empty answer says the only thing that is true — it was delivered and
     # not answered.  A caller that ran it again would store it twice.
     if item.result is None:
-        return {
-            "text": "",
-            "usage": Usage().to_wire(),
-            "iterations": 0,
-            "stop_reason": "",
-            "model": item.model,
-            "injected": True,
-            "refused": [],
-        }
+        return _reply_fields(
+            text="",
+            usage=Usage(),
+            iterations=0,
+            stop_reason="",
+            model=item.model,
+            injected=True,
+            refused=[],
+        )
     # Written together with `result` and only by a turn that produced one
     # (`Pending.model`), so by the time this caller is answered both are there.
     return _reply(item.result, model=item.model, injected=True, refused=[])

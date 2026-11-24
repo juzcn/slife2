@@ -219,9 +219,22 @@ class InboundStore:
         if len(self._tasks) <= MAX_INBOUND:
             return
         excess = len(self._tasks) - MAX_INBOUND + 50
-        ordered = sorted(
-            self._tasks.values(),
-            key=lambda t: (t.state not in TERMINAL_STATUSES, t.updated),
-        )
+
+        def evictability(task: InboundTask) -> tuple[int, float]:
+            # **Terminal first, then live work, and a paused task last.**  The
+            # old key put `working` and `interrupted` in one class, so an older
+            # interrupted record — the one whose peer is waiting on an answer
+            # somebody has to give — went before a newer working round, which is
+            # the opposite of what this module promises.
+            rank = (
+                0
+                if task.state in TERMINAL_STATUSES
+                else 2
+                if task.state == INTERRUPTED
+                else 1
+            )
+            return rank, task.updated
+
+        ordered = sorted(self._tasks.values(), key=evictability)
         for task in ordered[:excess]:
             self._tasks.pop(task.task_id, None)

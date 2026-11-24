@@ -273,3 +273,15 @@ def test_a_task_report_claims_no_record() -> None:
 
     assert "Dropped 2 message(s)" in text
     assert "turn log" not in text
+
+
+def test_the_two_compaction_refusals_are_one_sentence_each() -> None:
+    """Both servers that serve `_turn_compact` read these; the copies they each
+    carried were model-facing text that could drift."""
+    from slife2.libs.turn import compact as compact_module
+
+    assert compact_module.NO_SELECTION.startswith("a compaction needs a selection")
+    assert (
+        compact_module.unreadable_selection("the selector call failed")
+        == "the compaction selection could not be read: the selector call failed"
+    )

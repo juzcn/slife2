@@ -75,23 +75,58 @@ def decode_chunk(message: str) -> Chunk | None:
         case "text" if isinstance(payload.get("d"), str):
             return Chunk(text=payload["d"])
         case "chunk":
-            deltas = payload.get("t")
-            return Chunk(
-                text=str(payload.get("d") or ""),
-                thinking=str(payload.get("th") or ""),
-                tool_call_deltas=tuple(
-                    _delta_from_wire(d) for d in deltas if isinstance(d, dict)
-                )
-                if isinstance(deltas, list)
-                else (),
-                usage=(
-                    Usage.from_wire(payload["u"])
-                    if isinstance(payload.get("u"), dict)
-                    else None
-                ),
-            )
+            return _chunk_from_wire(payload)
         case _:
             return None
+
+
+#: The four counts `Usage.to_wire` writes; a payload with a hole was not this
+#: build's line.
+_USAGE_FIELDS = tuple(Usage().to_wire())
+
+
+def _chunk_from_wire(payload: dict[str, Any]) -> Chunk | None:
+    """The fuller chunk shape, or `None` when a field is not this build's.
+
+    **Every field is checked, not coerced.**  The docstring above promises a
+    line this build cannot read is dropped, and `str(payload.get("d"))` made
+    `{"d": 42}` a chunk of text `"42"` while `int(raw.get("i"))` and
+    `Usage.from_wire` raised out of the progress handler — a display line
+    failing the model call that was streaming beside it.
+    """
+    text = payload.get("d", "")
+    thinking = payload.get("th", "")
+    if not isinstance(text, str) or not isinstance(thinking, str):
+        return None
+    raw_deltas = payload.get("t", [])
+    if not isinstance(raw_deltas, list):
+        return None
+    deltas: list[ToolCallDelta] = []
+    for raw in raw_deltas:
+        delta = _delta_from_wire(raw)
+        if delta is None:
+            return None
+        deltas.append(delta)
+    usage = None
+    raw_usage = payload.get("u")
+    if raw_usage is not None:
+        if not _usage_ok(raw_usage):
+            return None
+        usage = Usage.from_wire(raw_usage)
+    return Chunk(
+        text=text,
+        thinking=thinking,
+        tool_call_deltas=tuple(deltas),
+        usage=usage,
+    )
+
+
+def _usage_ok(raw: Any) -> bool:
+    """The four token counts, present and integers rather than bools or text."""
+    return isinstance(raw, dict) and all(
+        isinstance(raw.get(key), int) and not isinstance(raw.get(key), bool)
+        for key in _USAGE_FIELDS
+    )
 
 
 def _delta_to_wire(delta: ToolCallDelta) -> dict[str, Any]:
@@ -111,11 +146,30 @@ def _delta_to_wire(delta: ToolCallDelta) -> dict[str, Any]:
     return payload
 
 
-def _delta_from_wire(raw: dict[str, Any]) -> ToolCallDelta:
-    """Rebuild one tool-call fragment."""
+def _delta_from_wire(raw: Any) -> ToolCallDelta | None:
+    """Rebuild one tool-call fragment, or `None` when it is not this build's.
+
+    `index` is an integer in `_delta_to_wire`; text and a non-integral index
+    are another build's line, and the whole chunk is dropped rather than a
+    fragment invented around them.
+    """
+    if not isinstance(raw, dict):
+        return None
+    index = raw.get("i", 0)
+    if isinstance(index, bool) or not isinstance(index, int):
+        return None
+    call_id = raw.get("id")
+    name = raw.get("name")
+    arguments = raw.get("a", "")
+    if call_id is not None and not isinstance(call_id, str):
+        return None
+    if name is not None and not isinstance(name, str):
+        return None
+    if not isinstance(arguments, str):
+        return None
     return ToolCallDelta(
-        index=int(raw.get("i") or 0),
-        id=raw.get("id"),
-        name=raw.get("name"),
-        arguments_delta=str(raw.get("a") or ""),
+        index=index,
+        id=call_id,
+        name=name,
+        arguments_delta=arguments,
     )

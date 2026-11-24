@@ -776,7 +776,7 @@ class ScheduleStore:
             )
         return self.run(name, due_at)
 
-    def begin_dispatch(self, name: str, due_at: str) -> Run | None:
+    def begin_dispatch(self, name: str, due_at: str) -> bool:
         """Mark a run as being dispatched, before the peer is called.
 
         **This is the marker that tells a crash in the dispatch from a crash
@@ -789,21 +789,22 @@ class ScheduleStore:
 
         **Compare-and-set, like every other write on a run.**  A skip can
         settle the row between the record and this call; an unconditional
-        update would then mark a run that is over as being dispatched.  The row
-        is answered either way — `dispatch` proceeds, and the `attach` that
-        follows reports that it did not take.
+        update would then mark a run that is over as being dispatched.  **The
+        answer is whether this call won that comparison** — the caller must not
+        start work for a row it did not claim, which is what a settled row or a
+        dispatch already in flight leaves it with.
         """
         task = self.task(name)
         if task is None:
-            return None
+            return False
         with self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE scheduled_runs SET dispatching = 1 "
                 "WHERE task_id = ? AND due_at = ? AND status = ?"
                 " AND agent_task_id = '' AND dispatching = 0",
                 (task.id, due_at, PENDING),
             )
-        return self.run(name, due_at)
+        return cursor.rowcount == 1
 
     def attach(self, name: str, due_at: str, agent_task_id: str) -> Run | None:
         """Say which background task is doing this run's work.

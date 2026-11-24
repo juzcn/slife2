@@ -547,7 +547,8 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             extra_headers={"X-DashScope-Async": "enable"},
             json_body={"model": model, "input": data, "parameters": params},
         )
-        task_id = (answer.get("output") or {}).get("task_id")
+        output = answer.get("output")
+        task_id = output.get("task_id") if isinstance(output, dict) else None
         if not task_id:
             raise MediaAdapterError(
                 f"the job was accepted without an id: {str(answer)[:300]}"
@@ -565,14 +566,31 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         loop = asyncio.get_running_loop()
         started = loop.time()
         url = f"{self._config.base_url}/tasks/{task_id}"
+
+        def out_of_time() -> MediaAdapterError:
+            return MediaAdapterError(
+                f"the job did not finish within {int(deadline_s)}s "
+                f"(provider task {task_id}); it may still be running there"
+            )
+
         while True:
-            if loop.time() - started > deadline_s:
+            remaining = deadline_s - (loop.time() - started)
+            if remaining <= 0:
+                raise out_of_time()
+            # **The caller's deadline bounds the request too.**  A GET carries
+            # its own 180 s transport timeout, so checking the clock only
+            # between requests let a `timeout: 5` call take minutes when one
+            # request hung near the boundary.
+            try:
+                async with asyncio.timeout(remaining):
+                    answer = await self._request("GET", url)
+            except TimeoutError:
+                raise out_of_time() from None
+            output = answer.get("output")
+            if not isinstance(output, dict):
                 raise MediaAdapterError(
-                    f"the job did not finish within {int(deadline_s)}s "
-                    f"(provider task {task_id}); it may still be running there"
+                    f"the job answered no output object: {str(answer)[:300]}"
                 )
-            answer = await self._request("GET", url)
-            output = answer.get("output") or {}
             status = str(output.get("task_status") or "")
             if status == "SUCCEEDED":
                 return output
@@ -581,7 +599,12 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
                     f"the job {status.lower()}: "
                     f"{output.get('message') or output.get('code') or 'no detail'}"
                 )
-            await asyncio.sleep(_T.timeouts.pacing.media_poll)
+            remaining = deadline_s - (loop.time() - started)
+            if remaining <= 0:
+                raise out_of_time()
+            # **The pause is clipped to what is left**, so the wait cannot
+            # overshoot the deadline by a whole poll period.
+            await asyncio.sleep(min(_T.timeouts.pacing.media_poll, remaining))
 
     async def _data_uri(self, path: Path, types: dict[str, str], what: str) -> str:
         """A local file as a `data:` URI, with its media type.
@@ -733,8 +756,12 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
             f"{self._config.base_url}{TTS_PATH}",
             json_body={"model": model, "input": data},
         )
-        output = answer.get("output") or {}
-        audio = output.get("audio") or {}
+        output = answer.get("output")
+        if not isinstance(output, dict):
+            raise MediaAdapterError(f"no audio in the answer: {str(answer)[:300]}")
+        audio = output.get("audio")
+        if not isinstance(audio, dict):
+            raise MediaAdapterError(f"no audio in the answer: {str(output)[:300]}")
         if url := audio.get("url"):
             path = await self._saver.save_url(
                 str(url), "audio", outputs_dir=outputs_dir

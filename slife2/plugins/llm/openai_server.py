@@ -295,6 +295,15 @@ def translate(event: Any) -> list[ProviderEvent]:
         )
 
     text = getattr(delta, "content", None) or ""
+    # **A refusal is the model's answer here.**  The chat-completions protocol
+    # carries it on `delta.refusal` with `content` null, and reading only the
+    # content made a refusal an empty answer — the loop fails the turn saying
+    # the provider said nothing, which is the confident negative SDD §6.3
+    # forbids.  Appended rather than replaced: a provider that streams both
+    # has spoken the answer in two channels.
+    refusal = getattr(delta, "refusal", None)
+    if isinstance(refusal, str) and refusal:
+        text += refusal
     if text or deltas:
         events.append(Chunk(text=text, tool_call_deltas=tuple(deltas)))
 

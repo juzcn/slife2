@@ -613,6 +613,28 @@ def test_open_tasks_lists_both_directions_and_skips_a_message(tmp_path: Path) ->
     assert "message-1" not in {r["task_id"] for r in rows}, "a message is not a task"
 
 
+def test_a_paused_send_is_listed_however_long_ago_it_paused(tmp_path: Path) -> None:
+    """**A task waiting for a person stays open until it is answered.**  The
+    listing hid an interrupted send after `pacing.a2a_task_ttl`, while
+    `continue_task` still accepted it and the peer still held the question — so
+    the one read for "what is waiting on me" stopped naming it."""
+    import time
+
+    import slife2.helpers.timeouts as _T
+
+    session = local_member(tmp_path, subagent="tester")
+    send = _OutboundSend("paused-1", PEER, "session", "{}")
+    send.interrupt = "input_required"
+    send.question = "which one?"
+    send.updated = time.monotonic() - _T.timeouts.pacing.a2a_task_ttl - 1
+    session.mesh._sends["paused-1"] = send
+
+    (row,) = session.mesh.open_tasks()
+
+    assert (row["task_id"], row["status"]) == ("paused-1", "interrupted")
+    assert row["question"] == "which one?"
+
+
 def test_completing_an_unknown_id_is_refused_with_the_sentence_that_fits() -> None:
     """A withdrawal is a real id the model was handed, so "check the marker"
     would send it re-reading a correct marker; a typo means re-read it.  A task
@@ -5345,3 +5367,45 @@ async def test_a_subagent_turn_is_submitted_while_the_previous_one_runs(
         writer.cancel()
         with pytest.raises(asyncio.CancelledError):
             await writer
+
+
+def test_the_inbound_cap_evicts_a_paused_task_last() -> None:
+    """**The cap is terminal-first, and interrupted work last.**  The key put a
+    `working` round and an `interrupted` one in the same class, so the older
+    paused task — the one whose peer is waiting on a person — was evicted before
+    a newer live round."""
+    from slife2.plugins.a2a.inbound_store import MAX_INBOUND, InboundStore
+
+    store = InboundStore()
+    store.add("paused", PEER)
+    store.interrupt("paused", "input_required", "which one?")
+    for index in range(MAX_INBOUND + 60):
+        store.add(f"round-{index}", PEER)
+
+    store.prune(ttl=10**9)
+
+    assert store.get("paused") is not None, "the paused task went first"
+    assert len(store._tasks) <= MAX_INBOUND
+
+
+def test_a_roster_is_measured_after_de_duplicating_on_both_reads() -> None:
+    """**The wire parser and the groups file are one validation.**  The parser
+    refused more than `MAX_MEMBERS` *raw* entries before de-duplicating while
+    the loader de-duplicated first, so the same roster loaded from a file and
+    was dropped as a `group_set`."""
+    from slife2.plugins.a2a.groups import MAX_MEMBERS
+
+    raw = [PEER] * (MAX_MEMBERS + 1)
+    assert group_store._roster(PEER, raw) == (PEER,)
+
+    event = group_store.parse_event(
+        {
+            "kind": group_store.KIND_SET,
+            "sender": PEER,
+            "group": GROUP,
+            "owner": PEER,
+            "gid": GID,
+            "members": raw,
+        }
+    )
+    assert event is not None and event.members == (PEER,)

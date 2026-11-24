@@ -377,6 +377,27 @@ def test_a_moment_the_local_zone_cannot_write_is_a_refusal(
     assert timeutil.can_place(value) is False
 
 
+def test_a_date_only_bound_the_platform_cannot_place_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The same edge, on the axis the string form hides.**
+
+    A date-only bound stays `YYYY-MM-DD` for its text readers, and the instant
+    readers give it a local offset later — so `4000-01-01` passed `can_place`
+    and then raised `OSError` out of the query on a platform whose calendar
+    conversion stops earlier.  The conversion is asked here, where the answer is
+    still a refusal, so the decision model's bad bound can still be dropped.
+    """
+
+    def unrepresentable(moment: datetime) -> str:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(timeutil, "at", unrepresentable)
+    assert timeutil.can_place("4000-01-01") is False
+    with pytest.raises(InvalidTimeBound):
+        normalize_bound("4000-01-01", role="since")
+
+
 def test_the_error_says_what_the_grammar_is() -> None:
     with pytest.raises(InvalidTimeBound, match="until bound"):
         normalize_bound("whenever", role="until")

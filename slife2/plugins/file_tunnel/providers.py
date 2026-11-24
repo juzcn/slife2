@@ -68,6 +68,7 @@ import slife2.helpers.timeouts as _T
 from slife2.libs.host.config import (
     DEFAULT_TUNNEL_PROVIDER,
     KNOWN_TUNNEL_PROVIDERS,
+    unresolved_reference,
 )
 
 logger = logging.getLogger(__name__)
@@ -161,14 +162,21 @@ def _is_fake_ip_answer(address: object) -> bool:
 
     False for a public address, which is a real destination, and for anything
     unparseable — an edge address never observed is not an interception.
+
+    **The address is read before the resolver is asked.**  The probe is a
+    synchronous `getaddrinfo`, and `tunnel_status` reads this property on the
+    event loop; asking it for an ngrok or localhost.run tunnel (which report no
+    edge address, or a public one) stalled every share download in flight on a
+    question whose answer could not change the verdict.  Only an address that is
+    not public can be a fake-ip answer.
     """
-    if not _resolver_uses_fake_ip():
-        return False
     try:
         ip = ipaddress.ip_address(address)  # type: ignore[arg-type]
     except (ValueError, TypeError):
         return False
-    return not ip.is_global
+    if ip.is_global:
+        return False
+    return _resolver_uses_fake_ip()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -252,9 +260,12 @@ def _import_ngrok() -> Any:
 #: **verbatim** rather than raised (that module's rule, so a missing key fails
 #: where it is used).  A tunnel is the one place that reads badly: the literal
 #: text would be sent as the token and come back as an authentication failure
-#: naming nobody's mistake.  So the unresolved form is recognised here and
-#: reported as the missing credential it is.
-_UNRESOLVED = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+#: naming nobody's mistake.  So the unresolved form is recognised here with
+#: `unresolved_reference` — the one rule for "is this credential still a
+#: reference" — and reported as the missing credential it is.  The regex this
+#: module used to carry was anchored to the whole value, so `Bearer ${VAR}` (a
+#: reference `resolve_secret` substitutes inside a larger string) travelled as
+#: the token.
 
 
 def _auth_token(options: dict) -> str | None:
@@ -267,7 +278,7 @@ def _auth_token(options: dict) -> str | None:
     variable the config names, so the two agree when both are present.
     """
     token = str(options.get("token") or "").strip()
-    if token and not _UNRESOLVED.match(token):
+    if token and not unresolved_reference(token):
         return token
     return os.environ.get("NGROK_AUTHTOKEN", "").strip() or None
 

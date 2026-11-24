@@ -61,11 +61,32 @@ class McpConfig(BaseModel):
                 raise ValueError("stdio needs `command` — the program to start")
             if self.url:
                 raise ValueError("stdio must not name `url` — choose one transport")
+            if self.headers:
+                raise ValueError(
+                    "stdio must not name `headers` — that belongs to the http "
+                    "transport, and nothing would send it"
+                )
         else:
             if not self.url:
                 raise ValueError("http needs `url` — the endpoint to connect to")
             if self.command:
                 raise ValueError("http must not name `command` — choose one transport")
+            # **A field of the other transport is a key nobody reads.**  These
+            # were accepted and silently dropped: `headers` on a stdio entry
+            # was never resolved or sent, and `args`/`env`/`cwd` on an http one
+            # never reached a process.  The operator believes the credential
+            # is in use, which is the one way a config can lie without an
+            # error (SDD §11.1, Appendix C).
+            for name, value in (
+                ("args", self.args),
+                ("env", self.env),
+                ("cwd", self.cwd),
+            ):
+                if value:
+                    raise ValueError(
+                        f"http must not name `{name}` — that belongs to the "
+                        f"stdio transport, and nothing would read it"
+                    )
         return self
 
 

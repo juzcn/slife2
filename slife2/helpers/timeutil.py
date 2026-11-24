@@ -236,6 +236,18 @@ def normalize_bound(value: str, *, role: str = "since") -> str:
     except (OverflowError, ValueError):
         raise InvalidTimeBound(_bound_error(role, value)) from None
 
+    # **A date-only bound is still a moment someone has to place.**  The
+    # comparison readers give it the local day's offset (`instant_bound`), and
+    # a year the platform's calendar conversion cannot restate — Windows fails
+    # from year 4000 — was an `OSError` out of a query rather than a bound this
+    # grammar refuses.  The string itself stays a date: text-prefix readers
+    # still compare it as written.
+    if "T" not in resolved:
+        try:
+            at(datetime.fromisoformat(resolved))
+        except (OverflowError, OSError, ValueError):
+            raise InvalidTimeBound(_bound_error(role, value)) from None
+
     # A model may write UTC or some other offset, and the column holds local
     # time.  Comparing the two lexicographically is wrong exactly at the
     # boundary — the same instant written two ways is two different strings.

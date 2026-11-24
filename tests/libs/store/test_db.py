@@ -350,6 +350,30 @@ async def test_a_damaged_live_context_is_refused_rather_than_coerced(
 
 
 @pytest.mark.asyncio
+async def test_a_live_context_id_no_row_can_have_is_dropped(tmp_path) -> None:
+    """An integer past SQLite's range is not a turn id, and it used to raise.
+
+    The type check accepts any int, so `turns_by_ids` was the first reader to
+    bind it and `OverflowError` came out of restore, a recall's exclusion
+    table, and `turn_search`.  No row can hold the id, so it is the registered
+    drop-and-count case — and dropping it in the one reader keeps
+    `append_context` from writing it back.
+    """
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    await _turn(store, "the question", "the answer", at=now())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO context (id, turn_ids) VALUES (1, ?)"
+            " ON CONFLICT(id) DO UPDATE SET turn_ids = excluded.turn_ids",
+            ("[1, 9223372036854775808]",),
+        )
+
+    assert store.context_turns() == [1]
+    assert [record.turn_id for record in store.turns_by_ids([1])] == [1]
+
+
+@pytest.mark.asyncio
 async def test_a_summary_that_cannot_be_encoded_does_not_lose_the_turn(
     tmp_path,
 ) -> None:
@@ -671,6 +695,18 @@ def test_a_name_that_cannot_name_a_file_is_refused(name: str) -> None:
         safe_agent_name(name)
 
 
+def test_a_name_with_a_surrogate_is_sanitised_not_a_codec_error() -> None:
+    """**The digest is of text a provider can emit.**  A lone surrogate cannot
+    be UTF-8 encoded, so hashing the raw name raised `UnicodeEncodeError` out of
+    `subagent_create` — the error class every stored string is normalised to
+    prevent (`storable`).  A split emoji pair is the same shape arriving from a
+    token stream."""
+    for raw in ("a\ud800b", "a😀b"):
+        made = safe_agent_name(raw)
+        assert made.startswith("a_b-"), made
+        assert safe_agent_name(made) == made
+
+
 # --- browsing: the window, the page, and the two halves -----------------------
 
 
@@ -784,6 +820,28 @@ async def test_a_bound_in_no_grammar_is_refused_rather_than_matching_nothing(
         store.turns(since="上个月", limit=5)
 
 
+def test_a_bound_the_instant_conversion_cannot_place_is_a_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`time_window` promises `InvalidTimeBound` for a bound it cannot place.
+
+    `normalize_bound` guards the calendar, and the *conversion to a `julianday`
+    parameter* ran afterwards without that guard: `instant_bound` can raise
+    `OSError` on a platform whose calendar stops earlier, and the day axis's
+    `+1 day` can overflow.  A query then raised instead of refusing the bound.
+    """
+    from slife2.libs.store import index
+
+    def unrepresentable(_bound: str) -> str:
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(index, "instant_bound", unrepresentable)
+    with pytest.raises(InvalidTimeBound):
+        index.time_window("2026-01-01", None)
+    with pytest.raises(InvalidTimeBound):
+        index.time_window(None, "2026-01-01")
+
+
 @pytest.mark.asyncio
 async def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
     """Ten turns, three pages, each turn exactly once.
@@ -804,6 +862,14 @@ async def test_paging_walks_back_one_page_at_a_time(tmp_path) -> None:
 
     assert seen == [f"turn {number}" for number in reversed(range(10))]
     assert len(set(seen)) == 10
+
+
+def test_an_offset_past_sqlite_is_an_empty_page_not_an_overflow(tmp_path) -> None:
+    """`page_window` is documented as every listing's window, and this store was
+    not using it: an offset past the signed 64-bit range reached the `OFFSET`
+    bind and raised instead of answering the page no row can be on."""
+    store = TurnStore(tmp_path / "jack.turn.db")
+    assert store.turns(limit=5, offset=2**63) == ([], 0)
 
 
 @pytest.mark.asyncio

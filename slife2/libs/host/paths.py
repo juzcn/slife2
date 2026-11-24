@@ -600,6 +600,38 @@ def replace_file(src: Path, dst: Path) -> None:
             time.sleep(_T.timeouts.pacing.file_release)
 
 
+def stage(path: Path, text: str) -> Path:
+    """Write *text* into a fresh temporary beside *path*, flushed and fsynced.
+
+    **One mechanical half for four callers.**  The home registry, a server
+    record, a client record and a state file all publish by "write beside the
+    target, rename onto it", and each had spelled the temp, the flush and the
+    fsync for itself — one of them (`runtime._write_json_atomic`) without the
+    fsync, and with a fixed `.tmp` name two writers could share.  What differs
+    between the callers is the *policy* of a failed write — raise, or warn and
+    answer `False` — and that stays with them; this is only the mechanism.
+
+    The caller renames the answer onto `path` with `replace_file` (or unlinks
+    it).  A failure here leaves no temporary behind: the file it would have
+    published was never complete, and the original is still exactly what it was.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            # **The bytes reach the disk before the name does.**  `os.replace`
+            # publishes whatever the file holds, and a crash in the window can
+            # leave a zero-length record that `known_homes` refuses as damage.
+            handle.flush()
+            os.fsync(handle.fileno())
+        return Path(tmp)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def _write_atomically(path: Path, text: str) -> None:
     """Put *text* at *path* so a reader sees all of it or none of it.
 
@@ -614,25 +646,14 @@ def _write_atomically(path: Path, text: str) -> None:
     *start-up* pass on an empty file that was never damaged, only in flight: a
     server the launcher reports as FAILED and an exit 2 on a first start.
 
-    Written beside the target and renamed onto it, which is what every other
-    bookkeeping file in this codebase does (`slife2.libs.host.runtime._write_json_atomic`)
-    — the one home this could not be folded into, because that one swallows the
-    failure and `register_home`'s contract is that a write which fails is raised:
-    a home nobody recorded is a home whose schedules never fire, and that has to
-    be the client's problem and not a line in a log.
+    The mechanics are `stage`'s; what is this caller's is that the failure is
+    **raised**: `register_home`'s contract is that a home nobody recorded is the
+    client's problem, where `runtime._write_json_atomic` warns and answers
+    `False` for a record its caller may survive.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+    tmp = stage(path, text)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            # **The bytes reach the disk before the name does.**  `os.replace`
-            # publishes whatever the file holds, and a crash in the window can
-            # leave a zero-length record that `known_homes` refuses as damage —
-            # the same failure `statefile.write` flushes and fsyncs to prevent.
-            handle.flush()
-            os.fsync(handle.fileno())
-        replace_file(Path(tmp), path)
+        replace_file(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)

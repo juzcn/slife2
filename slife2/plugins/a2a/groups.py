@@ -269,6 +269,28 @@ class EventResult:
     changed: bool = False
 
 
+def _roster(owner: str, raw_members: object) -> tuple[str, ...] | None:
+    """One event's or one file's member list, or `None` when it is not one.
+
+    **One validation for the two readers** — the wire parser and the groups
+    file.  They had copies whose checks were ordered differently: the parser
+    refused more than `MAX_MEMBERS` *raw* entries before de-duplicating, the
+    loader de-duplicated first.  A 65-entry roster reducing to 64 therefore
+    loaded and was dropped again on the same roster sent as a `group_set`.
+    """
+    if not isinstance(raw_members, list) or not raw_members:
+        return None
+    members: list[str] = []
+    for raw in raw_members:
+        if not isinstance(raw, str) or not valid_member_name(raw):
+            return None
+        if raw not in members:
+            members.append(raw)
+    if owner not in members or len(members) > MAX_MEMBERS:
+        return None
+    return tuple(members)
+
+
 def parse_event(data: Mapping[str, Any]) -> GroupEvent | None:
     """Validate one raw event payload, or answer ``None``.
 
@@ -295,17 +317,8 @@ def parse_event(data: Mapping[str, Any]) -> GroupEvent | None:
         return None
     if not isinstance(gid, str) or not gid or len(gid) > MAX_GID:
         return None
-    if not isinstance(raw_members, list) or not raw_members:
-        return None
-    if len(raw_members) > MAX_MEMBERS:
-        return None
-    members: list[str] = []
-    for raw in raw_members:
-        if not isinstance(raw, str) or not valid_member_name(raw):
-            return None
-        if raw not in members:
-            members.append(raw)
-    if owner not in members:
+    members = _roster(owner, raw_members)
+    if members is None:
         return None
     if kind == GROUP_MESSAGE:
         if not isinstance(text, str) or not text:
@@ -332,7 +345,7 @@ def parse_event(data: Mapping[str, Any]) -> GroupEvent | None:
         group=group,
         owner=owner,
         gid=gid,
-        members=tuple(members),
+        members=members,
         text=text,
     )
 
@@ -690,22 +703,15 @@ def _group_from_yaml(name: object, entry: object) -> Group | None:
         return None
     if not isinstance(gid, str) or not gid or len(gid) > MAX_GID:
         return None
-    if not isinstance(raw_members, list) or not raw_members:
-        return None
-    members: list[str] = []
-    for raw in raw_members:
-        if not isinstance(raw, str) or not valid_member_name(raw):
-            return None
-        if raw not in members:
-            members.append(raw)
-    if owner not in members or len(members) > MAX_MEMBERS:
+    members = _roster(owner, raw_members)
+    if members is None:
         return None
     if not isinstance(updated, str):
         updated = ""
     return Group(
         name=name,
         owner=owner,
-        members=tuple(members),
+        members=members,
         gid=gid,
         updated=updated,
     )

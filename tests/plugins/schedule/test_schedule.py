@@ -61,7 +61,7 @@ from slife2.libs.plugin.vocabulary import (
     RUNNING as TASK_RUNNING,
 )
 from slife2.libs.store.db import StaleSchema
-from slife2.plugins.schedule.expressions import latest_fire
+from slife2.plugins.schedule.expressions import latest_fire, next_run
 from slife2.plugins.schedule.server import (
     SCHEDULE_LIST,
     SCHEDULE_REMOVE,
@@ -1271,6 +1271,48 @@ async def test_run_now_refuses_a_run_that_has_already_ended(tasks: Tasks) -> Non
             )
 
 
+async def test_run_now_does_not_start_work_for_a_settled_run_at_this_instant(
+    tasks: Tasks, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The no-`due_at` path checks the row before it dispatches too.**
+
+    It only returned early for a `pending` row with a task id; a `missed`
+    (or `failed`) row at the same second fell through, `agent_task_start` ran
+    the work, and the compare-and-sets in `record`/`attach` silently no-opped —
+    so the answer stayed "missed" about work that was really running.
+    """
+    from slife2.plugins.schedule import server as schedule_server
+
+    async with Client(build(tasks=tasks)) as client:
+        await write(client)
+        stamp = now()
+        monkeypatch.setattr(schedule_server, "now", lambda: stamp)
+        store = ledger()
+        task = store.task("daily")
+        assert task is not None
+        store.record(task, stamp)
+        store.settle("daily", stamp, MISSED, error="nobody was here")
+
+        with pytest.raises(ToolError, match="already missed"):
+            await ask(client, SCHEDULE_RUN_NOW, {"name": "daily"})
+
+    assert tasks.started == [], "work ran for a run the ledger said had ended"
+    assert ledger().run("daily", stamp).status == MISSED
+
+
+async def test_writing_a_task_answers_with_the_whole_description() -> None:
+    """**A listing cuts a row; the answer to writing it is the task.**  The
+    returned row carried the 120-character cut, so a model copying it back into
+    a whole-task `schedule_set` silently lost the tail."""
+    long = "x" * 200
+    async with Client(build()) as client:
+        written = await write(client, description=long)
+        listed = await ask(client, SCHEDULE_LIST)
+
+    assert written["description"] == long
+    assert listed["tasks"][0]["description"] == long[:120]
+
+
 async def test_skipping_a_run_is_an_answer_rather_than_a_gap() -> None:
     """A skipped run is an answer, and it has no moment it happened at.
 
@@ -2330,6 +2372,27 @@ async def test_a_fall_back_repeat_fires_once_and_not_twice() -> None:
     )
 
 
+async def test_next_run_does_not_promise_a_fall_back_repeat() -> None:
+    """**The same rule, on the reader a person sees.**
+
+    `latest_fire` suppresses the second occurrence of a wall reading; the
+    `next_run` the task listing prints was a bare `croniter.get_next`, so it
+    promised a fire the poll would never run.  The reading is skipped while its
+    first occurrence is at or behind the anchor.
+    """
+    fired = datetime.fromisoformat("2026-10-25T01:00+01:00")
+    assert next_run("0 1 * * *", fired, "Europe/London") == datetime.fromisoformat(
+        "2026-10-26T01:00+00:00"
+    )
+
+    # Inside the repeated hour, every repeated reading has already fired; the
+    # next new reading is 02:00 GMT.
+    inside = datetime.fromisoformat("2026-10-25T01:50+01:00")
+    assert next_run("*/10 * * * *", inside, "Europe/London") == datetime.fromisoformat(
+        "2026-10-25T02:00+00:00"
+    )
+
+
 async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> None:
     """The same rule at the clock, which is where the second run was written.
 
@@ -2359,3 +2422,39 @@ async def test_a_fall_back_repeat_does_not_open_a_second_run(window: Window) -> 
     assert did == []
     assert window.asked == []
     assert store.newest("daily") is None, "no second run was written"
+
+
+async def test_a_background_task_ending_is_read_one_way() -> None:
+    """The poll's reconcile and the startup sweep close a run from the same
+    task row; they each had their own copy of this mapping."""
+    from types import SimpleNamespace
+
+    from slife2.plugins.schedule.server import _settle_from_task
+
+    run = SimpleNamespace(name="daily", due_at="2026-10-12T09:00:00+08:00")
+    calls: list[tuple[tuple, dict]] = []
+
+    class Store:
+        def settle(self, *args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    _settle_from_task(
+        Store(),
+        run,
+        {"status": TASK_FINISHED, "finished_at": "2026-10-12T09:00:10+08:00"},
+    )
+    assert calls == [
+        (
+            ("daily", "2026-10-12T09:00:00+08:00", RAN),
+            {"when": "2026-10-12T09:00:10+08:00"},
+        )
+    ]
+
+    calls.clear()
+    _settle_from_task(Store(), run, {"status": TASK_FAILED})
+    assert calls == [
+        (
+            ("daily", "2026-10-12T09:00:00+08:00", FAILED),
+            {"error": "the background task ended as failed"},
+        )
+    ]

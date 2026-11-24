@@ -43,6 +43,24 @@ from typing import Any
 from slife2.libs.turn.context import with_note
 from slife2.libs.turn.messages import Message
 
+#: The refusal a `_turn_compact` call that names no selection gets.  **One
+#: sentence for the two servers that serve the tool** (the agent's and an agent
+#: task's): both bodies had their own copy, and it is model-facing text.
+NO_SELECTION = (
+    "a compaction needs a selection: pass `compact` (the live message ids to "
+    "drop, or [] for none). An empty call is not a decision."
+)
+
+
+def unreadable_selection(value: object) -> str:
+    """The refusal a selection the harness could not read — its failure text — gets.
+
+    A string under `compact` is the selector's failure carried into the call,
+    not a list this build can apply; the tool result quotes it rather than the
+    parser's "not an array", which loses the reason.
+    """
+    return f"the compaction selection could not be read: {value}"
+
 
 @dataclass(frozen=True)
 class Compacted:

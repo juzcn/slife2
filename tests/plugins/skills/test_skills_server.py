@@ -134,6 +134,24 @@ async def test_the_schema_is_read_off_the_signature(isolated_runtime: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_an_unreadable_skills_folder_is_an_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**`use` promises `(text, ok)` for anything the folder can be.**  The
+    server's switch lookup ran `find` before it and let the same `PermissionError`
+    escape the tool, so the promise held one call too late."""
+    from slife2.plugins.skills import playbooks
+
+    def unreadable(*_args: object, **_kwargs: object) -> object:
+        raise PermissionError("the skills directory is not listable")
+
+    monkeypatch.setattr(playbooks, "scan", unreadable)
+    async with Client(build_server(default_config())) as client:
+        with pytest.raises(ToolError, match="skills folder cannot be read"):
+            await client.call_tool(USE_TOOL, {"name": "anything"})
+
+
+@pytest.mark.asyncio
 async def test_skill_use_reads_the_document(isolated_runtime: Path) -> None:
     """**The whole `SKILL.md`, as text, rather than a JSON answer about it.**
 

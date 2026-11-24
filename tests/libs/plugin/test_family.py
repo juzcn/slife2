@@ -255,3 +255,23 @@ async def test_an_edit_leaves_an_entry_where_the_file_has_it() -> None:
     declared = await family.declare()
 
     assert [source["name"] for source in declared["sources"]] == ["a", "b", "c"]
+
+
+def test_a_reader_keeps_the_snapshot_it_captured() -> None:
+    """**The mirror is copied, not popped.**  `list_sources` is a sync tool on a
+    worker thread and the management tools run on the loop; mutating the dict it
+    is iterating raised "dictionary changed size during iteration"."""
+    from slife2.libs.plugin.family import Documents
+
+    documents = Documents(
+        source="cli",
+        category="cli",
+        section="cli",
+        entries={"one": object(), "two": object()},
+    )
+    captured = documents.entries
+
+    documents.forgotten("one")
+
+    assert set(captured) == {"one", "two"}, "the reader's snapshot was mutated"
+    assert set(documents.entries) == {"two"}

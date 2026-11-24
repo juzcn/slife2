@@ -64,7 +64,7 @@ import contextlib
 import logging
 import re
 import sqlite3
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -551,7 +551,19 @@ async def dispatch(
     # that stops inside it leaves a row with no task and no way to tell "never
     # started" from "may be running".  This marker is that distinction; the
     # startup sweep resolves the marked ones by name (`_resolve_dispatching`).
-    store.begin_dispatch(task.name, due_at)
+    #
+    # **The claim is checked.**  `record` is insert-or-nothing, so the row may
+    # already be settled (`missed`, `ran`, `failed`) or in flight; starting the
+    # peer task anyway ran work the ledger said had ended, and `attach` could
+    # not write it down.  The compare-and-set is the decision: a claim this
+    # call did not win is not a run it may start.
+    if not store.begin_dispatch(task.name, due_at):
+        current = store.run(task.name, due_at)
+        state = current.status if current is not None else "gone"
+        raise ToolError(
+            f"the run of {task.name!r} due at {due_at!r} is already {state}; "
+            "it was not started again."
+        )
     # **Opening the peer is part of the dispatch.**  A `tasks_server` call sits
     # outside the `try` at the caller's peril: a failure to reach the agent-task
     # plugin — a port that is not listening, a peer that answers as somebody else
@@ -640,6 +652,30 @@ async def dispatch(
     return attached
 
 
+def _settle_from_task(store: ScheduleStore, run: Run, found: Mapping[str, Any]) -> None:
+    """Close one run from the agent task's own ending.
+
+    **One mapping for the two paths that read it** — the poll's reconcile and
+    the startup sweep's dispatch resolution.  It was written out twice, so a new
+    task status or a change to which field carries the ending had to be made in
+    both, or one path closed a run differently from the other.
+    """
+    if found["status"] == TASK_FINISHED:
+        store.settle(
+            run.name,
+            run.due_at,
+            RAN,
+            when=str(found.get("finished_at") or ""),
+        )
+    else:
+        store.settle(
+            run.name,
+            run.due_at,
+            FAILED,
+            error=f"the background task ended as {found['status']}",
+        )
+
+
 async def reconcile(config: Config, *, tasks_client: Client | None = None) -> list[str]:
     """Close the runs whose background task has ended.
 
@@ -714,20 +750,8 @@ async def _reconcile_one(
             )
         elif found["status"] == TASK_RUNNING:
             continue
-        elif found["status"] == TASK_FINISHED:
-            store.settle(
-                run.name,
-                run.due_at,
-                RAN,
-                when=str(found.get("finished_at") or ""),
-            )
         else:
-            store.settle(
-                run.name,
-                run.due_at,
-                FAILED,
-                error=f"the background task ended as {found['status']}",
-            )
+            _settle_from_task(store, run, found)
         did.append(f"{store.agent}: {run.name} due {run.due_at} closed")
     return did
 
@@ -962,20 +986,8 @@ async def _resolve_dispatching(
                 # The work is being done: put its id on the row and let the next
                 # poll's reconcile close it from the task's own ending.
                 store.attach(run.name, run.due_at, str(found["task_id"]))
-            elif found["status"] == TASK_FINISHED:
-                store.settle(
-                    run.name,
-                    run.due_at,
-                    RAN,
-                    when=str(found.get("finished_at") or ""),
-                )
             else:
-                store.settle(
-                    run.name,
-                    run.due_at,
-                    FAILED,
-                    error=f"the background task ended as {found['status']}",
-                )
+                _settle_from_task(store, run, found)
             resolved += 1
     return resolved
 
@@ -1210,13 +1222,20 @@ def build_server(
             )
         return found
 
-    def row(task: Task, reference: datetime | None = None) -> dict[str, Any]:
+    def row(
+        task: Task, reference: datetime | None = None, *, shorten: bool = True
+    ) -> dict[str, Any]:
         """A task as a tool answers it, with when it next comes due.
 
         The next fire is computed rather than stored, because it is a fact about
         the expression and the clock rather than about anything this system wrote
         down — a stored one would be a second answer to keep in step with the
         task, and the one that goes stale after an edit.
+
+        `shorten=False` is `schedule_set`'s: a listing cuts the description
+        because a row is a line, but the answer to writing a task is the task —
+        a model that copies the returned row back into another whole-task write
+        was silently losing the tail past 120 characters.
         """
         answered = task.row()
         try:
@@ -1231,7 +1250,8 @@ def build_server(
             # listing that fails entirely over one bad row is worse than one that
             # says so in that row.
             answered["next_run"] = f"unreachable: {exc}"
-        answered["description"] = task.description[:DESCRIPTION_CHARS]
+        if shorten:
+            answered["description"] = task.description[:DESCRIPTION_CHARS]
         return answered
 
     @asynccontextmanager
@@ -1329,7 +1349,7 @@ def build_server(
         async with RunLocks.held(locks, store, name):
             task = store.put_task(name, description, cron, timezone, enabled=enabled)
         logger.info("scheduled task %s written for %s", name, agent)
-        return row(task)
+        return row(task, shorten=False)
 
     @mcp.tool(name=SCHEDULE_REMOVE, meta=FOR_THE_MODEL)
     async def schedule_remove(ctx: Context, name: str) -> dict[str, Any]:

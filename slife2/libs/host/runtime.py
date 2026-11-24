@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import now
-from slife2.libs.host.paths import digest, replace_file, runtime_dir
+from slife2.libs.host.paths import digest, replace_file, runtime_dir, stage
 
 logger = logging.getLogger(__name__)
 
@@ -243,13 +243,15 @@ def _read_json_dataclass[RecordT](
     different way the file fails to be one: `read_text` raises `OSError` when it
     is not there, `json` raises `ValueError` when the text is not JSON, and
     `factory` raises `KeyError`/`TypeError`/`ValueError` when the object is not
-    the shape it expects.  All four mean the same thing to a reader here.
+    the shape it expects.  **`OverflowError` is the fifth**: JSON `1e400`
+    parses to `inf`, and `int(inf)` is an overflow rather than a value — a
+    damaged pid is damage like the rest, and this reader may not raise.
     """
     try:
         return factory(json.loads(path.read_text(encoding="utf-8")))
     except FileNotFoundError:
         return None
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
         if path.exists():
             logger.warning(
                 "%s could not be read as a record (%s); reading it as absent",
@@ -276,15 +278,24 @@ def _write_json_atomic(path: Path, obj: Any) -> bool:
     and the log names it), but a *client* record that never landed leaves a live
     client uncounted, and the last count is what stops the shared servers; that
     caller refuses the start instead (`register_client`).
+
+    **The mechanics are `slife2.libs.host.paths.stage`'s**: a fresh temporary
+    beside the file, flushed and fsynced before the rename.  This writer used a
+    fixed `.tmp` name and never flushed, so two writers could share one
+    temporary and a crash could publish an empty record — the durability the
+    registry and state files were already given.
     """
-    tmp = path.with_suffix(".tmp")
+    tmp: Path | None = None
     try:
-        tmp.write_text(json.dumps(asdict(obj), indent=2), encoding="utf-8")
+        tmp = stage(path, json.dumps(asdict(obj), indent=2))
         # `replace_file` rather than `os.replace`: a reader — a `status`, or
         # another instance's claim check — holds the record open for as long as
         # its read takes, and Windows refuses the rename until it lets go.
         replace_file(tmp, path)
     except OSError as exc:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
         logger.warning(
             "could not write %s (%s); whatever it records is now invisible to "
             "`stop` and may be orphaned",
@@ -322,12 +333,43 @@ def records() -> list[ServerRecord]:
     return found
 
 
+#: The largest pid this platform's process table can hold.  POSIX's `pid_t` is
+#: a signed 32-bit integer and Windows' process id is a `DWORD`; a larger number
+#: is not a process anywhere, and handing one to `OpenProcess`/`os.kill` raises
+#: `ctypes.ArgumentError`/`OverflowError` out of a *bookkeeping* read instead of
+#: answering "no such process".
+MAX_PID = 2**32 - 1 if sys.platform == "win32" else 2**31 - 1
+
+
+def _pid(raw: Any) -> int:
+    """One record's pid, if it is a number this machine could have assigned.
+
+    **A damaged pid is damage, not a traceback.**  `json` parses `1e400` to
+    `inf` — valid JSON — and `int(inf)` raises `OverflowError`, which is not a
+    `ValueError` and used to escape every reader here.  A 20-digit integer
+    survives `int()` and then dies in the kernel handle call, so the range is
+    checked too.  Both become `ValueError`, the shape `_read_json_dataclass`
+    reads as "not this build's record".
+    """
+    if isinstance(raw, bool):
+        raise ValueError(f"{raw!r} is not a process id")
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{raw!r} is not a process id") from exc
+    if isinstance(raw, float) and raw != pid:
+        raise ValueError(f"{raw!r} is not a process id")
+    if not 0 < pid <= MAX_PID:
+        raise ValueError(f"{raw!r} is not a process id")
+    return pid
+
+
 def _record_from(raw: dict[str, Any]) -> ServerRecord:
     """One record's fields, as `read_record` requires them."""
     return ServerRecord(
         name=str(raw["name"]),
         url=str(raw["url"]),
-        pid=int(raw["pid"]),
+        pid=_pid(raw["pid"]),
         start_token=str(raw["start_token"] or ""),
         config=str(raw["config"] or ""),
         version=str(raw["version"] or ""),
@@ -421,7 +463,7 @@ def read_claim(name: str) -> AgentClaim | None:
         agent_claim_path(name),
         lambda raw: AgentClaim(
             name=str(raw["name"]),
-            pid=int(raw["pid"]),
+            pid=_pid(raw["pid"]),
             start_token=str(raw["start_token"] or ""),
             started_at=str(raw["started_at"] or ""),
             headless=_claim_headless(raw["headless"]),
@@ -525,9 +567,10 @@ def _pid_in_client_name(path: Path) -> int | None:
     """
     head, _, _ = path.name.partition("-")
     try:
-        return int(head)
+        pid = int(head)
     except ValueError:
         return None
+    return pid if 0 < pid <= MAX_PID else None
 
 
 def live_clients() -> list[ClientRecord]:
@@ -548,7 +591,7 @@ def live_clients() -> list[ClientRecord]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             record = ClientRecord(
-                pid=int(raw["pid"]),
+                pid=_pid(raw["pid"]),
                 agent=str(raw.get("agent") or ""),
                 start_token=str(raw.get("start_token") or ""),
             )
@@ -677,7 +720,7 @@ def pid_alive(pid: int) -> bool:
     running, because the other direction claims a daemon is gone that may still
     be holding its port.
     """
-    if pid <= 0:
+    if pid <= 0 or pid > MAX_PID:
         return False
 
     if sys.platform == "win32":
@@ -805,7 +848,7 @@ def process_start_token(pid: int) -> str | None:
     Returning None is a normal outcome, not a failure: the caller treats it as
     "cannot prove", which is the safe direction.
     """
-    if pid <= 0:
+    if pid <= 0 or pid > MAX_PID:
         return None
     source = _START_TOKEN_SOURCES.get(sys.platform)
     if source is not None:

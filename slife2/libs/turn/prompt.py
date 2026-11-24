@@ -43,8 +43,11 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, TemplateError, select_autoescape
 
-from slife2.libs.host.config import ConfigError
+from slife2.libs.host.config import Config, ConfigError
 from slife2.libs.host.paths import AGENTS_DOC, agents_doc
+from slife2.libs.host.runtime import read_claim
+from slife2.libs.host.subagents import SubagentSpec
+from slife2.libs.turn.messages import Message
 
 #: Where the templates this distribution ships live.
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -199,3 +202,65 @@ def _render(template: str | Path | None, context: dict[str, object]) -> str:
         return _renderer(directory).get_template(name).render(**context)
     except TemplateError as exc:
         raise ConfigError(f"cannot render {path}: {exc}") from exc
+
+
+def opening_messages(
+    agent: str, subagent: str, live: Config, spec: SubagentSpec
+) -> list[Message]:
+    """What a conversation starts with: its system prompt, and nothing else.
+
+    Rendered when the conversation starts rather than once at startup,
+    because the agent name is a property of the *key* — the server is shared,
+    so two agents are two names asking one process — and it is rendered from
+    the config a conversation *starts* from, so a prompt edited since boot
+    reaches the next one.
+
+    **A subagent is told its own name, its agent's, and where its work comes
+    from.**  Each follows from what it is: the name in the prompt is the one
+    it answers to (its agent's alone would be a model told it is somebody
+    else), the agent's name is whose subagent it is — and with it the member
+    it answers — and a subagent has no window at all, not a terminal and not
+    a headless one, so what reaches it comes from another member rather than
+    from a person at its own keyboard.
+
+    **It is told which tools carry a reply, not their schema.**  What the
+    call takes — `task_response`, `message_type`, the task's id — is what
+    the tool's own description says; a prompt that repeated the arguments
+    would be a second schema kept in step by hand.  The prompt's job is the
+    part no tool can state: what this conversation is.
+
+    **And it is told what it is, from its own file** (`subagent_spec`): the
+    `role` the agent named it with is the one thing from that file the prompt
+    uses.  Its prompt is `subagent.j2` and not the config's
+    (`SUBAGENT_PROMPT`), because the two say different things.
+
+    **And an agent's own prompt is rendered with whether anybody is
+    watching**, read off the claim the client under that name wrote
+    (`AgentClaim.headless`).  A prompt is where a model is told who it is
+    talking to, and an unattended agent has nobody: a tool call put up for
+    approval is granted without being read, so a model that asks is spending
+    the turn it was given.  **The unattended sentence names the tools a
+    reply leaves by** — the peer network's and the channel's own send tool —
+    because nobody is there to read prose.  Two ways for nobody to be there,
+    and they are one answer: the instance holding the name has no terminal
+    (`slife2 --headless`), or **no instance is holding it at all** — a peer
+    that asks something of an agent nobody is running is told so rather than
+    served (`slife2.libs.harness.handover`), and a turn that runs here
+    anyway is unattended for the same reason.  A subagent is not one of
+    those cases: it is always unattended, so its prompt has no claim to read.
+    """
+    if subagent:
+        system = render_system_prompt(
+            SUBAGENT_PROMPT,
+            agent_name=subagent,
+            agent=agent,
+            role=spec.role,
+        )
+    else:
+        claim = read_claim(agent)
+        system = render_system_prompt(
+            live.agent.system_prompt,
+            agent_name=agent,
+            headless=claim is None or claim.headless,
+        )
+    return [Message(role="system", content=system)] if system else []

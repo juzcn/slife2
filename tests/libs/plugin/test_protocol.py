@@ -37,6 +37,7 @@ from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.plugin.protocol import (
     UnreadableAnswer,
     close_server,
+    describe,
     house_server,
     identifies,
     open_server,
@@ -44,6 +45,16 @@ from slife2.libs.plugin.protocol import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+def test_describe_is_the_trace_spelling() -> None:
+    """**One sentence for one conversation**, in a log trace and in a message
+    subject.  The two were copies, and a change to either could name one
+    conversation two ways."""
+    from slife2.helpers import logcontext
+
+    for conversation in (("jack", ""), ("jack", "echo")):
+        assert describe(conversation) == logcontext.describe(*conversation)
 
 
 class CountingClient:

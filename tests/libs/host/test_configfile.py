@@ -579,6 +579,78 @@ def test_the_switch_is_written_where_the_entry_is(tmp_path) -> None:
     assert "enabled" not in added(path, "chinese")
 
 
+#: A rewrite target that ends on a sequence, followed by a comment that
+#: introduces the next entry — the shape every `mcp:` entry in the shipped
+#: file has, and the one a plain list in the rewrite stopped the walk at.
+COMMENTED_TAIL = (
+    REQUIRED + "mcp:\n"
+    "  # Describes slow-one, which is written again.\n"
+    "  slow-one:\n"
+    "    command: npx\n"
+    "    args:\n"
+    "      - one  # inline note\n"
+    "  # Describes filesystem, which stays.\n"
+    "  filesystem:\n"
+    "    command: fs\n"
+    "    args:\n"
+    "      - -x\n"
+)
+
+
+def _assert_next_comment_above_its_entry(path) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    at = lines.index("  # Describes filesystem, which stays.")
+    assert lines[at + 1] == "  filesystem:", (
+        "the block introducing the next entry must print above that entry — "
+        "not inside the edited one, above one of its list items"
+    )
+
+
+def test_a_rewrite_does_not_strand_the_next_comment_inside_the_entry(tmp_path) -> None:
+    """**A plain list has no comment slots.**  `upsert` and `update_entry` hand
+    `_swap_entry` plain Python values; writing the next entry's introduction
+    onto the edited entry's last key then rendered it at the head of that list,
+    and a later `remove` took it out with the container.
+    """
+    path = tmp_path / "slife2.yaml"
+    path.write_text(COMMENTED_TAIL, encoding="utf-8")
+
+    upsert("mcp", "slow-one", {"command": "uvx", "args": ["other"]}, path=path)
+    _assert_next_comment_above_its_entry(path)
+    assert "# inline note" in path.read_text(encoding="utf-8")
+
+    path.write_text(COMMENTED_TAIL, encoding="utf-8")
+    update_entry(
+        "mcp", "slow-one", lambda current: {**current, "args": ["-z"]}, path=path
+    )
+    _assert_next_comment_above_its_entry(path)
+
+    assert remove("mcp", "slow-one", path=path) is True
+    after = path.read_text(encoding="utf-8")
+    assert "Describes filesystem" in after, (
+        "the next entry's comment went out with the edited entry's container"
+    )
+    _assert_next_comment_above_its_entry(path)
+
+
+def test_the_switch_does_not_strand_the_next_comment_inside_the_entry(tmp_path) -> None:
+    """`enabled: false` is appended after an `args:`-ending entry, and removing
+    it takes the new last key with it.  The block introducing the next entry has
+    to move with the entry's end both ways."""
+    path = tmp_path / "slife2.yaml"
+    path.write_text(COMMENTED_TAIL, encoding="utf-8")
+
+    assert set_enabled("mcp", "slow-one", False, path=path) is True
+    _assert_next_comment_above_its_entry(path)
+    text = path.read_text(encoding="utf-8")
+    assert text.index("    enabled: false") < text.index("Describes filesystem")
+    assert "# inline note" in text, "the last value's own line keeps its comment"
+
+    assert set_enabled("mcp", "slow-one", True, path=path) is True
+    _assert_next_comment_above_its_entry(path)
+    assert "# inline note" in path.read_text(encoding="utf-8")
+
+
 # --- the two refusals --------------------------------------------------------
 
 
@@ -769,6 +841,15 @@ def test_a_section_that_is_not_a_mapping_is_refused_not_answered_empty(tmp_path)
     assert "`mcp:`" in str(raised.value)
 
     assert read_section("a2a", path=path) == {}, "an absent section is still empty"
+
+
+@pytest.mark.parametrize("text", ["[]\n", '""\n', "false\n", "0\n"])
+def test_a_falsy_file_that_is_not_a_mapping_is_refused(tmp_path, text: str):
+    """The `or {}` that made an empty file convenient also made a top level of
+    `[]`, `""`, `false` or `0` answer `{}` — so a listing said a file has no
+    sections instead of refusing the file."""
+    with pytest.raises(ConfigError, match="not a mapping"):
+        read_section("mcp", path=write(tmp_path, text))
 
 
 def test_an_entry_that_is_not_a_mapping_is_refused_not_dropped(tmp_path):

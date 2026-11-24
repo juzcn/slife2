@@ -2403,6 +2403,33 @@ def test_two_identical_prompts_are_two_places_in_the_queue() -> None:
     assert list(queue) == [second], "the waiting caller lost its place"
 
 
+def test_a_folded_reply_with_no_answer_has_the_same_key_set() -> None:
+    """`_reply` promises one key set; the injected no-answer case must obey it.
+
+    The empty case was a second dict literal, so a key added to `_reply` left a
+    hole in the one reply a caller reads after a cancelled absorbing turn.
+    """
+    from slife2.libs.turn.loop import TurnResult
+    from slife2.plugins.agent import core as core_module
+
+    item = Pending(prompt="folded", images=[], channel="tui")
+    folded = core_module._injected_reply(item)
+    answered = core_module._reply(
+        TurnResult(
+            text="an answer",
+            usage=Usage(),
+            iterations=1,
+            stop_reason="stop",
+            last_usage=Usage(),
+        ),
+        model="local/small",
+        injected=False,
+        refused=[],
+    )
+
+    assert folded.keys() == answered.keys()
+
+
 @pytest.mark.asyncio(loop_scope="function")
 async def test_a_second_session_opens_clients_that_work(tmp_path, monkeypatch) -> None:
     """A client the lifespan closed is also a client it forgot.
@@ -3281,6 +3308,39 @@ async def test_a_refused_record_fails_the_turn_and_rolls_it_back(context, hub) -
             assert prompts_seen(backend, 1) == ["user:two"], (
                 f"the unrecorded turn was not rolled back for {subagent!r}"
             )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_record_logs_the_turn_as_failed(
+    context, hub, caplog: pytest.LogCaptureFixture
+) -> None:
+    """**The turn's one line must say what the caller is about to be told.**
+
+    The refusal branch raises from the `else` of the try/except that captures a
+    failure, so `failure` stayed `None`: the log said `stop=stop` about a turn
+    whose messages were rolled back and whose caller raised.
+    """
+    stub, _state = refusing_store()
+
+    async with Client(stub) as store:
+        server = build_server(
+            config(),
+            context_client=store,
+            hub_client=hub,
+            backend=FakeBackend(text_turn("first")),
+        )
+        with caplog.at_level("INFO", logger="slife2.plugins.agent.core"):
+            with pytest.raises(Exception, match="refuses the request"):
+                await send(server, "one")
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("turn_done ")
+    ]
+    assert len(lines) == 1, caplog.text
+    assert "stop=failed" in lines[0]
+    assert "refuses the request" in lines[0], "and the refusal's own words are there"
 
 
 @pytest.mark.asyncio
