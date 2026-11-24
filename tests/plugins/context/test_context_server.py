@@ -2102,16 +2102,13 @@ async def test_the_decision_is_a_forced_tool_call(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_decision_reads_the_conversation_without_tool_exchanges(
-    monkeypatch,
-) -> None:
-    """**The decision reads the work, not the turn's tool exchanges.**
+async def test_the_decision_reads_the_conversation_as_it_runs(monkeypatch) -> None:
+    """**The live context is the input, tool exchanges included.**
 
-    A tool exchange is the turn's internal work, and it is where a model copies
-    another tool's call or an older build's argument shape instead of the forced
-    one.  Every call and result is removed before the decision call; the text —
-    the person's messages and the model's own answers — stays in order.  A
-    mixed message keeps its text and loses its call.
+    `_context_rebuild` is a turn-level decision, and a turn's tool exchanges are
+    part of the conversation it reads.  Nothing is removed before the call: the
+    messages go out as the turn holds them, and the decision instruction is the
+    one message appended.
     """
     seen: list[list[dict[str, Any]]] = []
 
@@ -2170,12 +2167,9 @@ async def test_the_decision_reads_the_conversation_without_tool_exchanges(
         object(), {}, asyncio.Lock(), "jack", "", "m", hold, usage="12,345 (1.2%)"
     )
 
-    assert seen[0][:-1] == [
-        SYSTEM,
-        {"role": "user", "content": "one"},
-        {"role": "assistant", "content": "thinking"},
-        {"role": "user", "content": "two"},
-    ], "the text stays; every tool call and result is gone"
+    assert seen[0][:-1] == hold, "the conversation goes out as it runs"
+    assert seen[0][-1]["role"] == "system"
+    assert "Decision call" in seen[0][-1]["content"]
 
 
 @pytest.mark.asyncio

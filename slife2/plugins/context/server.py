@@ -286,33 +286,6 @@ async def _ask_tool(
     return decision_arguments(result, tool_name)
 
 
-def _without_tool_exchanges(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The conversation's text, with every tool call and result removed.
-
-    **The decision chooses turns, not tools.**  A tool exchange is a turn's
-    internal work — the model called something and read the answer — while the
-    turn id on the user message is what the decision names; the exchange adds
-    nothing to relevance, and it is where a model copies another tool's call or
-    an older build's argument shape instead of the forced one.  What remains is
-    the person's messages and the model's own answers, so the decision reads the
-    work and the forced call has no competitor in the history.  The live list is
-    a copy here: the caller's messages are never changed.
-    """
-    kept: list[dict[str, Any]] = []
-    for message in messages:
-        if message.get("role") == "tool":
-            continue
-        if message.get("tool_calls"):
-            if message.get("content"):
-                message = {
-                    key: value for key, value in message.items() if key != "tool_calls"
-                }
-            else:
-                continue
-        kept.append(message)
-    return kept
-
-
 async def _ask_model(
     config: Config,
     clients: dict[str, Client],
@@ -327,12 +300,12 @@ async def _ask_model(
     """The historical-turn decision, as `_context_rebuild`'s raw arguments.
 
     The forced tool is the one the model already knows — the same name, the
-    same description and the same schema it calls in a turn.  The conversation
-    is the input, minus every tool exchange (`_without_tool_exchanges`),
-    followed by the decision instruction as a system message; `usage` is the
-    context figure the instruction prints — the same one the status bar and the
-    selector read.  The call rules are `_ask_tool`'s, and the answer is
-    unchecked: the tool checks it.
+    same description and the same schema it calls in a turn.  **The live
+    context is the input, as the turn runs it**: the decision is about turns,
+    and a turn's tool exchanges are part of what the model reads.  The
+    instruction follows as a system message; `usage` is the context figure it
+    prints — the same one the status bar and the selector read.  The call rules
+    are `_ask_tool`'s, and the answer is unchecked: the tool checks it.
     """
     return await _ask_tool(
         config,
@@ -341,7 +314,7 @@ async def _ask_model(
         agent,
         subagent,
         model,
-        _without_tool_exchanges(messages),
+        messages,
         tool_name=CONTEXT_REBUILD,
         tool_text=CONTEXT_REBUILD_TEXT,
         parameters=decisions.RECALL_REPLY,
