@@ -921,10 +921,11 @@ class TurnRuntime:
         can correct, not a list to guess at — a string is iterable, so `"12.3"`
         would otherwise be read as four ids.  An id the view did not offer is
         refused whole rather than filtered out, because the rest would be a
-        selection the model did not make.  A tool exchange named in part is
-        refused whole (`compact.split_exchanges`), and the pair stays in the
-        view: the safe direction is keeping it, and dropping it needs both the
-        assistant message and its results named.
+        selection the model did not make.  **A tool exchange named in part is
+        kept whole and the rest of the selection is applied**
+        (`compact.split_exchanges`): the pair is the unit the model has to name
+        whole, and that one unstated decision does not discard the ids it did
+        state.  The kept groups are reported in `Compacted.held`.
 
         `hidden` is the turn's own state and is mutated here; the caller's
         `present` callback reads it, and the turn's saved row never does.
@@ -977,20 +978,17 @@ class TurnRuntime:
                     "id is the one its [MESSAGE:…] annotation shows"
                 ),
             )
-        split = compact.split_exchanges(view, drop)
-        if split:
-            return compact.Compacted(
-                seen=len(view),
-                dropped=0,
-                refused=(
-                    "a tool exchange was named only in part — name the assistant "
-                    "message and every result of its calls, or none of them; "
-                    "the exchange stays in the view"
-                ),
-            )
+        # **The pair is filtered, not the selection.**  A half-named exchange is
+        # the one thing the model left unstated; the ids it did name are its
+        # decision and are applied.  Refusing the whole list here would make one
+        # missed member discard every valid drop in the same answer.
+        held = compact.split_exchanges(view, drop)
+        if held:
+            kept = {mid for group in held for mid in group}
+            drop = [mid for mid in drop if mid not in kept]
         applied = [mid for mid in drop if mid not in hidden]
         hidden.update(applied)
-        return compact.Compacted(seen=len(view), dropped=len(applied))
+        return compact.Compacted(seen=len(view), dropped=len(applied), held=held)
 
     # ── the turn boundary ────────────────────────────────────────────────
 

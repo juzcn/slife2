@@ -50,6 +50,10 @@ pytestmark = pytest.mark.unit
 #: compaction.
 OLD = "the old tool result"
 
+#: A second result, so a half-named exchange can share a selection with a whole
+#: one and prove the whole one still drops.
+KEEP = "the kept tool result"
+
 
 LIVE_ID = re.compile(r' ?\[MESSAGE:\{"id": "([^"]+)"\}\]')
 
@@ -100,17 +104,18 @@ def drop_echo(messages: list[dict], selectable: list[str]) -> list[str]:
     return sorted(dict.fromkeys(wanted))
 
 
-def pair_ids(messages: list[Any]) -> list[str]:
+def pair_ids(messages: list[Any], text: str = OLD) -> list[str]:
     """The echo exchange's two mids, from the loop's `Message` objects.
 
     The turn's own view does not annotate the assistant message, so the wire
     dicts do not carry its id; the messages the backend is handed do, as `.mid`.
-    An exchange is dropped by naming both members.
+    An exchange is dropped by naming both members.  `text` selects which echo
+    exchange, so a turn with two of them can name either.
     """
     view = list(messages)
     wanted: list[str] = []
     for index, message in enumerate(view):
-        if message.role != "tool" or OLD not in without_id(message.content):
+        if message.role != "tool" or text not in without_id(message.content):
             continue
         if message.mid:
             wanted.append(message.mid)
@@ -435,31 +440,37 @@ async def test_the_model_fills_the_rebuild_itself(tmp_path, monkeypatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_a_half_named_exchange_is_refused_and_the_pair_stays(
+async def test_a_half_named_exchange_stays_and_the_rest_applies(
     tmp_path, monkeypatch
 ) -> None:
-    """**A pair moves whole or not at all.**
+    """**The pair is the unit of legality, not the selection.**
 
-    The model names only the result; the harness refuses the selection and keeps
-    the exchange in the view.  Auto-completing it into a drop would take a
-    message the model did not name.
+    The model names one result of the first exchange and both members of the
+    second.  The first stays whole; the second leaves the view; the answer names
+    the pair that stayed.  Auto-completing the half would take a message the
+    model did not name, and refusing the whole answer would discard the drop it
+    did name.
     """
     monkeypatch.setenv(DATA_ENV_VAR, str(a_home(tmp_path)))
     cfg = config_over()
 
     class Splits(FakeBackend):
         def stream(self, messages: list[Any], tools: list[Any]) -> Any:
-            if len(self.calls) == 1:
-                tool_id = next(
+            if len(self.calls) == 2:
+                second = pair_ids(messages, KEEP)
+                half = next(
                     message.mid
                     for message in messages
                     if message.role == "tool" and OLD in without_id(message.content)
                 )
-                self._turns[0] = calling(TURN_COMPACT, {"compact": [tool_id]}, "c2")
+                self._turns[0] = calling(
+                    TURN_COMPACT, {"compact": [half, *second]}, "c4"
+                )
             return super().stream(messages, tools)
 
     backend = Splits(
         calling("fake__echo", {"text": OLD}, "c1"),
+        calling("fake__echo", {"text": KEEP}, "c2"),
         answered("unused"),
         answered("done"),
     )
@@ -474,21 +485,18 @@ async def test_a_half_named_exchange_is_refused_and_the_pair_stays(
     assert answer.data["text"] == "done"
     assert selected == [], "the model's own call does not ask the selector"
     final = backend.calls[-1][0]
-    assert any(
-        message.role == "tool" and without_id(message.content) == OLD
-        for message in final
-    ), "the pair stays in the view"
-    assert any(
-        message.role == "assistant"
-        and any(call.name == "fake__echo" for call in message.tool_calls)
-        for message in final
-    ), "the call stays with its result"
+    assert pair_ids(final, OLD), "the half-named pair stays whole"
+    assert not pair_ids(final, KEEP), (
+        "the whole exchange beside the half-named one still drops"
+    )
     rows = stored_messages()
-    assert any(
-        message.get("role") == "tool"
-        and "named only in part" in str(message.get("content"))
+    report = [
+        message.get("content")
         for message in rows
-    ), "the tool error names the half-named exchange"
+        if message.get("role") == "tool" and "Dropped" in str(message.get("content"))
+    ]
+    assert report and report[0].startswith("Dropped 2 message(s)")
+    assert "named only in part" in report[0], "the answer names the pair that stayed"
 
 
 @pytest.mark.asyncio

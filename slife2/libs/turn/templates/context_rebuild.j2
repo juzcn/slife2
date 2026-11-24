@@ -17,14 +17,17 @@ no more and no less.
 
 Decide in this order:
 
-1. A follow-up: the last message continues a subject a turn in hand already
-   carries, even when its words are new. Answer `ids` and name the turns it
-   continues; never `clear` a follow-up.
+1. A follow-up: the last message continues a subject that some turns in hand
+   already carry, even when its words are new. The last message is the turn
+   running: it has no turn id and is never named. Answer `ids` and name the
+   turns in hand that carry the subject it continues; `clear` is not the answer
+   when they do.
 2. A mix: some turns in hand serve the current work and some do not. Answer
    `ids` and name only the ones that serve it.
 3. All of them: every turn in hand serves the current work. Answer `keep`.
 4. A new subject: none of the turns in hand is about the last message. Answer
-   `clear`, and put what the new subject needs into `recall`.
+   `clear`, and put what the new subject needs into `recall`. A follow-up whose
+   subject is no longer in hand is this case: clear, and recall that subject.
 
 This conversation is running against a limited context window.{% if usage %} Current
 context: {{ usage }}.{% endif %}

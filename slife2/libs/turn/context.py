@@ -99,10 +99,10 @@ LIVE_REPLY: dict[str, Any] = {
                 "shows them, as a JSON array of strings; [] means drop nothing. "
                 "**A tool exchange goes as a whole**: to drop one, name both "
                 "the assistant message that asked and every result of its "
-                "calls. Naming only part of it is refused, and the exchange "
-                "stays in the view. Drop the searches and reports the turn has "
-                "already used. Naming an id this turn already hid asks for the "
-                "same view."
+                "calls. Naming only part of it keeps that exchange in the view; "
+                "the rest of the selection still applies. Drop the searches and "
+                "reports the turn has already used. Naming an id this turn "
+                "already hid asks for the same view."
             ),
             "type": "array",
             "items": {"type": "string"},
@@ -178,10 +178,10 @@ RECALL_REPLY: dict[str, Any] = {
                         '(`"[14, 15]"` is refused). Name every turn the current '
                         "work continues or needs; a turn of a finished subject "
                         "the work has left behind is not named. A follow-up "
-                        "keeps the turn it continues, even when the input brings "
-                        "a new word and does not name it. An id no longer in "
-                        "hand is ignored, and a keep-list naming none of the "
-                        "turns in hand keeps the context as it is."
+                        "keeps the turn in hand it continues, even when the "
+                        "input brings a new word and does not name it. An id "
+                        "no longer in hand is ignored, and a keep-list naming "
+                        "none of the turns in hand keeps the context as it is."
                     ),
                 },
             },

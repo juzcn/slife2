@@ -20,10 +20,11 @@ naming both members (see :func:`split_exchanges`).
 
 **The selection is the model's; the harness checks it against the view.**  The
 selector is asked which live messages this turn no longer needs.  The harness
-checks the id against the view; a tool exchange named in part is *completed* to
-the whole exchange, because a call without its answer — or an answer without its
-call — is a history no provider accepts.  An id the view did not offer is
-refused whole — a tool error for the model's own call, a report for the
+checks the id against the view; a tool exchange named in part **stays in the
+view and the rest of the selection is applied**, because a call without its
+answer — or an answer without its call — is a history no provider accepts, and
+the pair is the unit the model has to name whole.  An id the view did not offer
+is refused whole — a tool error for the model's own call, a report for the
 automatic one — so the turn continues on its full view instead of failing the
 next request.  Being wrong costs a call, not a turn.
 
@@ -36,7 +37,7 @@ answer to one rule, whichever party wrote the list.
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from slife2.libs.turn.context import with_note
@@ -59,6 +60,11 @@ class Compacted:
     #: could not be carried by the next request as it was written, so nothing
     #: was hidden.
     refused: str = ""
+    #: The tool exchanges the selection named only in part, each as the ids that
+    #: stayed.  **Pair-local, not selection-local**: a half-named exchange is
+    #: kept whole and the other ids the model named are still applied, because
+    #: the pair's own decision is the only one the model left unstated.
+    held: list[list[str]] = field(default_factory=list)
 
 
 def opening(messages: Sequence[Message]) -> int | None:
@@ -273,11 +279,13 @@ def split_exchanges(view: Sequence[Message], ids: Collection[str]) -> list[list[
     **A pair moves whole or not at all.**  An assistant message with tool_calls
     and every result of those calls are one exchange.  To drop it, the model
     names both members — the assistant message and each result; a selection
-    that names one without the others is refused, and the exchange stays in the
-    view.  The harness does **not** complete a half-named exchange: the safe
-    direction is to keep the pair, and naming both is the decision the model
-    can make because the selector's view annotates the assistant message too
-    (`projection`).
+    that names one without the others **keeps that exchange whole while the
+    rest of the selection is applied**.  The harness does **not** complete a
+    half-named exchange: the safe direction is to keep the pair, and naming
+    both is the decision the model can make because the selector's view
+    annotates the assistant message too (`projection`).  The returned groups
+    are the ids that stayed; `compact_turn` filters them out of the drop and
+    records them in `Compacted.held`.
     """
     chosen = set(ids)
     split: list[list[str]] = []
@@ -297,6 +305,23 @@ def split_exchanges(view: Sequence[Message], ids: Collection[str]) -> list[list[
     return split
 
 
+def _held_note(held: Sequence[Sequence[str]]) -> str:
+    """What a partial selection says about the exchange it left whole.
+
+    **Named, not silent.**  The model's call carries the half-named ids, so the
+    view it reads afterwards must say which of them stayed — otherwise the
+    pair's presence looks like a drop that failed.  One sentence, because the
+    pair is a local exception to an answer that still applied.
+    """
+    if not held:
+        return ""
+    if len(held) == 1:
+        return " A tool exchange was named only in part and stayed in the view."
+    return (
+        f" {len(held)} tool exchanges were named only in part and stayed in the view."
+    )
+
+
 def report(result: Compacted, *, recorded: bool = True) -> str:
     """What the tool tells the model, in the transcript and the row.
 
@@ -305,6 +330,10 @@ def report(result: Compacted, *, recorded: bool = True) -> str:
     and that the next turn starts from the full conversation.  A task records no
     turn (`slife2.plugins.agent_task.server`), so its report says only what left
     the view — claiming a log it does not have would be a false fact.
+
+    **A half-named exchange is reported beside the drops it did not stop.**  The
+    selection applied everything else; a report that said only "Dropped N"
+    would leave the pair's survival unexplained.
     """
     subject = "turn" if recorded else "task"
     if result.refused:
@@ -317,12 +346,15 @@ def report(result: Compacted, *, recorded: bool = True) -> str:
             f"No compaction: the selector did not answer ({result.decision}). "
             f"The {subject} continues on the full context."
         )
+    held = _held_note(result.held)
     if not result.dropped:
-        return f"Nothing dropped: the {subject} keeps all {result.seen} messages."
+        return f"Nothing dropped: the {subject} keeps all {result.seen} messages.{held}"
     if not recorded:
-        return f"Dropped {result.dropped} message(s) from this task's model context."
+        return (
+            f"Dropped {result.dropped} message(s) from this task's model context.{held}"
+        )
     return (
-        f"Dropped {result.dropped} message(s) from this turn's model "
-        "context; the turn log keeps every one of them, and the next turn "
-        "starts from the full conversation."
+        f"Dropped {result.dropped} message(s) from this turn's model context."
+        f"{held} The turn log keeps every one of them, and the next turn starts "
+        "from the full conversation."
     )

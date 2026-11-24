@@ -2741,10 +2741,10 @@ class AgentCore:
         the selector is asked by the harness before the call, never by an empty
         call's body.  An id is written exactly as its `[MESSAGE:{"id": …}]`
         annotation shows it; the schema states the fixed two and the exchange
-        rule, and the harness completes a selection that named one member of an
-        exchange.  A selection naming an id the view did not offer is refused
-        with a tool error naming why, so it can be corrected while the view
-        stays whole.
+        rule.  **A half-named exchange stays whole and the rest of the
+        selection applies**; the answer names the pair that stayed.  A selection
+        naming an id the view did not offer is refused with a tool error naming
+        why, so it can be corrected while the view stays whole.
         """
         # The parameter shadows the module for this body; the view helpers are
         # this alias, and `compact` is the selection the model named.
@@ -2791,9 +2791,11 @@ class AgentCore:
         # **An unreadable selection is refused, not applied.**  The model's own
         # call gets a tool error it can correct; the automatic one gets a report
         # and stops asking for the turn (a selection about the whole view, like
-        # a keep-all or a failed selector).  A half-named exchange is a refusal
-        # too: the schema says an exchange moves as one, and `split_exchanges`
-        # keeps the pair rather than completing the drop.
+        # a keep-all or a failed selector).  **A half-named exchange is not this
+        # refusal**: the pair stays in the view and the other ids the model
+        # named are applied, so one missed member does not discard the rest of
+        # its answer.  The report names the pair, and the automatic pass stays
+        # live when something else dropped.
         if result.refused:
             loop.compact_hold = True
             raise ToolError(result.refused)
@@ -2802,10 +2804,11 @@ class AgentCore:
         # paying for a decision already made.  A drop leaves the pass live.
         loop.compact_hold = result.dropped == 0 or bool(result.decision)
         logger.info(
-            "turn_compact %s seen=%d dropped=%d decision=%s hold=%s",
+            "turn_compact %s seen=%d dropped=%d held=%d decision=%s hold=%s",
             describe((loop.agent, loop.subagent)),
             result.seen,
             result.dropped,
+            len(result.held),
             result.decision or "ok",
             loop.compact_hold,
         )

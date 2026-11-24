@@ -21,8 +21,9 @@ filling up, keep only what this turn still needs.
 
 Name only the ids the `[MESSAGE:{"id": …}]` annotations show; never invent one.
 A tool exchange is one decision: to drop it, name both the assistant message
-and every result of its calls; naming only part is refused, and the exchange
-stays in the view. When nothing should be dropped, `compact` is `[]`.
+and every result of its calls; naming only part keeps that exchange in the
+view, and the rest of your selection still applies. When nothing should be
+dropped, `compact` is `[]`.
 
 This conversation is running against a limited context window.{% if usage %} Current
 context: {{ usage }}.{% endif %}

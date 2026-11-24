@@ -130,8 +130,9 @@ def test_the_system_and_the_opening_are_not_selectable() -> None:
 def test_a_half_named_exchange_is_split_and_a_whole_one_is_not() -> None:
     """**A pair moves whole or not at all.**
 
-    Naming one member is a split the caller refuses, and the pair stays in the
-    view; naming both is the only way to drop the exchange.
+    Naming one member is a split: the caller keeps the pair in the view and
+    applies the rest of the selection.  Naming both is the only way to drop the
+    exchange.
     """
     exchange = Message(
         role="assistant",
@@ -245,6 +246,25 @@ def test_the_report_names_the_record() -> None:
         Compacted(seen=4, dropped=0, refused="the view does not offer '9.9'")
     )
     assert "Nothing dropped" in report(Compacted(seen=4, dropped=0))
+
+
+def test_the_report_names_the_pair_a_partial_selection_kept() -> None:
+    """A drop beside a half-named exchange reports both, so the pair's
+    survival is not read as a failed drop."""
+    text = report(Compacted(seen=6, dropped=2, held=[["cur.3", "cur.4"]]))
+
+    assert text.startswith("Dropped 2 message(s)")
+    assert "named only in part" in text
+    assert "stayed in the view" in text
+
+    nothing = report(Compacted(seen=6, dropped=0, held=[["cur.3", "cur.4"]]))
+    assert "Nothing dropped" in nothing
+    assert "named only in part" in nothing
+
+    two = report(
+        Compacted(seen=7, dropped=2, held=[["cur.3", "cur.4"], ["cur.5", "cur.6"]])
+    )
+    assert "2 tool exchanges were named only in part" in two
 
 
 def test_a_task_report_claims_no_record() -> None:

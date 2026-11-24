@@ -23,7 +23,7 @@ from slife2.libs.host.config import (
 )
 from slife2.libs.plugin.protocol import UnreadableAnswer, unreadable
 from slife2.libs.turn.compact import report
-from slife2.libs.turn.messages import Message, Usage
+from slife2.libs.turn.messages import Message, ToolCall, Usage
 from slife2.libs.turn.runtime import ModelRef, TurnRuntime, measured_tokens
 from slife2.libs.turn.tools import ToolRegistry
 
@@ -545,6 +545,69 @@ async def test_a_model_selection_is_read_by_the_selector_parser() -> None:
 
     assert (result.dropped, result.refused) == (1, "")
     assert hidden == {"6.0"}
+
+
+def an_exchange_view() -> list[Message]:
+    """A turn with two tool exchanges, both whole and addressable."""
+    return [
+        Message(role="system", content="sys"),
+        Message(role="user", content="now"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="c1", name="fake__echo")],
+            mid="cur.1",
+        ),
+        Message(role="tool", content="first", tool_call_id="c1", mid="cur.2"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[ToolCall(id="c2", name="fake__echo")],
+            mid="cur.3",
+        ),
+        Message(role="tool", content="second", tool_call_id="c2", mid="cur.4"),
+    ]
+
+
+async def test_a_half_named_exchange_stays_while_the_rest_is_applied() -> None:
+    """**The pair is the unit of legality, not the selection.**
+
+    A selection that names one member of an exchange keeps that exchange whole;
+    the other ids the model named are still applied.  Refusing the whole answer
+    would let one missed member discard every valid drop beside it.
+    """
+    hidden: set[str] = set()
+
+    result = await wired(Store()).compact_turn(
+        IDENTITY,
+        an_exchange_view(),
+        hidden,
+        REF.reference,
+        8192,
+        selection=["cur.1", "cur.2", "cur.3"],
+    )
+
+    assert (result.dropped, result.refused) == (2, "")
+    assert result.held == [["cur.3", "cur.4"]]
+    assert hidden == {"cur.1", "cur.2"}
+
+
+async def test_a_half_named_exchange_alone_drops_nothing() -> None:
+    """The old refusal's case: only one member is named, so nothing moves."""
+    hidden: set[str] = set()
+
+    result = await wired(Store()).compact_turn(
+        IDENTITY,
+        an_exchange_view(),
+        hidden,
+        REF.reference,
+        8192,
+        selection=["cur.3"],
+    )
+
+    assert (result.dropped, result.refused) == (0, "")
+    assert result.held == [["cur.3", "cur.4"]]
+    assert hidden == set()
 
 
 async def test_a_selection_naming_an_id_the_view_does_not_offer_is_refused() -> None:

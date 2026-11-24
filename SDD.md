@@ -1191,8 +1191,9 @@ subject through the turns above it; the turn's own message is in the list
 already. There is no separate input argument. Its answer is a selection, never
 a dump. `keep` and `recall` are the
 two halves of one decision: a turn of a
-finished subject is not kept for a new one; a follow-up keeps the turns it
-continues; `recall: {}` says nothing outside the turns in hand is needed. The
+finished subject is not kept for a new one; a follow-up keeps the turns in
+hand it continues; `recall: {}` says nothing outside the turns in hand is
+needed. The
 no-change answer — `"keep"` keeping every turn in hand and `{}` — rebuilds
 nothing, and is right only when every turn in hand serves the current work. A
 call with `keep`/`recall` is a selection: the same schema, applied as it came,
@@ -1327,12 +1328,13 @@ the store's live-context list are the conversation, and the next turn starts
 from the full list. The system message and the turn's opening message are the
 fixed two; the annotated messages, historical or current, are the model's to
 drop. The legality of a tool exchange is the *schema's* rule — a call and its
-results go together — and the harness **refuses a selection that names only
-part of an exchange** (`split_exchanges`), keeping the pair in the view; the
-selector's view annotates the assistant message too, so the model can name
-both. **A selection naming an id the view does not offer is refused whole** —
-the fixed two, or no id at all — rather than filtered, because applying the part
-that resolves would be a decision the model did not make. An id an earlier
+results go together — and the harness **keeps a half-named exchange in the
+view and applies the rest of the selection** (`split_exchanges`), so one
+unnamed member does not discard the ids the model did name; the selector's
+view annotates the assistant message too, so the model can name both. **A
+selection naming an id the view does not offer is refused whole** — the fixed
+two, or no id at all — rather than filtered, because applying the part that
+resolves would be a decision the model did not make. An id an earlier
 compaction already hid is not an error: it is already applied, and a model
 repeating a cumulative list is asking for the same view. A
 selection decision that fails or cannot be read
