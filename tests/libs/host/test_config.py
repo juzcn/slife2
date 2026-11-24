@@ -641,15 +641,12 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     """**A host is the first of `_server`'s three fields, and it was the last one
     still unchecked.**
 
-    `ServerSettings.url` writes the address as `host:port` with nothing around
-    it, so `host: "::1"` built `http://::1:24010/mcp` — and that is not a URL
-    whose port can be read: `urlsplit("http://::1:24010/mcp").port` raised
-    `ValueError: Port could not be cast to integer value as ':1:24010'` out of
-    `start_lock`, in the start-up loop, after some servers were already up.
-    `host: 0.0.0.0/x` is the same mistake from the other side: the path moves
-    into the address and the port is gone.
+    `host: 0.0.0.0/x` moves the path into the address and the port is gone;
+    `example.test:80` is not an address at all.  **An IPv6 loopback is a host**,
+    though — SDD §11.1 allows a loopback address, and `::1` is one — so it is
+    accepted and bracketed when the URL is written.
     """
-    for written in ("'::1'", "0.0.0.0/x"):
+    for written in ("0.0.0.0/x", "'example.test:80'"):
         with pytest.raises(ConfigError, match=r"servers\.context\.host"):
             load(write(tmp_path, f"servers:\n  context:\n    host: {written}\n"))
 
@@ -658,6 +655,18 @@ def test_a_server_host_that_is_not_a_host_is_refused(tmp_path) -> None:
     assert one.server("context").url.startswith("http://localhost:"), (
         "the address is the host and the port together"
     )
+
+    v6 = load(write(tmp_path, "servers:\n  context:\n    host: '::1'\n"))
+    assert v6.server("context").host == "::1"
+    assert v6.server("context").url == "http://[::1]:24010/mcp", (
+        "an IPv6 literal keeps its brackets in the URL"
+    )
+
+
+def test_a_non_loopback_ipv6_host_is_refused(tmp_path) -> None:
+    """The address form is not the security question — loopback is."""
+    with pytest.raises(ConfigError, match="is not loopback"):
+        load(write(tmp_path, "servers:\n  context:\n    host: '2001:db8::1'\n"))
 
 
 def test_a_server_host_is_read_without_the_padding(tmp_path) -> None:

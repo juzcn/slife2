@@ -1010,6 +1010,13 @@ def test_a_server_that_never_served_takes_its_own_record_back() -> None:
     assert read_record(URL) is None
 
 
+def test_a_server_accepts_a_path_override() -> None:
+    """The parent pins the path with the host and port; the parser has to read
+    it, or the child binds the file's path while the launcher probes its own."""
+    args = protocol_module.parse_serve_args(["--path", "/custom"], "slife2-agent")
+    assert args.path == "/custom"
+
+
 def test_serve_refuses_a_host_beyond_loopback() -> None:
     """**The bind is the last place the boundary can be held.**
 

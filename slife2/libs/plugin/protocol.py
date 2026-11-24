@@ -923,6 +923,7 @@ def parse_serve_args(argv: list[str] | None, description: str) -> argparse.Names
         "--host", default=None, help="override the listen address (loopback only)"
     )
     parser.add_argument("--port", default=None, type=int, help="override the port")
+    parser.add_argument("--path", default=None, help="override the endpoint path")
     args = parser.parse_args(argv)
     apply_data_dir(args)
     return args
@@ -1097,12 +1098,13 @@ def serve(
     """
     host = args.host or server.host
     port = args.port or server.port
+    path = getattr(args, "path", None) or server.path
     if not is_loopback_host(host):
         raise ConfigError(
             f"{name}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
             f"`--host` takes `localhost` or a loopback address only"
         )
-    url = ServerSettings(host=host, port=port, path=server.path).url
+    url = ServerSettings(host=host, port=port, path=path).url
     record = ServerRecord.now(
         name=name,
         url=url,
@@ -1392,7 +1394,7 @@ def serve_plugin(
         server_name,
         host,
         args.port or address.port,
-        address.path,
+        args.path or address.path,
         f" ({note(config)})" if note is not None else "",
         os.getpid(),
         data_dir(),

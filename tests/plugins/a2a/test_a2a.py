@@ -5409,3 +5409,22 @@ def test_a_roster_is_measured_after_de_duplicating_on_both_reads() -> None:
         }
     )
     assert event is not None and event.members == (PEER,)
+
+
+def test_an_answer_target_falls_back_to_the_route_and_its_kind(tmp_path: Path) -> None:
+    """**Three caches, one order.**  The send, then the record, then the route
+    that outlives both; the kind is the route's, so a bare message's pause is
+    not reported as a task line."""
+    from types import SimpleNamespace
+
+    from slife2.plugins.a2a.mesh import _OutboundSend, _Route
+
+    mesh = local_member(tmp_path, subagent="tester").mesh
+    route = _Route(task_id="t", round=1, agent=PEER, kind="message")
+    record = SimpleNamespace(agent_name=PEER)
+
+    assert mesh._answer_target(None, None, route) == (PEER, "message")
+    assert mesh._answer_target(None, record, route) == (PEER, "task")
+    plain = _OutboundSend("t", PEER, "session", "{}", record=False)
+    assert mesh._answer_target(plain, record, route) == (PEER, "message")
+    assert mesh._answer_target(None, None, None) is None

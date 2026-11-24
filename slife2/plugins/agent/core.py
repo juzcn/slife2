@@ -894,6 +894,12 @@ class AgentCore:
             model_id=settings.model,
             accepts_images=settings.accepts_images,
             prompt_window=settings.prompt_window,
+            # A direct read before the first turn sees the model this
+            # conversation was built on; `run_turn_into` refreshes them at
+            # every turn start.
+            turn_accepts_images=settings.accepts_images,
+            turn_prompt_window=settings.prompt_window,
+            turn_model=f"{name}/{settings.model}",
             max_iterations=live.agent.max_iterations,
             # The compaction threshold is a term of the conversation in the same
             # sense: an edit reaches the next conversation, not a turn already
@@ -1167,9 +1173,9 @@ class AgentCore:
                     selection = await self.runtime.rebuild_arguments(
                         (loop.agent, loop.subagent),
                         loop.messages,
-                        loop.model,
+                        loop.turn_model,
                         context_tokens=measured_tokens(loop.live, loop.context_tokens),
-                        prompt_window=loop.prompt_window,
+                        prompt_window=loop.turn_prompt_window,
                     )
                     return AutoCall(CONTEXT_REBUILD, arguments=selection)
                 # A hub that does not advertise the tool is a build that
@@ -1194,7 +1200,7 @@ class AgentCore:
                     loop.messages,
                     loop.hidden,
                     last_tokens=agent_loop.last_usage.total_tokens,
-                    prompt_window=loop.prompt_window,
+                    prompt_window=loop.turn_prompt_window,
                     compact_at=loop.compact_at,
                     held=loop.compact_hold,
                 )
@@ -1207,9 +1213,9 @@ class AgentCore:
                     (loop.agent, loop.subagent),
                     view,
                     selectable,
-                    loop.model,
+                    loop.turn_model,
                     context_tokens=measured_tokens(loop.live, loop.context_tokens),
-                    prompt_window=loop.prompt_window,
+                    prompt_window=loop.turn_prompt_window,
                 )
                 return AutoCall(TURN_COMPACT, arguments=selection)
             return None
@@ -1261,6 +1267,13 @@ class AgentCore:
         # under the running turn; the suffix from this index on is the turn's
         # own and is carried verbatim.
         loop.turn_opening = len(loop.messages)
+        # **The turn's model facts are taken at the same boundary.**  A
+        # `model_switch` arriving mid-turn moves the conversation for the next
+        # one (`model_switch`'s own rule); this turn keeps the model — and
+        # therefore the window and the image capability — it started on.
+        loop.turn_prompt_window = loop.prompt_window
+        loop.turn_accepts_images = loop.accepts_images
+        loop.turn_model = loop.model
         # **The turn's view starts whole.**  A compaction is the turn's own: a
         # message it hid must not outlive it, and the next turn's rebuild is
         # what decides that turn's context.
@@ -1288,13 +1301,14 @@ class AgentCore:
         # The encode reads and base64s up to `MAX_BYTES` per source — blocking
         # work in a process that serves every agent on the machine, so it hops.
         pairs, refusals = await off_loop(attachments.resolve, item.images, base=home())
-        if pairs and not loop.accepts_images:
+        if pairs and not loop.turn_accepts_images:
             # **Extended, not replaced**: a caller who passed one unreadable
             # source and one the model cannot see is owed both reasons, and a
             # list that dropped the first to say the second would answer the
             # wrong question.
             refusals.extend(
-                f"{source}: {loop.model} cannot read images" for source, _url in pairs
+                f"{source}: {loop.turn_model} cannot read images"
+                for source, _url in pairs
             )
             pairs = []
         # **On the outcome, so the caller is finally told.**  This is the route a
@@ -2479,8 +2493,8 @@ class AgentCore:
         if not wanted:
             raise ToolError(attachments.NO_SOURCE)
 
-        if not loop.accepts_images:
-            raise ToolError(attachments.cannot_read_images(loop.model))
+        if not loop.turn_accepts_images:
+            raise ToolError(attachments.cannot_read_images(loop.turn_model))
 
         pairs, refusals = await self.attach_sources(conversation_id, wanted)
         if pairs and not attachments.inject(
@@ -2619,14 +2633,14 @@ class AgentCore:
             loop.messages,
             loop.turn_ids,
             loop.covered,
-            loop.model,
+            loop.turn_model,
             publish=True,
             selection=choice,
             # **The last LLM call's figure.**  A completed call of this turn is
             # newer than the previous turn's last call; before the first call —
             # where the automatic rebuild runs — the saved call stands.
             context_tokens=measured_tokens(loop.live, loop.context_tokens),
-            prompt_window=loop.prompt_window,
+            prompt_window=loop.turn_prompt_window,
         )
         # **The prefix moves; the suffix does not.**  `carried` re-appended every
         # message from the opening on, so the opening's new index is the old one
@@ -2655,7 +2669,7 @@ class AgentCore:
         )
         tokens = context_usage(
             estimate_turn_tokens([message.to_record() for message in loop.messages]),
-            loop.prompt_window,
+            loop.turn_prompt_window,
         )[0]
         return rebuild_report(
             kept=rebuilt.kept,
@@ -2734,9 +2748,9 @@ class AgentCore:
             conversation_id,
             loop.messages,
             loop.hidden,
-            loop.model,
+            loop.turn_model,
             context_tokens=measured_tokens(loop.live, loop.context_tokens),
-            prompt_window=loop.prompt_window,
+            prompt_window=loop.turn_prompt_window,
             selection=compact,
         )
         # **An unreadable selection is refused, not applied.**  The model's own

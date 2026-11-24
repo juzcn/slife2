@@ -983,6 +983,44 @@ def _wire(session: Session) -> None:
     session.mesh.on_group_control = on_group_control
 
 
+def _delivery_failed(
+    session: Session,
+    task_id: str,
+    kind: str,
+    exc: DeliveryFailed,
+    *,
+    peer: str,
+    text: str,
+) -> None:
+    """The one rule for a hand-over that failed, applied by both writers.
+
+    **An unknown outcome leaves a task round open.**  The words may already be
+    in the conversation, so recording `rejected` would tell the peer a task it
+    is working on is dead and then refuse the model's own answer because the
+    task is terminal.  A bare message has no later answer of its own, so only a
+    task round can wait.
+
+    The two writers — the member's own turn and the window's — had a copy each,
+    and they had already drifted in what they logged around the decision.
+    """
+    logger.error(
+        "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
+        describe((session.agent, session.subagent)),
+        peer,
+        len(text),
+        exc,
+    )
+    if exc.unknown and kind != "message":
+        logger.error(
+            "a2a_delivery_unverified agent=%s task=%s — the message may have "
+            "landed, so its round stays open for the model's answer",
+            describe((session.agent, session.subagent)),
+            task_id,
+        )
+    else:
+        session.settle(task_id, mesh.REJECTED, exc.reason)
+
+
 async def _drain(
     session: Session,
     config: Config,
@@ -1119,35 +1157,7 @@ async def _drain(
                     len(said),
                 )
             except DeliveryFailed as exc:
-                # **An error, because the words are the only thing that could
-                # answer `peer` and they went nowhere.**  Its own key rather
-                # than the handler's below, which is about this plugin's own
-                # fault: this one is a conversation that could not be reached.
-                logger.error(
-                    "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
-                    describe((session.agent, session.subagent)),
-                    peer,
-                    len(text),
-                    exc,
-                )
-                if exc.unknown and kind != "message":
-                    # **A hand-over that did not come back is not a refusal.**
-                    # The words may be in the conversation already, so the
-                    # round is left open: the model's own `task_response` is
-                    # what settles it, and recording `rejected` here would tell
-                    # the peer a task it is working on is dead and then refuse
-                    # that answer because the task is terminal.  A message has
-                    # no later answer of its own, so only a task round can
-                    # wait.
-                    logger.error(
-                        "a2a_delivery_unverified agent=%s task=%s — the message "
-                        "may have landed, so its round stays open for the "
-                        "model's answer",
-                        describe((session.agent, session.subagent)),
-                        task_id,
-                    )
-                else:
-                    session.settle(task_id, mesh.REJECTED, exc.reason)
+                _delivery_failed(session, task_id, kind, exc, peer=peer, text=text)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - one bad turn must not end the writer
@@ -1262,35 +1272,7 @@ async def _drain(
                         window_client=window_client,
                     )
                 except DeliveryFailed as exc:
-                    # **An error, because the words are the only thing that
-                    # could answer `peer` and they went nowhere.**  Its own key
-                    # rather than the handler's below, which is about this
-                    # plugin's own fault.
-                    logger.error(
-                        "a2a_delivery_unreachable agent=%s peer=%s chars=%d: %s",
-                        describe((session.agent, session.subagent)),
-                        peer,
-                        len(text),
-                        exc,
-                    )
-                    if exc.unknown and kind != "message":
-                        # **A hand-over that did not come back is not a
-                        # refusal.**  The words may be in the conversation
-                        # already, so the round is left open: the model's own
-                        # `task_response` settles it, and recording `rejected`
-                        # here would tell the peer a task it is working on is
-                        # dead and then refuse that answer because the task is
-                        # terminal.  A message has no later answer of its own,
-                        # so only a task round can wait.
-                        logger.error(
-                            "a2a_delivery_unverified agent=%s task=%s — the "
-                            "message may have landed, so its round stays open "
-                            "for the model's answer",
-                            describe((session.agent, session.subagent)),
-                            task_id,
-                        )
-                    else:
-                        session.settle(task_id, mesh.REJECTED, exc.reason)
+                    _delivery_failed(session, task_id, kind, exc, peer=peer, text=text)
                 else:
                     if kind == "message":
                         # A bare message owes its sender no answer, so its

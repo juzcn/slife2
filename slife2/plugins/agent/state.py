@@ -335,6 +335,16 @@ class Loop:
     api: str = ""
     model_id: str = ""
     accepts_images: bool = True
+    #: **The turn's own copy of the three facts `model_switch` moves.**  A
+    #: switch is deliberately allowed mid-turn (it is the way out of a model
+    #: that stopped answering), and the turn keeps the model it started on —
+    #: `outcome.model` records it.  Its budget and its image capability have to
+    #: stay with that model too: sizing a compaction against the new window, or
+    #: refusing an image the old vision model could read, would be the switch
+    #: changing the terms of a turn it has not moved.  Set when the turn starts.
+    turn_prompt_window: int = 0
+    turn_accepts_images: bool = True
+    turn_model: str = ""
     #: The index in `messages` where this turn's opening sits.  **The record's
     #: slice, and the prefix rule's boundary**, and the reason it is a field
     #: rather than the local it used to be: `_context_rebuild` can replace the

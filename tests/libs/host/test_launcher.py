@@ -992,6 +992,15 @@ def test_the_spawn_command_uses_this_interpreter(
     assert "--data-dir" in argv
 
 
+def test_the_spawn_command_pins_the_endpoint_path() -> None:
+    """**The child re-reads `servers.<name>.path` otherwise.**  The parent
+    probes the snapshot's URL; an edit between load and spawn moved the child's
+    bind and left the probe on a 404 until the start budget expired.
+    """
+    argv = launcher._argv(replace(SPEC, path="/custom"))
+    assert argv[argv.index("--path") + 1] == "/custom"
+
+
 # --- the agent name is exclusive ---------------------------------------------
 
 

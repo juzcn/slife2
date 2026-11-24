@@ -143,6 +143,10 @@ class ServerSpec:
     #: The tool that identifies it when it advertises no name — see
     #: `slife2.libs.plugin.protocol.identifies`.
     expected_tool: str
+    #: The endpoint path, pinned with the host and port: the child is told all
+    #: three, so an edit between the parent's load and the child's own cannot
+    #: move an endpoint out from under a server started for it.
+    path: str = "/mcp"
 
 
 @dataclass(frozen=True)
@@ -188,6 +192,7 @@ def spec_for(config: Config, one: Plugin) -> ServerSpec:
         url=address.url,
         host=address.host,
         port=address.port,
+        path=address.path,
         expected_name=one.name,
         expected_tool=one.probe,
     )
@@ -390,9 +395,11 @@ def _argv(spec: ServerSpec) -> list[str]:
     spawned it, and it does not depend on the scripts directory being on PATH —
     which it is not, under `uv run`.
 
-    Host and port are pinned to what this client already decided, so editing the
-    config between load and spawn cannot move an endpoint out from under a
-    server that was started for it.
+    Host, port and path are pinned to what this client already decided, so
+    editing the config between load and spawn cannot move an endpoint out from
+    under a server that was started for it.  The path is the half that used to
+    be left to the child: a `servers.<name>.path` edit in that window made the
+    launcher probe one endpoint while the child bound another.
     """
     argv = [
         sys.executable,
@@ -402,6 +409,8 @@ def _argv(spec: ServerSpec) -> list[str]:
         spec.host,
         "--port",
         str(spec.port),
+        "--path",
+        spec.path,
     ]
     # The *resolved* directory, not the environment variable.  The child is
     # spawned with its working directory at `<data>/runtime`, so a relative
@@ -983,6 +992,7 @@ def _spec_from_record(record: ServerRecord) -> ServerSpec:
         url=record.url,
         host=parts.hostname or "",
         port=parts.port or 0,
+        path=parts.path or "/mcp",
         expected_name="",
         expected_tool="",
     )

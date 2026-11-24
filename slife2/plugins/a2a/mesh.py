@@ -1479,6 +1479,29 @@ class A2AMesh:
         # every routing entry for every round of this task.
         self._forget_send(task_id)
 
+    def _answer_target(
+        self,
+        send: _OutboundSend | None,
+        record: Any,
+        route: _Route | None,
+    ) -> tuple[str, str] | None:
+        """Whose answer one reply is, and which kind of line it wears.
+
+        **Three caches, one order.**  The send knows the peer; a pruned send
+        leaves the store's record; both pruned leaves the correlation route,
+        which carries the peer and kind for exactly this case.  The three
+        settle paths each wrote the order out — and `_interrupted` had drifted,
+        hardcoding `"task"` where the route says `"message"`, so a bare message
+        that paused was reported as a task line.
+        """
+        if send is not None:
+            return send.agent, "message" if not send.record else "task"
+        if record is not None:
+            return record.agent_name, "task"
+        if route is not None and route.agent:
+            return route.agent, route.kind
+        return None
+
     def _settle_direct_message(
         self,
         send: _OutboundSend | None,
@@ -1500,15 +1523,16 @@ class A2AMesh:
                 )
                 return
             get_store().record_result(task_id)
-        if send is not None:
-            kind = "message" if not send.record else "task"
-            self.on_task_completion(task_id, text, COMPLETED, send.agent, kind)
-        elif record is not None:
-            self.on_task_completion(task_id, text, COMPLETED, record.agent_name, "task")
-        elif route is not None and route.agent:
-            # Both caches pruned; the route is what still knows whose answer it
-            # is, and a peer's answer is still an answer.
-            self.on_task_completion(task_id, text, COMPLETED, route.agent, route.kind)
+        target = self._answer_target(send, record, route)
+        if target is not None:
+            agent, kind = target
+            if send is None and record is None:
+                logger.warning(
+                    "a2a_message_without_send_or_record task=%s peer=%s",
+                    task_id,
+                    agent,
+                )
+            self.on_task_completion(task_id, text, COMPLETED, agent, kind)
 
     def _settle_terminal(
         self,
@@ -1542,23 +1566,18 @@ class A2AMesh:
                 get_store().record_reject(task_id)
             else:
                 get_store().record_error(task_id)
-        if send is not None:
-            agent = send.agent
-            kind = "message" if not send.record else "task"
-        elif record is not None:
-            agent = record.agent_name
-            kind = "task"
-        elif route is not None and route.agent:
+        target = self._answer_target(send, record, route)
+        if target is None:
+            logger.warning("a2a_reply_without_record task=%s", task_id)
+            return
+        agent, kind = target
+        if send is None and record is None:
             # **Both caches pruned, and the route outlived them.**  The agent and
             # kind ride the correlation for exactly this: the conversation still
             # gets the line, addressed by what the route kept.
-            agent, kind = route.agent, route.kind
             logger.warning(
                 "a2a_reply_without_send_or_record task=%s peer=%s", task_id, agent
             )
-        else:
-            logger.warning("a2a_reply_without_record task=%s", task_id)
-            return
         self.on_task_completion(task_id, result, state, agent, kind)
 
     def _interrupted(
@@ -1591,12 +1610,11 @@ class A2AMesh:
             self._forget_round(task_id, round_no)
         else:
             record = get_store().get(task_id)
-            if record is not None:
-                agent = record.agent_name
-            elif route is not None and route.agent:
-                agent = route.agent
-            else:
-                agent = "the peer"
+            target = self._answer_target(None, record, route)
+            # **A pause is a task state**, whatever the answered message was:
+            # the line says the task was paused, and the route's kind is the
+            # only name left when both caches are gone.
+            agent = target[0] if target is not None else "the peer"
         self.on_task_completion(task_id, question, state, agent, "task")
 
     def _forget_round(self, task_id: str, round_no: int) -> None:

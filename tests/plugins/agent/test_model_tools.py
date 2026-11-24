@@ -718,7 +718,12 @@ embeddings:
 
 
 @asynccontextmanager
-async def answering_server(isolated_runtime: Path, backend: FakeBackend | None = None):
+async def answering_server(
+    isolated_runtime: Path,
+    backend: FakeBackend | None = None,
+    text: str = CONFIG,
+    cabinet_client: Client | None = None,
+):
     """`server_for`'s server, plus the two peers a turn needs to run.
 
     The real context and hub servers over the in-memory transport, exactly as
@@ -737,7 +742,7 @@ async def answering_server(isolated_runtime: Path, backend: FakeBackend | None =
     it: it is entered inside a test rather than around one, and what it stands up
     is what the `async with` tears down.
     """
-    write_config(isolated_runtime)
+    write_config(isolated_runtime, text)
     live = load()
     holder: dict[str, Any] = {}
     hub_client = Client(
@@ -756,6 +761,7 @@ async def answering_server(isolated_runtime: Path, backend: FakeBackend | None =
             live,
             context_client=context,
             hub_client=hub_client,
+            cabinet_client=cabinet_client,
             backend=backend or FakeBackend(text_turn("one"), text_turn("two")),
             source=load_cached,
         )
@@ -936,6 +942,76 @@ async def test_a_turn_names_the_model_that_answered_it_not_the_one_it_moved_to(
     assert two.data["injected"] is True, "and the message really was folded in"
     assert two.data["text"] == one.data["text"]
     assert two.data["model"] == "local/big", "the same model, said to both callers"
+
+
+#: `big` reads pictures and holds 100k; `small` reads text only.  A switch from
+#: one to the other is the case a running turn must not feel.
+VISION_CONFIG = """providers:
+  default: local/big
+  local:
+    api: openai-completions
+    base_url: https://local.test/v1
+    api_key: ${LOCAL_KEY}
+    models:
+      - model: big
+        input: [text, image]
+        context_window: 100000
+      - model: small
+        context_window: 2000
+embeddings:
+  providers:
+    local:
+      base_url: http://127.0.0.1:17347/v1
+      model: big-emb
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_switch_does_not_change_the_running_turns_image_capability(
+    isolated_runtime,
+) -> None:
+    """**The turn keeps the model's facts, not only its name.**  `model_switch`
+    moves `accepts_images` and `prompt_window` on the loop, and the turn already
+    in flight runs on the old backend: an image the old vision model could read
+    was refused because the new, text-only one was named, and a compaction was
+    sized against a window the running model does not have.
+    """
+    from fastmcp import FastMCP
+
+    cabinet = FastMCP("cabinet")
+
+    @cabinet.tool
+    async def image_save(url: str) -> dict[str, Any]:
+        return {"key": "kept-1", "mime": "image/png", "size": 1}
+
+    backend = FakeBackend(
+        calling("skill_list", {}, delay=0.5),
+        text_turn("done"),
+    )
+    async with (
+        Client(cabinet) as cabinet_client,
+        answering_server(
+            isolated_runtime,
+            backend=backend,
+            text=VISION_CONFIG,
+            cabinet_client=cabinet_client,
+        ) as server,
+    ):
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        async with Client(server) as client:
+            switched = await ask(client, "model_switch", ref="local/small")
+            result = await client.call_tool(
+                "attach_image",
+                {"sources": ["data:image/png;base64,AA=="]},
+                meta=conversation_meta(DEFAULT_AGENT),
+            )
+            attached = result.data
+        await first
+
+    assert switched["moved"] == 1
+    assert attached["attached"], "the running turn kept its vision model"
+    assert attached["refused"] == []
 
 
 # --- one process, several homes -----------------------------------------------

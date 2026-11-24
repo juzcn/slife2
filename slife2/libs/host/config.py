@@ -1055,8 +1055,15 @@ class ServerSettings:
 
     @property
     def url(self) -> str:
-        """The streamable-HTTP endpoint, as a client should address it."""
-        return f"http://{self.host}:{self.port}{self.path}"
+        """The streamable-HTTP endpoint, as a client should address it.
+
+        **An IPv6 literal keeps its brackets.**  `::1` is a loopback address and
+        a valid host; written bare beside a port it is `http://::1:24000/mcp`,
+        whose port nothing can read.  The brackets are URL syntax, not part of
+        the host, so they are added here and only here.
+        """
+        host = f"[{self.host}]" if ":" in self.host else self.host
+        return f"http://{host}:{self.port}{self.path}"
 
 
 #: Why a non-loopback host is refused, said once so the refusal at load and the
@@ -3923,24 +3930,28 @@ def _server_host(value: Any, where: str) -> Any:
     dial; `read_text` strips, so the address and the judgement are about the
     same string.
 
-    **`:` and `/` are refused**, because `ServerSettings.url` writes the address
-    as `host:port` and puts no brackets on it: `host: "::1"` — the natural
-    spelling of an IPv6 loopback, and one `peer_agent.broker.host` accepts —
-    built `http://::1:24010/mcp`, and the first thing to *read* that URL
-    (`runtime.normalize_url`'s `urlsplit(...).port`, inside `start_lock`) raised
-    `ValueError: Port could not be cast to integer value as ':1:24010'` — after
-    some servers were already up, in a command that answers every bad field
-    with one sentence and catches `ConfigError`.  A `/` is the same mistake the
-    other way: `host: 0.0.0.0/x` moves the path into the address, and the port
-    is then not there at all.
+    **A `/` is refused**, because it moves the path into the address and the
+    port is then not there at all: `host: 0.0.0.0/x`.
+
+    **An IPv6 literal is allowed**, because a loopback address is exactly what
+    `_loopback` asks for and `::1` is one; `ServerSettings.url` brackets it.
+    Anything else with a colon is still a host that cannot be parsed, and is
+    refused here with the field's own sentence.
     """
     host = read_text(value, where)
-    if host is not None and (":" in host or "/" in host):
+    if host is None:
+        return None
+    if "/" in host:
         raise SectionError(
-            f"{where}: {host!r} is not a host — the endpoint is written as "
-            f"`host:port` with no brackets, so an IPv6 address needs the path "
-            f"spelt out another way, and a `/` belongs in `path:`"
+            f"{where}: {host!r} is not a host — a `/` belongs in `path:`"
         )
+    if ":" in host:
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            raise SectionError(
+                f"{where}: {host!r} is not a host — an IPv6 address or `localhost`"
+            ) from None
     return host
 
 
