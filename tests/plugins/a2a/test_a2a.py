@@ -69,6 +69,7 @@ from slife2.libs.host.paths import (
 )
 from slife2.libs.host.runtime import read_record
 from slife2.libs.plugin.audience import conversation_meta, for_the_model
+from slife2.libs.plugin.protocol import UnreadableAnswer
 from slife2.plugins.a2a import broker
 from slife2.plugins.a2a import groups as group_store
 from slife2.plugins.a2a import server as a2a_server
@@ -3454,6 +3455,37 @@ async def agent_server() -> AsyncIterator[AgentServer]:
     async with Client(node.mcp) as client:
         node.client = client
         yield node
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [{"answer": "hi"}, "hi"])
+async def test_a_turn_answer_this_build_cannot_read_is_a_failure(answer: Any) -> None:
+    """**Unreadable evidence is not a silent turn.**
+
+    The TUI's own `send_message` reader refuses a payload without `text`; this
+    road reads the same answer for its log line, and `""` would report a member
+    that answered nothing.  The peer is checked when the client is opened
+    (`open_server` compares the build), so a same-build server always spells
+    this shape; anything else is damage or a server this build did not open.
+    """
+    mcp: FastMCP = FastMCP("agent")
+
+    @mcp.tool
+    async def send_message(
+        agent: str, prompt: str = "", subagent: str = "", channel: str = ""
+    ) -> Any:
+        return answer
+
+    async with Client(mcp) as client:
+        with pytest.raises(UnreadableAnswer, match="did not answer"):
+            await a2a_server.run_turn(
+                default_config(),
+                "jack",
+                "researcher",
+                "hello",
+                "subagent:alice",
+                client=client,
+            )
 
 
 def write_subagent(maker: str, name: str) -> Path:

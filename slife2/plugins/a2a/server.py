@@ -106,7 +106,6 @@ from slife2.libs.host.config import (
 from slife2.libs.host.paths import home, home_key, in_home, subagent_dirs
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
-    UnreadableAnswer,
     close_server,
     conversation_reader,
     describe,
@@ -114,6 +113,7 @@ from slife2.libs.plugin.protocol import (
     open_server,
     serve_plugin,
     tool_payload,
+    unreadable,
 )
 from slife2.libs.plugin.vocabulary import FORGET, JOIN
 from slife2.plugins.a2a import groups as group_store
@@ -592,12 +592,20 @@ async def run_turn(
     and does not speak for the member, which is what keeps a turn free to stay
     silent.
 
+    **An answer this build cannot read is a hard failure.**  The peer is checked
+    when the client is opened, so a same-build server's answer carries `text`;
+    anything else is damage or a server this build did not open, and it is
+    raised rather than read as an empty turn.
+
     Raises:
         DeliveryFailed: The agent server could not be reached, so the message did
             not reach the conversation it was addressed to.  Its own type, so
             `_drain` says that in its own words and does not carry the message on
             anywhere — the same answer the window road gives for the same
             situation.
+        UnreadableAnswer: The agent server answered a shape this build does not
+            read.  Raised rather than softened to `""`, because unreadable
+            evidence is not a member that answered with silence.
     """
     opened = client is None
     try:
@@ -631,31 +639,17 @@ async def run_turn(
             # `Exception` — and the cancellation still propagates once the close
             # has finished, so the caller's turn is cancelled as it expected.
             await asyncio.shield(close_server(peer))
-    try:
-        payload = tool_payload(answer)
-    except UnreadableAnswer as exc:
-        # **A turn nobody can read is said rather than counted as nothing.**
-        # The answer is not relayed (see above), but it is the evidence that the
-        # turn happened at all — so an unreadable shape is a build mismatch worth
-        # a warning, and it must not read as a member that answered with silence.
-        # It is *not* raised: the call reached the conversation and the turn ran,
-        # so failing the delivery would make the caller retry a message that
-        # already landed.
-        logger.warning(
-            "a2a_turn_unreadable agent=%s — the turn's answer was not a shape "
-            "this build can read: %s",
-            describe((agent, subagent)),
-            exc,
-        )
-        return ""
+    # **A shape this build cannot read is a hard failure.**  The client this
+    # call uses was checked when it was opened (`open_server` compares the
+    # build), so a same-build server's answer always carries `text`; anything
+    # else is damage or a server this build did not open.  Reading it as `""`
+    # would report a member that answered with silence (SDD Appendix C).
+    payload = tool_payload(answer)
     said = payload.get("text")
     if not isinstance(said, str):
-        logger.warning(
-            "a2a_turn_unreadable agent=%s — the turn's answer carried no text: %s",
-            describe((agent, subagent)),
-            payload,
+        raise unreadable(
+            "the agent server", "answer send_message with a `text`", payload
         )
-        return ""
     return said
 
 

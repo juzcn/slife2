@@ -3476,7 +3476,6 @@ fallbacks above.
 | A continuation has no `messageId` | Compare the request text with the task's last text | A warning and a window note |
 | `wslinfo --networking-mode` cannot answer | Guess from `/sys/class/net/loopback0` | `slife2 status`'s warnings |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | `slife2 status`'s warnings |
-| A subagent turn's answer cannot be read | The `""` is a log line only; the peer is answered by the member's own tool call | The warning naming the member |
 | A tool fails | `ok: false` with text the model reads | The model reads the text |
 
 Everything not in this register is a defect. A path that substitutes a weaker
