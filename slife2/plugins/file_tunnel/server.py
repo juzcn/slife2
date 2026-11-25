@@ -811,9 +811,8 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         blamed on.
 
         `binary` is reported because the provider name does not say which
-        program is running: a CLI provider resolves its binary on PATH first and
-        then in guessed install locations (`_which`), and which of those won is
-        otherwise invisible.
+        program is running: a CLI provider resolves its binary on PATH
+        (`shutil.which`), and the resolved path is otherwise invisible.
         """
         state = tunnel.status()
         edge_ip = tunnel.edge_ip

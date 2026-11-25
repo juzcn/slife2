@@ -3094,7 +3094,10 @@ working one either.** The provider answers `reachable: true|false|null`:
 `expose_local_image` refuses on `false` (every fetch would answer 530) and on
 `null` hands the URL out with the caveat. `tunnel_status` reports
 `probe: failed`, `inherited`, and — for a CLI provider — `binary_source`
-(`named`, `path`, or `guessed`), so the program that actually ran is visible.
+(`named` or `path`), so the program that actually ran is visible. A CLI
+provider's binary is resolved on PATH; one that is not there is a hard failure
+naming the install and the `binary:` option, not a guess at an install
+location.
 
 Three providers are supported:
 
@@ -3469,7 +3472,6 @@ fallbacks above.
 | Closing a link fails | Suppress the teardown error | A debug line |
 | The interface language cannot be detected | English | The window is English |
 | An inherited file-tunnel URL is present | Treat it as active | `tunnel_status.inherited`; an exposure refuses |
-| The default CLI tunnel binary is not on PATH | Guess the platform's install location | `tunnel_status.binary_source: guessed` |
 | A Windows job forbids breakaway | Start without it | A startup warning |
 | A continuation has no `messageId` | Compare the request text with the task's last text | A warning and a window note |
 | `wslinfo --networking-mode` cannot run | Guess from `/sys/class/net/loopback0` | `slife2 status`'s warnings |

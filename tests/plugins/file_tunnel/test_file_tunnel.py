@@ -623,11 +623,10 @@ async def test_status_says_what_the_tunnel_is_doing() -> None:
 
 @pytest.mark.asyncio
 async def test_status_names_the_program_that_actually_ran() -> None:
-    """A CLI provider resolves its binary on PATH first, then in guessed install
-    locations (`providers._which`), so the provider name alone does not say which
-    program is running.  `tunnel_status` reads the resolved `binary_path` — the
-    same way it reads `edge_ip` — and reports it, so the path is readable from
-    the one tool that reports the tunnel's live facts.
+    """A CLI provider resolves its binary on PATH, so the provider name alone
+    does not say which program is running.  `tunnel_status` reads the resolved
+    `binary_path` — the same way it reads `edge_ip` — and reports it, so the
+    path is readable from the one tool that reports the tunnel's live facts.
     """
     tunnel = FakeTunnel()
     tunnel.binary_path = "/opt/cf/cloudflared"
@@ -649,14 +648,14 @@ async def test_status_reports_the_edge_and_the_binary_source() -> None:
     tunnel = FakeTunnel()
     tunnel.edge_ip = "203.0.113.7"
     tunnel.edge_via_proxy = True
-    tunnel.binary_source = "guessed"
+    tunnel.binary_source = "path"
 
     async with Client(server_for(tunnel)) as client:
         reported = await ask(client, "tunnel_status")
 
     assert '"edge_ip": "203.0.113.7"' in reported
     assert '"edge_via_proxy": true' in reported
-    assert '"binary_source": "guessed"' in reported
+    assert '"binary_source": "path"' in reported
 
 
 @pytest.mark.asyncio

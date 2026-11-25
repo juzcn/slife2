@@ -54,12 +54,10 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, Protocol
 
 import httpx2
@@ -182,67 +180,6 @@ def _is_fake_ip_answer(address: object) -> bool:
 # ═══════════════════════════════════════════════════════════════════════
 # Binary / SDK discovery
 # ═══════════════════════════════════════════════════════════════════════
-
-
-def _which(binary: str, extra: tuple[Path, ...] = ()) -> str | None:
-    """Resolve a CLI binary — PATH first, then any *extra* well-known absolute
-    locations, in order.
-
-    ``shutil.which`` and nothing else: Python's resolver already honours
-    ``PATHEXT``, so it finds ``cloudflared.exe`` and ``ssh.exe`` on its own, and
-    a wrapper around it would have nothing left to do.
-
-    **The guessed install locations are a fallback a reader should be able to
-    see.**  OpenSSH and cloudflared are not on PATH in every shell on Windows,
-    so a copy under ``System32`` or ``Program Files`` is found and used — which
-    is what makes the feature work there, and also means PATH does not
-    necessarily win.  The order is therefore reported rather than trusted:
-    :attr:`_TunnelProviderBase.binary_path` carries the resolved path into
-    :meth:`_TunnelProviderBase.status`.
-
-    **The guess is only for the default binary.**  When the operator named one
-    (`binary:`), a name that cannot be found is refused rather than replaced by
-    another program from a guessed location; `_find_binary` passes no `extra`
-    in that case.  It is registered in SDD Appendix C, and *the failure goes*
-    to that reported path or to the refusal that names the configured binary.
-    """
-    found = shutil.which(binary)
-    if found:
-        return found
-    for candidate in extra:
-        if candidate.is_file():
-            return str(candidate)
-    return None
-
-
-def _windows_ssh_fallbacks() -> tuple[Path, ...]:
-    """OpenSSH is an *optional* Windows capability — it ships with the OS but
-    is not on PATH in every shell, so fall back to its install location.
-    """
-    if sys.platform != "win32":
-        return ()
-    return (
-        Path(os.environ.get("SystemRoot", r"C:\Windows"))
-        / "System32"
-        / "OpenSSH"
-        / "ssh.exe",
-    )
-
-
-def _cloudflared_fallbacks() -> tuple[Path, ...]:
-    """cloudflared is NOT bundled with slife2 and no installer installs it —
-    these are the locations its own Windows installers use.
-    """
-    if sys.platform != "win32":
-        return ()
-    roots = [
-        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-        os.environ.get("ProgramFiles", r"C:\Program Files"),
-        os.environ.get("LOCALAPPDATA", ""),
-    ]
-    return tuple(
-        Path(root) / "cloudflared" / "cloudflared.exe" for root in roots if root
-    )
 
 
 def _import_ngrok() -> Any:
@@ -431,9 +368,8 @@ class _TunnelProviderBase:
         self._edge_ip: str = ""
         #: The CLI binary a tunnel resolved, once it has found one.  Empty for an
         #: SDK transport, and for a CLI provider that has not started.  A CLI
-        #: provider looks the binary up on PATH first and then in guessed install
-        #: locations (``_which``), so *which* binary ran is otherwise invisible —
-        #: reported through :attr:`binary_path` and in :meth:`status`.
+        #: provider resolves it on PATH, so *which* binary ran is otherwise
+        #: invisible — reported through :attr:`binary_path` and in :meth:`status`.
         self._binary_path: str = ""
 
     # ── Subclass hooks ─────────────────────────────────────────────
@@ -519,10 +455,10 @@ class _TunnelProviderBase:
     def binary_path(self) -> str:
         """The CLI binary this tunnel resolved, or ``""`` when there is none.
 
-        A CLI provider discovers its binary on PATH first and then by guessed
-        install locations (see ``_which``), so the provider's name alone does
-        not say which program is running.  Empty means "an SDK transport, or a
-        CLI provider that has not started" — never "no binary".
+        A CLI provider resolves its binary on PATH (or takes the path the
+        config named), so the provider's name alone does not say which program
+        is running.  Empty means "an SDK transport, or a CLI provider that has
+        not started" — never "no binary".
         """
         return self._binary_path
 
@@ -1042,10 +978,10 @@ class _CliTunnelProvider(_TunnelProviderBase):
         opts = options or {}
         named = str(opts.get("binary") or "").strip()
         self._binary: str = named or self.default_binary
-        #: Whether the operator named the binary.  A named binary that cannot be
-        #: found is refused rather than replaced by a guessed install location —
-        #: running a *different* program than the one configured is the
-        #: deformation the fallback must not make.
+        #: Whether the operator named the binary, which is what `binary_source`
+        #: reports.  It does not change how the lookup works: there is one
+        #: place a binary is found (PATH), and one that is not there is
+        #: refused by name.
         self._binary_named: bool = bool(named)
 
         self._proc: subprocess.Popen | None = None
@@ -1066,26 +1002,31 @@ class _CliTunnelProvider(_TunnelProviderBase):
 
     @property
     def binary_source(self) -> str:
-        """How the binary was found: `named`, `path`, `guessed`, or `""`.
+        """How the binary was named: `named`, `path`, or `""`.
 
-        **A guessed install location is a fact, not a detail.**  `_which` falls
-        back to `Program Files` and `System32` on Windows because OpenSSH and
-        cloudflared are not on PATH in every shell; which of those won is
-        otherwise invisible, and the program that ran is the one thing
-        `tunnel_status` is for.  An explicitly configured binary is `named`;
-        one found on PATH is `path`; one found anywhere else is `guessed`.
+        `named` means the config pointed at it (`binary:`), `path` that the
+        provider's own default was found on PATH, and `""` that no binary has
+        been resolved yet (an SDK transport, or a CLI provider that has not
+        started).  There is no third place to look — one absent from PATH is
+        refused by name — so which program ran is never a guess.
         """
         if not self._binary_path:
             return ""
-        if self._binary_named:
-            return "named"
-        found = shutil.which(self._binary)
-        return "path" if found and Path(found) == Path(self._binary_path) else "guessed"
-
-    # ── Subclass hooks ─────────────────────────────────────────────
+        return "named" if self._binary_named else "path"
 
     def _find_binary(self) -> str | None:
-        raise NotImplementedError
+        """The configured binary, resolved on PATH.
+
+        ``shutil.which`` and nothing else: Python's resolver honours
+        ``PATHEXT``, so it finds ``cloudflared.exe`` and ``ssh.exe`` on its
+        own.  A binary that is not on PATH is refused by name
+        (``_missing_binary_error``) rather than looked for in a guessed install
+        location — running a program nobody pointed at is the weaker path
+        feature detection must not take.
+        """
+        return shutil.which(self._binary)
+
+    # ── Subclass hooks ─────────────────────────────────────────────
 
     def _argv(self, binary: str, port: int) -> list[str]:
         raise NotImplementedError
@@ -1103,9 +1044,9 @@ class _CliTunnelProvider(_TunnelProviderBase):
         binary = self._find_binary()
         if binary is None:
             raise RuntimeError(self._missing_binary_error())
-        # Remembered so `status()` can report which program is running: the
-        # lookup is PATH first, then guessed install locations, so the name
-        # alone does not say.
+        # Remembered so `status()` can report which program is running: a
+        # default name resolved on PATH and an explicitly configured binary
+        # read the same in the config, and the resolved path is the fact.
         self._binary_path = binary
         return self._run_attempts(lambda: self._spawn(binary, port))
 
@@ -1472,10 +1413,6 @@ class LocalhostRunTunnel(_CliTunnelProvider):
                     f"`remote_port: 80`"
                 ) from exc
 
-    def _find_binary(self) -> str | None:
-        extra = () if self._binary_named else _windows_ssh_fallbacks()
-        return _which(self._binary, extra)
-
     def _argv(self, binary: str, port: int) -> list[str]:
         return [
             binary,
@@ -1508,9 +1445,10 @@ class LocalhostRunTunnel(_CliTunnelProvider):
 
     def _missing_binary_error(self) -> str:
         return (
-            f"ssh client not found ({self._binary!r}). localhost.run needs an "
-            "SSH client — Windows 10+ ships OpenSSH (optional feature "
-            "'OpenSSH Client'); on Linux/macOS install openssh-client."
+            f"ssh client not found on PATH ({self._binary!r}). localhost.run "
+            "needs an SSH client — Windows 10+ ships OpenSSH (optional feature "
+            "'OpenSSH Client'); on Linux/macOS install openssh-client. Or set "
+            "'binary' in the `file-tunnel:` section to its absolute path."
         )
 
 
@@ -1616,10 +1554,6 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
             return True
         return bool(self._registered)
 
-    def _find_binary(self) -> str | None:
-        extra = () if self._binary_named else _cloudflared_fallbacks()
-        return _which(self._binary, extra)
-
     def _argv(self, binary: str, port: int) -> list[str]:
         return [
             binary,
@@ -1638,7 +1572,7 @@ class CloudflareQuickTunnel(_CliTunnelProvider):
 
     def _missing_binary_error(self) -> str:
         return (
-            f"cloudflared not found ({self._binary!r}). A Cloudflare Quick "
+            f"cloudflared not found on PATH ({self._binary!r}). A Cloudflare Quick "
             "Tunnel needs the cloudflared binary — install it from "
             "https://developers.cloudflare.com/cloudflare-one/connections/"
             "connect-networks/downloads/ (or set 'binary' in the "

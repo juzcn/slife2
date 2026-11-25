@@ -151,12 +151,12 @@ def install_popen(monkeypatch, stdout, returncode=None, captured=None):
     # Fake only the "is it installed?" lookup — every configured binary
     # resolves to itself, so the option plumbing stays under test and no test
     # ever finds a REAL ssh on PATH and connects to a real service.
-    monkeypatch.setattr(providers, "_which", lambda binary, extra=(): binary)
+    monkeypatch.setattr(providers.shutil, "which", lambda binary: binary)
     return captured
 
 
 def install_missing_binary(monkeypatch) -> None:
-    monkeypatch.setattr(providers, "_which", lambda binary, extra=(): None)
+    monkeypatch.setattr(providers.shutil, "which", lambda binary: None)
 
 
 def one_attempt(monkeypatch, read_timeout: float | None = None) -> None:
@@ -557,37 +557,37 @@ def test_the_ssh_binary_option_is_honoured() -> None:
     assert LocalhostRunTunnel({"binary": "/opt/ssh"})._binary == "/opt/ssh"
 
 
-def test_a_named_binary_that_is_missing_is_not_replaced_by_a_guess(
-    monkeypatch,
-) -> None:
-    """**A named binary is not a default to improve on.**  The guessed install
-    locations exist for the default `ssh`/`cloudflared`; replacing a binary the
-    operator named would run a different program, with only `tunnel_status`'s
-    resolved path as the trace."""
-    seen: dict[str, tuple] = {}
+def test_a_named_binary_that_is_missing_is_refused(monkeypatch) -> None:
+    """**A named binary is not a default to improve on.**  PATH is the one
+    lookup; a binary the operator named but that is not there is refused by
+    name rather than replaced by a different program."""
+    seen: list[str] = []
 
-    def which(binary, extra=()):
-        seen["extra"] = extra
+    def which(binary):
+        seen.append(binary)
         return None
 
-    monkeypatch.setattr(providers, "_which", which)
-    with pytest.raises(RuntimeError, match=r"ssh client not found \('/opt/ssh'\)"):
+    monkeypatch.setattr(providers.shutil, "which", which)
+    with pytest.raises(
+        RuntimeError, match=r"ssh client not found on PATH \('/opt/ssh'\)"
+    ):
         LocalhostRunTunnel({"binary": "/opt/ssh"}).start(24038)
-    assert seen["extra"] == (), "a named binary was given the guessed locations"
+    assert seen == ["/opt/ssh"], "a named binary was looked for somewhere else"
 
 
-def test_the_default_binary_uses_the_guessed_locations(monkeypatch) -> None:
-    """The other half: no `binary:` is the case the guess exists for."""
-    seen: dict[str, tuple] = {}
+def test_the_default_binary_is_resolved_on_path(monkeypatch) -> None:
+    """The other half: no `binary:` means the provider's own name, and PATH is
+    the only place it is looked for."""
+    seen: list[str] = []
 
-    def which(binary, extra=()):
-        seen["extra"] = extra
+    def which(binary):
+        seen.append(binary)
         return None
 
-    monkeypatch.setattr(providers, "_which", which)
+    monkeypatch.setattr(providers.shutil, "which", which)
     with pytest.raises(RuntimeError, match="ssh client not found"):
         LocalhostRunTunnel().start(24038)
-    assert seen["extra"] == providers._windows_ssh_fallbacks()
+    assert seen == ["ssh"]
 
 
 def test_a_malformed_remote_port_is_refused() -> None:
@@ -627,17 +627,13 @@ def test_a_missing_binary_is_terminal_and_names_itself(monkeypatch) -> None:
 
 
 def test_the_resolved_binary_path_is_reported(monkeypatch) -> None:
-    """A CLI binary is found on PATH first, then by guessed install locations.
-
-    Which one ran is otherwise invisible — the provider's name does not say it,
-    and a PATH copy and a ``Program Files`` copy are different programs — so the
-    resolved path is reported once it has been found.
+    """A CLI binary is resolved on PATH, and which program that is is otherwise
+    invisible — the provider's name does not say it — so the resolved path is
+    reported once it has been found.
     """
     lines = CF_BANNER.splitlines(keepends=True) + [CF_REGISTERED]
     install_popen(monkeypatch, LinesStdout(lines))
-    monkeypatch.setattr(
-        providers, "_which", lambda binary, extra=(): "/opt/cf/cloudflared"
-    )
+    monkeypatch.setattr(providers.shutil, "which", lambda binary: "/opt/cf/cloudflared")
     tunnel = CloudflareQuickTunnel()
     tunnel.start(24038)
     assert tunnel.binary_path == "/opt/cf/cloudflared"
