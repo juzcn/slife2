@@ -18,7 +18,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import sys
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -636,41 +635,6 @@ def test_the_qr_is_drawn_as_something_that_can_be_scanned() -> None:
     assert len(drawn.splitlines()) > 5
     assert set(drawn) & {"█", "▀", "▄"}
     assert render_qr("") == ""
-
-
-def test_a_missing_qr_renderer_refuses_rather_than_calling_a_url_a_code(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """**A URL cannot be scanned, so it must not be handed back as one.**
-
-    Without `qrcode` the payload was returned as it came — a link the login tool
-    then told the model to show "so it can be scanned", which is false
-    (SDD Appendix C: a weaker path must not be selected silently).  The
-    renderer refuses now, and the caller says what actually happened.
-    """
-    monkeypatch.setitem(sys.modules, "qrcode", None)
-
-    with pytest.raises(ImportError):
-        render_qr("https://example.test/scan")
-
-
-@pytest.mark.asyncio
-async def test_a_login_without_the_qr_renderer_tells_the_truth(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The sentence the model reads matches what it is being handed."""
-    monkeypatch.setitem(sys.modules, "qrcode", None)
-    made = rig(monkeypatch)
-    async with Client(
-        served(http=made.bridge, deliver=made.delivery, note=made.notes)
-    ) as client:
-        answer = await ask(client, "wechat_login")
-
-    # **An empty `qr` is the fact**: nothing scannable was drawn, and the URL
-    # rides beside it as what to send instead rather than as a code.
-    assert answer["state"] == "waiting"
-    assert answer["qr"] == "", "a link is not a code"
-    assert answer["qr_url"] == "https://example.test/scan", "the link is handed over"
 
 
 # --- messages become turns ----------------------------------------------------

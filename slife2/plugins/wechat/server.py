@@ -70,6 +70,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import qrcode
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 
@@ -182,16 +183,12 @@ def render_qr(content: str) -> str:
     makes a code fit on a screen without a window to resize.  The model copies
     this into its reply, and the person scans the screen they are reading.
 
-    **Without `qrcode` this refuses rather than handing back the payload.**  A
-    URL is not something that can be scanned, so returning the content would
-    select a weaker path silently (SDD Appendix C); the `ImportError` goes to
-    the caller, which says what actually happened.
+    **No rendering fallback**: `qrcode` is a declared dependency, so a missing
+    one is a damaged installation that fails at import with every other one,
+    rather than a machine that hands back a URL as if it were a code.
     """
     if not content:
         return ""
-    # The one import of this package, inside the one function that draws it
-    # (pyproject's note): a build without it still runs everything else.
-    import qrcode
 
     code = qrcode.QRCode(border=1, box_size=1)
     code.add_data(content)
@@ -1185,16 +1182,10 @@ class Wechat:
     def _remember_code(self, session: Session, content: str) -> str:
         """Draw *content* and keep it on the session, where a status can hand it out.
 
-        **The `ImportError` policy lives here, in one place** (SDD Appendix C):
-        without the rendering library `qr` is empty and `qr_url` is the address
-        to send instead, so a reply never tells someone to scan a link.  Any
-        other failure propagates — the caller knows whether that is a failed
+        A drawing failure propagates — the caller knows whether that is a failed
         login (`login`) or a dead watch (`_qr_follow`).
         """
-        try:
-            session.qr = render_qr(content)
-        except ImportError:
-            session.qr = ""
+        session.qr = render_qr(content)
         session.qr_url = content
         return session.qr
 
@@ -1279,14 +1270,11 @@ class Wechat:
             # **A login is not left `waiting` on a code nobody can show.**  The
             # watch is spawned below, so a failure here would leave the state
             # saying a scan is pending with nothing polling — the state
-            # `wechat_check_status` reports for ever.  The fetch-failure rule,
-            # one step later: the login fails and says why.
+            # `wechat_check_status` reports for ever.  The login fails and says
+            # why.
             session.qr_state = "error"
             session.qr_error = f"The login code could not be drawn: {exc}"
-            raise ToolError(
-                f"the login QR could not be drawn ({exc}); "
-                f"call `wechat_login` again in a moment."
-            ) from exc
+            raise ToolError(f"the login QR could not be drawn ({exc})") from exc
         session.qr_task = self._spawn(
             self._qr_watch(session, qrcode, ilink.BASE_URL, attempts=0)
         )
@@ -1778,9 +1766,7 @@ def build_server(
             `state` — `waiting` for a code to be scanned, or `connected` when
             there was already a login, in which case call `wechat_logout` first
             to switch accounts — `qr`, the code to put in your reply, `qr_url`,
-            what the code encodes (send it as a link instead when `qr` is empty,
-            which is a machine that cannot draw one), and `seconds_left`, how
-            long the code lasts.
+            what the code encodes, and `seconds_left`, how long the code lasts.
         """
         agent = plugin.caller(ctx)
         return await plugin.login(plugin.session(agent))

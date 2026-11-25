@@ -3468,7 +3468,6 @@ fallbacks above.
 | A lone surrogate reaches tool text | Escape it | Nothing; the request survives |
 | Closing a link fails | Suppress the teardown error | A debug line |
 | The interface language cannot be detected | English | The window is English |
-| A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The URL in the login answer |
 | An inherited file-tunnel URL is present | Treat it as active | `tunnel_status.inherited`; an exposure refuses |
 | The default CLI tunnel binary is not on PATH | Guess the platform's install location | `tunnel_status.binary_source: guessed` |
 | A Windows job forbids breakaway | Start without it | A startup warning |
