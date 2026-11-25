@@ -46,7 +46,7 @@ from slife2.clients.toolclient import (
 )
 from slife2.helpers.clock import now
 from slife2.helpers.threads import off_loop
-from slife2.libs.harness import dumps
+from slife2.libs.harness import degrade, dumps
 from slife2.libs.harness.async_tasks import (
     CANCEL_ASYNC,
     CHECK_ASYNC,
@@ -1019,6 +1019,16 @@ class AgentCore:
                 describe((loop.agent, loop.subagent)),
                 exc,
                 exc_info=exc,
+            )
+            # **A skipped trim is a window line, not only a log line.**  The
+            # loaded set stays over budget for the next request; the person
+            # watching is told once, not once per turn.
+            await degrade.report(
+                self.current(),
+                loop.agent,
+                f"trim:{loop.subagent}",
+                "the tool list was not trimmed",
+                str(exc),
             )
             return
         if not unloaded:
@@ -2233,7 +2243,12 @@ class AgentCore:
                             agent,
                             subagent,
                             self.current(),
-                            subagent_spec(agent, subagent),
+                            # The transcript is a read, but its opening is the
+                            # conversation's prompt: a damaged record must not
+                            # render the maker's model and the plain role as
+                            # this subagent's.  The run path is strict for the
+                            # same reason; the list path flags the damage.
+                            subagent_spec(agent, subagent, strict=True),
                         )
                     ],
                 },

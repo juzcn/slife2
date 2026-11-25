@@ -528,10 +528,13 @@ class GroupStore:
     #: ``(name, gid)`` this member has left, been removed from, or seen
     #: disbanded.  Bounded insertion-ordered list; the oldest goes first.
     tombstones: list[tuple[str, str]] = field(default_factory=list)
-    #: Why the file could not be read and could not be quarantined.  While
-    #: this is set, mutations refuse: overwriting a file we could not
-    #: understand is the one way to lose what it held.
+    #: Why the file could not be read, or could not be quarantined.  While this
+    #: is set, **every group tool refuses**: the groups are not "none", they are
+    #: a file that needs repairing, and a read that answered an empty list would
+    #: be damage read as absence.
     load_error: str = ""
+    #: Whether the file was set aside as `.corrupt` because it could not be read.
+    quarantined: bool = False
 
     @classmethod
     def load(cls, path: Path | None) -> GroupStore:
@@ -562,22 +565,21 @@ class GroupStore:
         return store
 
     def _quarantine(self, reason: str) -> GroupStore:
-        """Keep the bytes of a file this build cannot read, and start empty.
+        """Preserve the bytes of a file this build cannot read, and **refuse**.
 
-        **This is the fallback registered in SDD Appendix C**: *what it does*
-        is move the file aside as ``.corrupt`` and answer no groups; *it gives
-        up* every group in that file; *it does not cover* a file that cannot be
-        moved aside — including a second corruption, because a ``.corrupt`` that
-        already exists is left untouched — where `load_error` refuses every
-        mutation instead; *the failure goes* to the warning naming the path and
-        to the preserved ``.corrupt`` file.
+        **Damage is not "no groups".**  The file is set aside as ``.corrupt``
+        so its bytes survive, but the store is not usable: every group tool
+        raises `load_error`, naming the preserved file and the repair.  A read
+        that answered an empty list would tell the model the conversation has
+        no groups, which is a fact the damage did not make (SDD Appendix C).
+
+        The one quarantine slot is not overwritten: a second corruption leaves
+        the first preserved copy alone and keeps this file in place, still
+        refusing.  Either way `load_error` is set, so nothing writes over the
+        bytes that still hold the operator's groups.
         """
         assert self.path is not None
-        logger.warning(
-            "a2a_groups_unreadable path=%s reason=%s — starting empty",
-            self.path,
-            reason,
-        )
+        self.quarantined = True
         corrupt = self.path.with_name(self.path.name + ".corrupt")
         try:
             # **One quarantine slot is not a licence to overwrite it.**  A
@@ -594,9 +596,15 @@ class GroupStore:
         except OSError as e:
             self.load_error = (
                 f"{self.path} could not be read ({reason}) and could not be moved "
-                f"aside ({e}); fix or remove it before changing groups."
+                f"aside ({e}); fix or remove it before using groups."
             )
             logger.error("a2a_groups_unrecoverable path=%s: %s", self.path, e)
+            return self
+        self.load_error = (
+            f"the groups file at {self.path} could not be read ({reason}); it was "
+            f"preserved as {corrupt} — repair or remove it before using groups"
+        )
+        logger.error("a2a_groups_quarantined path=%s: %s", self.path, self.load_error)
         return self
 
     def _load_tombstones(self, raw: Any) -> None:

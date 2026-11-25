@@ -177,6 +177,50 @@ async def test_restore_reads_an_unmeasurable_size_as_zero(
     assert (await wired(store).restore(IDENTITY, [])).context_tokens == 0
 
 
+@pytest.mark.parametrize(
+    ("field", "damaged"),
+    [("missing", [404]), ("unreadable", [7])],
+)
+async def test_restore_refuses_a_damaged_context(
+    field: str, damaged: list[int]
+) -> None:
+    """**A conversation is not built on a hole.**
+
+    The store reports a live-context id with no row, or a turn whose body cannot
+    be read, rather than dropping it or reading it as empty.  The live context
+    refuses to run on either; the ids and the repair are the sentence.
+    """
+    store = Store(
+        restore={
+            "messages": [],
+            "turn_ids": [],
+            "turns": [],
+            field: damaged,
+        }
+    )
+    with pytest.raises(RuntimeError, match="cannot be restored") as raised:
+        await wired(store).restore(IDENTITY, [])
+
+    assert str(damaged[0]) in str(raised.value)
+    assert "repair the turn store" in str(raised.value)
+
+
+@pytest.mark.parametrize("damage", ["not a list", 7])
+async def test_restore_refuses_a_damage_report_it_cannot_read(damage: Any) -> None:
+    """The damage half of the answer is read strictly too: a shape this build
+    cannot read is a store from another build, not "no damage"."""
+    store = Store(
+        restore={
+            "messages": [],
+            "turn_ids": [],
+            "turns": [],
+            "missing": damage,
+        }
+    )
+    with pytest.raises(UnreadableAnswer, match="damage"):
+        await wired(store).restore(IDENTITY, [])
+
+
 # ── rebuild ──────────────────────────────────────────────────────────────────
 
 

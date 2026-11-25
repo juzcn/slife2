@@ -75,7 +75,7 @@ class FakeTunnel:
         *,
         url: str = "https://tunnel.test",
         active: bool = True,
-        reachable: bool = True,
+        reachable: bool | None = True,
         can_start: bool = True,
         state: str | None = None,
         reason: str = "",
@@ -108,8 +108,14 @@ class FakeTunnel:
     def is_starting(self) -> bool:
         return False
 
-    def is_reachable(self) -> bool:
+    def reachability(self) -> bool | None:
+        if self.reachable is None:
+            return None
         return self.reachable and self.active
+
+    def is_reachable(self) -> bool:
+        value = self.reachability()
+        return True if value is None else value
 
     def share_url_for(self, token: str) -> str | None:
         if self.vanishes:
@@ -640,6 +646,29 @@ async def test_reachable_is_reported_apart_from_active() -> None:
 
     assert '"state": "active"' in reported
     assert '"reachable": false' in reported
+
+
+@pytest.mark.asyncio
+async def test_a_probe_that_cannot_answer_is_unknown_not_reachable(
+    tmp_path: Path,
+) -> None:
+    """**A broken probe is not a working URL.**
+
+    The safe decision is kept — unknown does not tear the tunnel down — but the
+    fact is reported as `null` and `probe: failed`, and an exposure carries the
+    caveat rather than a health claim the probe did not make.
+    """
+    picture = tmp_path / "photo.png"
+    picture.write_bytes(b"png-bytes")
+    unknown = FakeTunnel(reachable=None)
+
+    async with Client(server_for(unknown)) as client:
+        reported = await ask(client, "tunnel_status")
+        exposed = await ask_json(client, "expose_local_image", path=str(picture))
+
+    assert '"reachable": null' in reported
+    assert '"probe": "failed"' in reported
+    assert exposed["reachability"].startswith("the tunnel's liveness probe")
 
 
 @pytest.mark.asyncio

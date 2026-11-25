@@ -283,8 +283,8 @@ def _auth_token(options: dict) -> str | None:
     return os.environ.get("NGROK_AUTHTOKEN", "").strip() or None
 
 
-def _ngrok_tunnel_alive(public_url: str) -> bool:
-    """True if ngrok still lists *public_url* as a live listener.
+def _ngrok_tunnel_alive(public_url: str) -> bool | None:
+    """True/False if the SDK can say, or **None when the probe cannot answer**.
 
     The embedded SDK does NOT report a server-side teardown (free-tier sessions
     get recycled by ngrok), so the monitor asks the SDK what it is still
@@ -292,31 +292,26 @@ def _ngrok_tunnel_alive(public_url: str) -> bool:
     exposes — ``get_tunnels`` does not exist in ngrok 1.x, and a probe naming
     it returns True for every input and detects nothing.
 
-    TWO conservative rules, because a wrong "dead" costs more than a wrong
-    "alive" here: the monitor answers a false negative by tearing the tunnel
-    down and minting a NEW hostname, which kills every link already handed to a
-    person or an LLM.  So an unavailable probe (an older SDK, API trouble)
-    returns True, and so does an EMPTY list — "no listeners" cannot be told
-    apart from "this build does not track them".  A NON-EMPTY list that omits
-    our URL does answer: there the SDK is demonstrably tracking listeners for
-    this session and ours is not among them.
-
-    **This is the fallback registered in SDD Appendix C**, and its shape is
-    that of the two beside it: *what it does* is treat a probe that could not
-    answer as alive; *it gives up* telling a broken probe from an outage; *it
-    does not cover* a non-empty listener list that proves our URL gone; *the
-    failure goes* to the debug line below and to `tunnel_status`.
+    **A wrong "dead" costs more than a wrong "alive" here**: the monitor
+    answers a false negative by tearing the tunnel down and minting a NEW
+    hostname, which kills every link already handed out.  So the *decision*
+    treats an unavailable probe as alive — but the *fact* is `None`, not
+    `True`: an empty list, an older SDK and an exception are unknowns, and
+    `tunnel_status` reports `reachable: null` / `probe: failed` rather than
+    asserting health.  A NON-EMPTY list that omits our URL does answer: there
+    the SDK is demonstrably tracking listeners for this session and ours is not
+    among them.
     """
     try:
         ngrok = _import_ngrok()
         if ngrok is None:
-            return True
+            return None
         get_listeners = getattr(ngrok, "get_listeners", None)
         if get_listeners is None:
-            return True
+            return None
         listeners = list(get_listeners())
         if not listeners:
-            return True
+            return None
         want = public_url.rstrip("/")
         for listener in listeners:
             url = listener.url
@@ -326,11 +321,12 @@ def _ngrok_tunnel_alive(public_url: str) -> bool:
         return False
     except Exception as exc:  # noqa: BLE001 — a failed probe must not flap the tunnel
         logger.debug(
-            "ngrok_liveness_probe_failed url=%s err=%s — treating the tunnel as alive",
+            "ngrok_liveness_probe_failed url=%s err=%s — reachability unknown, "
+            "treating the tunnel as alive",
             public_url,
             exc,
         )
-        return True
+        return None
 
 
 @runtime_checkable
@@ -365,7 +361,12 @@ class TunnelProvider(Protocol):
         """
         ...
 
+    def reachability(self) -> bool | None: ...
+
     def is_reachable(self) -> bool: ...
+
+    @property
+    def binary_source(self) -> str: ...
 
     def status(self) -> dict[str, str]: ...
 
@@ -513,45 +514,47 @@ class _TunnelProviderBase:
         """
         return self._binary_path
 
-    def is_reachable(self) -> bool:
-        """Whether the published URL can actually be served right now.
+    def reachability(self) -> bool | None:
+        """Whether the published URL can be served: true, false, or unknown.
 
-        Narrower than :attr:`is_active`, which only reports that a URL
-        *exists*: a transport that lost the edge leaves the URL in place while
-        every request to it answers HTTP 530, so handing that URL out is
-        handing out a dead link.
+        **The third answer is the point.**  A probe that cannot answer used to
+        be reported as `True`, so `tunnel_status` said a broken probe was a
+        working URL — a failure read as a success.  The decision stays the
+        safe one (`is_reachable` treats unknown as reachable: a false dead tears
+        the tunnel down and mints a new hostname), but the fact is now
+        `None` and every caller can say "unknown" instead of asserting health.
 
-        Synchronous and exception-free, like :meth:`status`, and a probe that
-        cannot answer is not an outage — the caller is deciding whether to
-        refuse an exposure, and a broken probe must not be the thing that
-        refuses.
+        `None` is a broken probe — a missing listener API, an SDK that changed,
+        an exception.  A transport the provider proves dead answers `False`, and
+        that is still the only answer that refuses an exposure.
 
-        **A URL from the environment has no transport here to probe**, which is
-        the same rule read one step earlier.  :attr:`public_url` falls back to
-        ``SLIFE2_FILE_TUNNEL_URL`` — a tunnel this process did not start, which
-        is the whole point of the variable and what :meth:`share_url_for` hands
-        out — so ``self._public_url`` is ``None`` while ``is_active`` is True.
-        With nothing of ours behind the URL there is nothing to ask, so the
-        answer is whether there is a URL at all.
-
-        **A probe that throws is the fallback registered in SDD Appendix C**:
-        *what it does* is treat the URL as reachable; *it gives up* telling a
-        broken probe from an outage; *it does not cover* a transport its
-        provider proves dead; *the failure goes* to the debug line below and to
-        `tunnel_status`.
+        **A URL from the environment has no transport here to probe**: there is
+        nothing behind it in this process, so the answer is whether there is a
+        URL at all.
         """
         if self._public_url is None:
             return self.public_url is not None
         try:
             return bool(self.is_alive())
-        except Exception as exc:  # noqa: BLE001 — a failed probe must not refuse
+        except Exception as exc:  # noqa: BLE001 — a failed probe is unknown
             logger.debug(
                 "tunnel_reachability_probe_failed provider=%s err=%s — "
-                "treating the URL as reachable",
+                "the URL is handed out but its reachability is unknown",
                 self.label,
                 exc,
             )
-            return True
+            return None
+
+    def is_reachable(self) -> bool:
+        """Whether the published URL can be served, with unknown read as alive.
+
+        The decision is the safe one — see `reachability`.  A caller that needs
+        to distinguish "proven reachable" from "could not be asked" uses
+        `reachability`; this method is for the ones that only decide whether to
+        refuse.
+        """
+        value = self.reachability()
+        return True if value is None else value
 
     def share_url_for(self, file_id: str) -> str | None:
         """Build a public share URL for *file_id*."""
@@ -925,10 +928,34 @@ class NgrokTunnel(_TunnelProviderBase):
         except Exception as e:  # noqa: BLE001 — stop() must never raise
             logger.warning("tunnel_disconnect_error err=%s", e)
 
-    def is_alive(self) -> bool:
+    @property
+    def binary_source(self) -> str:
+        """An SDK transport spawns no binary; there is no source to name."""
+        return ""
+
+    def reachability(self) -> bool | None:
+        """The ngrok listener probe, with **unknown kept as `None`**.
+
+        The base class catches an exception from `is_alive`; this provider's
+        probe answers `None` itself for an older SDK or an empty listener list,
+        so the tri-state has to be passed through rather than collapsed to the
+        safe boolean the decision uses.
+        """
         if self._public_url is None:
-            return False
-        return _ngrok_tunnel_alive(self._public_url)
+            return self.public_url is not None
+        try:
+            return _ngrok_tunnel_alive(self._public_url)
+        except Exception as exc:  # noqa: BLE001 — a failed probe is unknown
+            logger.debug(
+                "ngrok_reachability_probe_failed url=%s err=%s",
+                self._public_url,
+                exc,
+            )
+            return None
+
+    def is_alive(self) -> bool:
+        value = self.reachability()
+        return True if value is None else value
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1024,6 +1051,28 @@ class _CliTunnelProvider(_TunnelProviderBase):
         #: none.  Preferred over the scraped set above wherever it exists —
         #: see :meth:`_metrics_ready`.
         self._metrics_base: str | None = None
+
+    @property
+    def binary_source(self) -> str:
+        """How the binary was found: `named`, `path`, `guessed`, or `""`.
+
+        **A guessed install location is a fact, not a detail.**  `_which` falls
+        back to `Program Files` and `System32` on Windows because OpenSSH and
+        cloudflared are not on PATH in every shell; which of those won is
+        otherwise invisible, and the program that ran is the one thing
+        `tunnel_status` is for.  An explicitly configured binary is `named`;
+        one found on PATH is `path`; one found anywhere else is `guessed`.
+        """
+        if not self._binary_path:
+            return ""
+        if self._binary_named:
+            return "named"
+        found = shutil.which(self._binary)
+        return (
+            "path"
+            if found and Path(found) == Path(self._binary_path)
+            else "guessed"
+        )
 
     # ── Subclass hooks ─────────────────────────────────────────────
 

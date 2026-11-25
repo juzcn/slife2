@@ -228,10 +228,17 @@ class AgentCard:
     ``status`` is one of ``"online"`` / ``"offline"`` on the wire (the standard
     ``a2a-status`` presence, mapped by the mesh).  The dataclass default is
     ``"idle"`` for constructed-but-unset cards.
+
+    ``presence_assumed`` is true when the card carried no ``a2a-status``
+    property and ``online`` was read from that omission.  The result is still
+    the roster's answer — an implementation that does not publish presence is
+    treated as present while its card exists — but it is an assumption, and a
+    reader that can tell it from a claim is owed the difference.
     """
 
     agent_name: AgentName
     status: str = "idle"  # "online" or "offline"
+    presence_assumed: bool = False
 
 
 def format_presence_line(card: AgentCard, event: str) -> str | None:
@@ -592,28 +599,32 @@ class MeshResponder(Responder):
 
 
 class _PresencePeer:
-    __slots__ = ("name", "status")
+    __slots__ = ("name", "status", "presence_assumed")
 
-    def __init__(self, name: str, status: str) -> None:
+    def __init__(self, name: str, status: str, presence_assumed: bool = False) -> None:
         self.name = name
         self.status = status  # "online" | "offline"
+        #: Whether `status` came from an absent `a2a-status` property.
+        self.presence_assumed = presence_assumed
 
 
-def _presence_status(props) -> str:
-    """Map the standard ``a2a-status`` presence property to online/offline.
+def _presence_status(props) -> tuple[str, bool]:
+    """Map the standard ``a2a-status`` property to `(online/offline, assumed)`.
 
     **Absent defaults to "online", and that is a decision rather than an
     oversight** — it is what a card stamped by an implementation that does not
     set presence means, and what our own readiness gate rests on
-    (``_handle_discovery``).  What it costs is that a *deleted* card, which
-    carries no property either, would read as an announcement: every caller
-    that can be handed one therefore refuses the empty payload *before* asking
-    this, and that ordering is load-bearing rather than tidy.
+    (``_handle_discovery``).  The second value is *whether that default was
+    taken*: the roster still answers, but a reader can tell a claim from an
+    assumption.  What it costs is that a *deleted* card, which carries no
+    property either, would read as an announcement: every caller that can be
+    handed one therefore refuses the empty payload *before* asking this, and
+    that ordering is load-bearing rather than tidy.
     """
     status = user_property(props, "a2a-status")
     if not status:
-        return "online"
-    return "offline" if status == "offline" else "online"
+        return "online", True
+    return ("offline" if status == "offline" else "online"), False
 
 
 def _card_instance(data: dict | None) -> str:
@@ -965,7 +976,7 @@ class A2AMesh:
         instance = _card_instance(_decode_payload(msg))
         if instance and instance == self._instance:
             return None  # our own card, echoed back
-        if _presence_status(msg.properties) == "offline":
+        if _presence_status(msg.properties)[0] == "offline":
             return None  # retired — nobody is holding the name
         who = (
             f"another A2A instance ({instance[:8]})"
@@ -1338,7 +1349,7 @@ class A2AMesh:
             # a publisher retires its card, and its absent status property
             # would otherwise read as "online" — arming the readiness gate on
             # the absence of a card.
-            if msg.payload and _presence_status(msg.properties) == "online":
+            if msg.payload and _presence_status(msg.properties)[0] == "online":
                 self._responder_ready.set()
             return
         if not msg.payload:
@@ -1357,11 +1368,15 @@ class A2AMesh:
                 )
             logger.debug("a2a_presence_card_deleted agent=%s", agent_id)
             return
-        status = _presence_status(msg.properties)
+        status, assumed = _presence_status(msg.properties)
         prev = self._peers.get(agent_id)
-        if prev is not None and prev.status == status:
+        if (
+            prev is not None
+            and prev.status == status
+            and prev.presence_assumed == assumed
+        ):
             return  # no transition → no event
-        self._peers[agent_id] = _PresencePeer(agent_id, status)
+        self._peers[agent_id] = _PresencePeer(agent_id, status, assumed)
         if prev is None and status == "offline":
             # A cold retained offline card — the peer was already gone BEFORE
             # we subscribed (mosquitto re-sends every retained card on
@@ -1373,7 +1388,11 @@ class A2AMesh:
             return
         event = "online" if status == "online" else "offline"
         self.on_agent_change(
-            AgentCard(agent_name=AgentName(agent_id), status=status),
+            AgentCard(
+                agent_name=AgentName(agent_id),
+                status=status,
+                presence_assumed=assumed,
+            ),
             event,
         )
 
@@ -2328,6 +2347,7 @@ class A2AMesh:
                 AgentCard(
                     agent_name=AgentName(peer.name),
                     status=peer.status,
+                    presence_assumed=peer.presence_assumed,
                 )
             )
         return cards

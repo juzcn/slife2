@@ -1110,6 +1110,11 @@ class Declarations:
     #: One refresh at a time for this home — see `build_server`'s
     #: `refresh_declared`, which is the only holder.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Plugin name -> why its declaration could not be refreshed this round.
+    #: Its last rows are still in the catalogue, so a search can answer — but
+    #: the answer says the source is stale rather than presenting old rows as
+    #: the current truth (`_results`/`_page_answer`).
+    stale: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1896,6 +1901,7 @@ def local_tools(
     catalogue: Catalogue,
     live_sources: Callable[[], list[str]],
     refresh_declared: Callable[[], Awaitable[None]],
+    stale_sources: Callable[[], Mapping[str, str]] | None = None,
 ) -> list[LocalTool]:
     """What this process serves a model itself: the four it reads and manages
     tools with.
@@ -1983,7 +1989,7 @@ def local_tools(
             # was asked to show.
             unloaded_only=arguments.get("unloaded_only") is True,
         )
-        return _results(found)
+        return _results(found, stale_sources() if stale_sources else None)
 
     async def page(arguments: dict[str, Any]) -> dict[str, Any]:
         category = str(arguments.get("category") or "").strip()
@@ -2008,7 +2014,7 @@ def local_tools(
             limit=_whole(arguments, "limit"),
             offset=_whole(arguments, "offset"),
         )
-        return _page_answer(found)
+        return _page_answer(found, stale_sources() if stale_sources else None)
 
     async def load(arguments: dict[str, Any]) -> dict[str, Any]:
         names = _names_of(arguments)
@@ -2394,7 +2400,9 @@ def _listing(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _results(found: Mapping[str, Any]) -> dict[str, Any]:
+def _results(
+    found: Mapping[str, Any], stale: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     """A tool search's rows, as the object a model reads.
 
     The page is `search_answer`'s — the one envelope all three searches give
@@ -2421,15 +2429,28 @@ def _results(found: Mapping[str, Any]) -> dict[str, Any]:
             f"tool_search could not read the catalogue's answer — `results` came "
             f"back as {rows!r}"
         )
-    return search_answer(
+    meaning = found.get("meaning")
+    answer = search_answer(
         [_record(row) for row in rows],
         scores=[row.get("similarity") for row in rows],
         worded=any(row.get("matched_in") for row in rows),
         limit=SEARCH_LIMIT,
+        meaning=str(meaning) if isinstance(meaning, str) else "",
     )
+    # **Stale rows are named, not passed off as current.**  A plugin that could
+    # not answer this refresh keeps its last rows so a search still works; the
+    # answer says whose rows are old and why, so the model knows to retry after
+    # the source comes back rather than trusting a name it cannot see.
+    if stale:
+        answer["sources_stale"] = [
+            f"{name}: {reason}" for name, reason in sorted(stale.items())
+        ]
+    return answer
 
 
-def _page_answer(found: Mapping[str, Any]) -> dict[str, Any]:
+def _page_answer(
+    found: Mapping[str, Any], stale: Mapping[str, str] | None = None
+) -> dict[str, Any]:
     """A listing's page, as the object a model reads.
 
     **The one page shape this system answers with** (SDD §7.6): the rows under
@@ -2468,7 +2489,12 @@ def _page_answer(found: Mapping[str, Any]) -> dict[str, Any]:
         raise ConnectionError(
             f"tool_list could not read the catalogue's page — {exc}"
         ) from None
-    return {"tools": [_listing(row) for row in rows], **page}
+    answer = {"tools": [_listing(row) for row in rows], **page}
+    if stale:
+        answer["sources_stale"] = [
+            f"{name}: {reason}" for name, reason in sorted(stale.items())
+        ]
+    return answer
 
 
 def document_is_not_callable(name: str, row: Mapping[str, Any]) -> str:
@@ -3076,6 +3102,11 @@ def build_server(
                         upstream.settings.name,
                         failure,
                     )
+                    # **The answer says the source is stale.**  Keeping the
+                    # last rows is right — a slow plugin is not a broken
+                    # catalogue — but a search that presented them as current
+                    # would be a fact the refresh did not establish.
+                    mine.stale[upstream.settings.name] = str(failure)
                     carried(upstream)
                     continue
                 if held is None:
@@ -3120,8 +3151,10 @@ def build_server(
                         upstream.settings.name,
                         exc,
                     )
+                    mine.stale[upstream.settings.name] = str(exc)
                     carried(upstream)
                     continue
+                mine.stale.pop(upstream.settings.name, None)
                 for one in declared:
                     known.add(one.name)
                     found[one.name] = one
@@ -3145,6 +3178,7 @@ def build_server(
         catalogue,
         live_sources,
         refresh_declared,
+        lambda: declarations().stale,
     )
 
     def local_route(name: str) -> LocalTool | None:

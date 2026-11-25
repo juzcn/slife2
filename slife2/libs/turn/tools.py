@@ -825,11 +825,19 @@ class ToolRegistry:
         """
         name = call.name
         detail = ""
+        hint_error = ""
         if self._exists is not None:
             try:
                 found = await self._exists(name)
             except Exception as exc:  # noqa: BLE001 - a hint, not the call
                 logger.info("could not ask the catalogue about %r: %s", name, exc)
+                # **The generic sentence may not stand in for a failed ask.**
+                # The model knows the call failed; what it does not know is
+                # whether the name is unknown or the hint could not be asked —
+                # and those send it to different next steps.  The clause names
+                # the failure rather than leaving the generic sentence to read
+                # as a verdict.
+                hint_error = str(exc)
                 found = None
             if found == CATALOGUE_PRESENT:
                 detail = (
@@ -854,6 +862,10 @@ class ToolRegistry:
                 f"unknown tool {name!r} — not in your tool list. "
                 f"Find it with tool_search, then load it with func_tool_load."
             )
+            if hint_error:
+                detail += (
+                    f" (The catalogue could not be asked about it: {hint_error})"
+                )
         if call.error is not None:
             return f"Error: {call.error}\n{detail}", False
         return f"Error: {detail}", False

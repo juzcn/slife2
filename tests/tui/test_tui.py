@@ -2534,6 +2534,34 @@ async def test_one_unreadable_stored_row_does_not_kill_the_drain() -> None:
     assert "not-a-number" not in text
 
 
+async def test_a_turn_whose_body_is_unreadable_is_drawn_as_damage() -> None:
+    """**Damage is not an empty turn on the screen either.**
+
+    The store reports a row whose body it could not read (`unreadable`), and the
+    window draws the error rather than an empty exchange; the count is what was
+    actually drawn, so the damaged row is not counted as restored.  The live
+    context refuses the row separately (`TurnRuntime.restore`).
+    """
+    damaged = stored(
+        Message(role="user", content="the question nobody can read"),
+        Message(role="assistant", content="an answer"),
+    )
+    damaged["unreadable"] = True
+    intact = stored(
+        Message(role="user", content="a question"),
+        Message(role="assistant", content="an answer"),
+    )
+    client = answering_with(damaged, intact)
+    app = window(client)
+    async with app.run_test(size=SIZE) as pilot:
+        await restored(pilot, app)
+        text = shown(app)
+
+    assert "a stored turn could not be drawn" in text
+    assert "the question nobody can read" not in text
+    assert "[restored 1 turn]" in text, "the damaged row is not counted"
+
+
 async def test_the_history_is_read_once() -> None:
     """Not once per turn: a second read would draw a second copy of it."""
     client = answering_with(*CONVERSATION)

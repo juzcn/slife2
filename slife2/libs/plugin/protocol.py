@@ -108,6 +108,7 @@ from slife2.libs.host.paths import (
     in_home,
 )
 from slife2.libs.host.runtime import (
+    DamagedRecord,
     ServerRecord,
     clear_record,
     pid_alive,
@@ -561,6 +562,11 @@ async def identifies(client: Client, expected_name: str, *, fallback_tool: str) 
         reported = getattr(info, "version", "")
         return not reported or reported == __version__
 
+    logger.info(
+        "the server for %r reports no name; checking for its %r tool instead",
+        expected_name,
+        fallback_tool,
+    )
     names = {tool.name for tool in await client.list_tools()}
     return fallback_tool in names
 
@@ -1168,8 +1174,16 @@ def serve(
         )
     finally:
         # A live owner returned above, before the server was started, so this
-        # process is the one that wrote the record.
-        if read_record(url) == record:
+        # process is the one that wrote the record.  **A damaged record is not
+        # this process's to clear**: it cannot be compared, and deleting it
+        # would destroy the only evidence of what it recorded.  It is left for
+        # the operator, and the shutdown still finishes.
+        try:
+            ours = read_record(url) == record
+        except DamagedRecord as exc:
+            logger.error("not clearing a damaged server record: %s", exc)
+            ours = False
+        if ours:
             clear_record(url)
 
 

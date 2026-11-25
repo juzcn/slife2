@@ -33,6 +33,7 @@ rule.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 from slife2.libs.harness import notes
@@ -86,6 +87,20 @@ def restore(chat: ChatView, turns: list[dict[str, Any]]) -> None:
     with chat.app.batch_update():
         for turn in turns:
             try:
+                if isinstance(turn, Mapping) and turn.get("unreadable"):
+                    # **A row whose body the store could not read is damage, not
+                    # an empty turn.**  It is drawn as the error it is and not
+                    # counted as restored; the live context refuses it
+                    # separately (`TurnRuntime.restore`), so the model never runs
+                    # on the hole.  The isinstance guard is the same tolerance
+                    # the `except` below gives every other row a failed write
+                    # left half-finished.
+                    chat.add_error(t("turn_unreadable"))
+                    logger.warning(
+                        "a stored turn's body is unreadable: turn %r",
+                        turn.get("turn_id"),
+                    )
+                    continue
                 _draw_turn(chat, turn)
             except Exception:  # noqa: BLE001 - a stored row is not ours to trust
                 # Named on the terminal, not only in the log: the count below is

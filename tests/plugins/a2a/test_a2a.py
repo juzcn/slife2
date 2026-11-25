@@ -356,10 +356,20 @@ def test_a_corrupt_payload_is_named_where_an_empty_one_is_not(
 
 def test_presence_defaults_to_online_when_the_card_carries_none() -> None:
     """Absent means online, which is the property the whole readiness gate rests
-    on — and the reason a *deleted* card is handled before this is ever asked."""
-    assert _presence_status(FakeMessage("t", b"{}").properties) == "online"
-    assert _presence_status(FakeMessage("t", b"{}", "offline").properties) == "offline"
-    assert _presence_status(FakeMessage("t", b"{}", "online").properties) == "online"
+    on — and the reason a *deleted* card is handled before this is ever asked.
+
+    The second half of the pair says **the default was taken**: the roster still
+    answers, but a reader can tell a claim from an assumption.
+    """
+    assert _presence_status(FakeMessage("t", b"{}").properties) == ("online", True)
+    assert _presence_status(FakeMessage("t", b"{}", "offline").properties) == (
+        "offline",
+        False,
+    )
+    assert _presence_status(FakeMessage("t", b"{}", "online").properties) == (
+        "online",
+        False,
+    )
 
 
 def test_the_instance_id_is_read_out_of_the_nested_card() -> None:
@@ -4641,6 +4651,8 @@ def test_a_corrupt_group_file_is_set_aside_not_overwritten(tmp_path: Path) -> No
     store = group_store.GroupStore.load(path)
 
     assert store.groups == {}
+    assert store.quarantined is True
+    assert ".corrupt" in store.load_error and "repair" in store.load_error
     assert not path.exists(), "the unreadable file was left where a write would meet it"
     assert path.with_name("groups.yaml.corrupt").read_text(encoding="utf-8") == (
         "groups: [not-a-mapping"
@@ -4662,6 +4674,7 @@ def test_a_second_corruption_does_not_destroy_the_first_preserved_copy(
     store = group_store.GroupStore.load(path)
 
     assert store.groups == {}
+    assert store.quarantined is True
     assert store.load_error, "the refusal is visible to every mutation"
     assert corrupt.read_text(encoding="utf-8") == "the first damage"
     assert path.read_text(encoding="utf-8") == "groups: [also broken"
@@ -5067,6 +5080,8 @@ async def test_group_tools_on_the_peer_network(
         assert "sent" not in made.data, (
             "a publish count is the transport's, not the model's"
         )
+
+
         assert published[0][0] == sorted([PEER, "bob"])
         assert published[0][1]["kind"] == group_store.KIND_SET
         assert published[0][1]["group"] == GROUP
@@ -5105,6 +5120,42 @@ async def test_group_tools_on_the_peer_network(
             )
             is None
         )
+
+
+@pytest.mark.asyncio
+async def test_a_quarantined_groups_file_refuses_every_group_tool(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """**Damage is not "no groups".**
+
+    A file this build cannot read is preserved as `.corrupt`, and every group
+    tool fails with the path and the repair.  A list that answered an empty
+    roster would tell the model the conversation knows no groups — a fact the
+    damage did not make — and a write would overwrite the bytes that still hold
+    them.
+    """
+    with in_home(tmp_path):
+        path = group_store.groups_path(AGENT, net=REMOTE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("groups: [not-a-mapping", encoding="utf-8")
+        server = build(on_the_mesh=True)
+        async with Client(server) as client:
+            with pytest.raises(ToolError, match="\\.corrupt"):
+                await client.call_tool(
+                    PEER_GROUP_LIST, {}, meta=conversation_meta(AGENT)
+                )
+            with pytest.raises(ToolError, match="\\.corrupt"):
+                await client.call_tool(
+                    PEER_GROUP_MEMBER_LIST,
+                    {"group": GROUP},
+                    meta=conversation_meta(AGENT),
+                )
+            with pytest.raises(ToolError, match="\\.corrupt"):
+                await client.call_tool(
+                    PEER_GROUP_SET,
+                    {"group": GROUP, "members": [PEER]},
+                    meta=conversation_meta(AGENT),
+                )
 
 
 @pytest.mark.asyncio

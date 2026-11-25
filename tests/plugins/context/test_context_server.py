@@ -488,6 +488,7 @@ async def test_search_answers_with_the_browse_line_and_a_score() -> None:
         "created_at",
         "user_message",
         "assistant_message",
+        "unreadable",
         "similarity",
     }
     # The envelope is the one all three searches give.
@@ -823,7 +824,13 @@ async def test_a_new_conversation_restores_its_own_head() -> None:
             "restore", {"agent": "jack", "messages": [SYSTEM]}
         )
 
-    assert answer.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
+    assert answer.data == {
+        "messages": [SYSTEM],
+        "turn_ids": [],
+        "turns": [],
+        "missing": [],
+        "unreadable": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -857,7 +864,13 @@ async def test_a_read_of_a_conversation_that_was_never_written_creates_nothing()
                 "turn_read", {"turn_id": 1}, meta=conversation_meta("jack", "ghost")
             )
 
-    assert restored.data == {"messages": [SYSTEM], "turn_ids": [], "turns": []}
+    assert restored.data == {
+        "messages": [SYSTEM],
+        "turn_ids": [],
+        "turns": [],
+        "missing": [],
+        "unreadable": [],
+    }
     assert listed.data["entries"] == []
     assert found.data["results"] == []
     assert not subagent_path("jack", "ghost").exists(), "the read made its directory"
@@ -946,12 +959,13 @@ async def test_a_restore_keeps_the_lists_order_and_not_the_rowids() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_restore_drops_a_turn_that_is_no_longer_stored() -> None:
-    """The answer is what the log can produce, and the caller adopts it.
+async def test_a_restore_reports_a_turn_that_is_no_longer_stored() -> None:
+    """**The missing row is reported, not dropped.**
 
     A list naming a row that is gone is a file that was rebuilt or pruned
-    underneath, and a restore that refused to run over one absent id would turn
-    a partial loss into a total one.
+    underneath.  The window's transcript reader can draw the rows it has and
+    name the damage; the live-context caller refuses the restore, so a shorter
+    conversation never becomes a decision (`TurnRuntime.restore`).
     """
 
     async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
@@ -962,7 +976,43 @@ async def test_a_restore_drops_a_turn_that_is_no_longer_stored() -> None:
         )
 
     assert answer.data["turn_ids"] == [1]
+    assert answer.data["missing"] == [404]
+    assert answer.data["unreadable"] == []
     assert len(answer.data["messages"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_damaged_body_is_reported_and_never_read_as_empty() -> None:
+    """**A row whose body will not parse is damage, not an empty turn.**
+
+    `restore` reports it so the window can draw the damage and the live context
+    can refuse it; `turn_read` refuses the row by name; a rebuild that selected
+    it fails before writing a context assembled from the empty value.
+    """
+    import sqlite3
+
+    async with Client(build_server(default_config(), embedder=EMBEDDER)) as client:
+        await _seed(client, "jack", ("the question", "the answer"))
+        path = agent_dir("jack") / "turns.db"
+        with sqlite3.connect(path) as connection:
+            connection.execute(
+                "UPDATE turn SET messages = ? WHERE rowid = 1", ('"not messages"',)
+            )
+        restored = await client.call_tool(
+            "restore", {"agent": "jack", "messages": [SYSTEM]}
+        )
+        listed = await client.call_tool(
+            "turn_list", {}, meta=conversation_meta("jack")
+        )
+        with pytest.raises(ToolError, match="cannot be read"):
+            await client.call_tool(
+                "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")
+            )
+
+    assert restored.data["unreadable"] == [1]
+    assert restored.data["missing"] == []
+    assert restored.data["turn_ids"] == [], "the damaged row is not a context"
+    assert listed.data["entries"][0]["unreadable"] is True
 
 
 @pytest.mark.asyncio
@@ -2737,7 +2787,7 @@ async def test_the_ways_a_rebuild_can_fail_and_change_nothing_are_logged_apart(
                 {"agent": "jack", "messages": hold, "turn_ids": [1]},
             )
         )
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError) as missing:
             await client.call_tool(
                 "rebuild",
                 {
@@ -2758,7 +2808,10 @@ async def test_the_ways_a_rebuild_can_fail_and_change_nothing_are_logged_apart(
     )
     assert "recall_not_needed reason=context_sufficient" in said
     assert "recall_not_needed reason=context_unchanged" in said
-    assert "recall_abandoned reason=unfetchable" in said
+    # A selection that names a row the store does not have is the tool's error,
+    # and the sentence names the id and the repair.  The failure is raised where
+    # the selection is costed, before any context is written.
+    assert "99" in str(missing.value) and "repair" in str(missing.value)
     # The fields the outcome cannot report.  The unreadable reply has no
     # `recall_decided` line at all; the other three say what they were.
     assert "recall_decided keep=keep recall=none" in said

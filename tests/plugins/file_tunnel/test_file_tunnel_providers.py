@@ -446,7 +446,7 @@ def test_reachable_follows_the_transport_not_the_url(monkeypatch) -> None:
     facts and only one of them is worth handing to somebody."""
     tunnel = NgrokTunnel()
     tunnel._public_url = "https://test.ngrok.io"
-    monkeypatch.setattr(tunnel, "is_alive", lambda: False)
+    monkeypatch.setattr(providers, "_ngrok_tunnel_alive", lambda url: False)
     assert tunnel.is_active is True
     assert tunnel.is_reachable() is False
 
@@ -457,10 +457,10 @@ def test_a_broken_probe_never_refuses_a_share(monkeypatch) -> None:
     tunnel = NgrokTunnel()
     tunnel._public_url = "https://test.ngrok.io"
 
-    def explode():
+    def explode(url):
         raise OSError("probe died")
 
-    monkeypatch.setattr(tunnel, "is_alive", explode)
+    monkeypatch.setattr(providers, "_ngrok_tunnel_alive", explode)
     assert tunnel.is_reachable() is True
 
 
@@ -491,18 +491,21 @@ def test_absent_from_a_non_empty_list_is_the_one_answer(monkeypatch) -> None:
 
 def test_an_empty_list_is_unknown_not_dead(monkeypatch) -> None:
     """A false negative tears the tunnel down and mints a NEW hostname, which
-    kills every link already handed out — so "cannot tell" answers alive."""
+    kills every link already handed out — so the *decision* keeps the tunnel.
+    The *fact* is `None`: an empty listener list cannot be told from an SDK
+    that does not track them, and `tunnel_status` says unknown."""
     monkeypatch.setattr(
         providers,
         "_import_ngrok",
         lambda: types.SimpleNamespace(get_listeners=lambda: []),
     )
-    assert providers._ngrok_tunnel_alive("https://mine.ngrok.io") is True
+    assert providers._ngrok_tunnel_alive("https://mine.ngrok.io") is None
 
 
-def test_an_sdk_without_the_api_stays_alive(monkeypatch) -> None:
+def test_an_sdk_without_the_api_is_unknown(monkeypatch) -> None:
+    """And the safe decision is the provider's `is_alive`, not the probe's fact."""
     monkeypatch.setattr(providers, "_import_ngrok", lambda: types.SimpleNamespace())
-    assert providers._ngrok_tunnel_alive("https://mine.ngrok.io") is True
+    assert providers._ngrok_tunnel_alive("https://mine.ngrok.io") is None
 
 
 # --- the two CLI transports ---------------------------------------------------

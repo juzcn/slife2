@@ -159,78 +159,105 @@ def test_a_missing_record_is_absent_not_an_error() -> None:
     assert runtime.read_record("http://127.0.0.1:9999/mcp") is None
 
 
-def test_a_corrupt_record_reads_as_absent() -> None:
-    """Bookkeeping must never block a start.
-
-    This is the registered tolerance of `_read_json_dataclass` (`SDD
-    Appendix C): damage reads as absence, which is accepted for a *recorded pid* but
-    is why `live_clients` does not delete a damaged record while its pid is
-    alive — there the cost is a live client nobody counts.
+def test_a_corrupt_record_is_damage_not_absence() -> None:
+    """**Damage is not absence.**  A file that exists and cannot be parsed is a
+    crash-truncated write, a hand edit, or a record from another build; reading
+    it as absent made a running server look record-less and left `down` with no
+    pid.  The reader raises with the path and the repair instead.
     """
     url = "http://127.0.0.1:24000/mcp"
     path = runtime.record_path(url)
     path.write_text("{ not json", encoding="utf-8")
-    assert runtime.read_record(url) is None
+
+    with pytest.raises(runtime.DamagedRecord) as raised:
+        runtime.read_record(url)
+    assert raised.value.path == path
+    assert str(path) in str(raised.value)
+    assert "repair or remove" in str(raised.value)
 
 
-def test_a_damaged_record_is_absent_and_named(caplog) -> None:
-    """**Damage is read as absence, and is not silent.**
-
-    A file that exists and cannot be read is damage — a crash-truncated write,
-    or a record from another build — where a missing file is the ordinary first
-    start.  Both may read as absent, because neither may block a start; only the
-    damage is logged, so the reader is not left guessing which happened.
-    """
-    url = "http://127.0.0.1:24000/mcp"
-    path = runtime.record_path(url)
-    path.write_text("{ not json", encoding="utf-8")
-    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
-        assert runtime.read_record(url) is None
-    assert "could not be read as a record" in caplog.text
-    assert str(path) in caplog.text
-
-    caplog.clear()
+def test_a_missing_record_is_still_absent_and_silent(caplog) -> None:
+    """The ordinary first start is not damage, and it says nothing."""
     with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
         assert runtime.read_record("http://127.0.0.1:9999/mcp") is None
-    assert caplog.text == "", "a missing record is not damage"
+    assert caplog.text == ""
 
 
-def test_a_record_that_is_not_a_record_reads_as_absent() -> None:
-    """The half `read_record` owns, now that the shared reader is `_read_json_dataclass`.
+def test_a_record_that_cannot_be_written_fails_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A write that failed is not a write that happened.**
 
-    Parsing is the shared helper's; the *shape* is the record's, and a JSON
-    object that parses but is not a record is the `KeyError` the factory raises
-    — the arm a caller's own fields are the only way to reach.
+    A server with no record is a daemon `status` cannot see and `down` cannot
+    stop; the start fails with the path and the repair instead of running
+    unrecorded.  The claim is the same rule, for the identity it carries.
     """
+    record = runtime.ServerRecord.now(
+        name="agent",
+        url="http://127.0.0.1:24000/mcp",
+        pid=1234,
+        config="c.yaml",
+        version="1",
+    )
+    monkeypatch.setattr(runtime, "_write_json_atomic", lambda _path, _obj: False)
+
+    with pytest.raises(OSError, match="server record"):
+        runtime.write_record(record)
+    with pytest.raises(OSError, match="claim agent"):
+        runtime.write_claim(runtime.AgentClaim.now("alpha"))
+
+
+def test_records_returns_the_damaged_ones_not_just_the_readable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A machine-wide sweep reports the record it cannot read and still returns
+    the readable ones — one damaged file must not leave every daemon running."""
+    good = runtime.ServerRecord.now(
+        name="agent",
+        url="http://127.0.0.1:24000/mcp",
+        pid=1234,
+        config="c.yaml",
+        version="1",
+    )
+    runtime.write_record(good)
+    damaged_path = runtime.record_path("http://127.0.0.1:24001/mcp")
+    damaged_path.write_text("{ not json", encoding="utf-8")
+
+    found, damaged = runtime.records()
+
+    assert [record.url for record in found] == [good.url]
+    assert [error.path for error in damaged] == [damaged_path]
+
+
+def test_a_record_that_is_not_a_record_is_damage() -> None:
+    """A JSON object that parses but is not a record is the same damage: the
+    factory's `KeyError` names a shape this build cannot use."""
     url = "http://127.0.0.1:24000/mcp"
     runtime.record_path(url).write_text('{"url": "x"}', encoding="utf-8")
-    assert runtime.read_record(url) is None
+    with pytest.raises(runtime.DamagedRecord):
+        runtime.read_record(url)
 
 
-def test_a_claim_round_trips_and_a_corrupt_one_reads_as_absent() -> None:
-    """The claim is where the shared reader and writer prove they serve both.
-
-    `read_record`/`write_record` and `read_claim`/`write_claim` are one
-    `_read_json_dataclass` and one `_write_json_atomic` now, so a claim is the
-    other call site of each: the same atomic write on the way in, the same
-    "absent, not an error" read on the way out.
-    """
+def test_a_claim_round_trips_and_a_corrupt_one_is_damage() -> None:
+    """The claim is the shared reader/writer's other call site: the same atomic
+    write on the way in, the same damage error on the way out."""
     claim = runtime.AgentClaim.now("alpha")
     runtime.write_claim(claim)
     assert runtime.read_claim("alpha") == claim
     assert runtime.read_claim("nobody") is None
 
-    runtime.agent_claim_path("alpha").write_text("{ not json", encoding="utf-8")
-    assert runtime.read_claim("alpha") is None
+    path = runtime.agent_claim_path("alpha")
+    path.write_text("{ not json", encoding="utf-8")
+    with pytest.raises(runtime.DamagedRecord):
+        runtime.read_claim("alpha")
 
 
-def test_a_record_with_a_pid_outside_the_process_table_reads_as_absent(caplog) -> None:
+def test_a_record_with_a_pid_outside_the_process_table_is_damage() -> None:
     """**JSON `1e400` is `inf`, and `int(inf)` is an overflow.**
 
-    The reader's contract is that damage reads as absence; the exception tuple
-    covered `ValueError`/`KeyError`/`TypeError` but not `OverflowError`, so a
-    record from another build or a hand edit crashed `status`, `down` and start
-    instead of being reported as the damaged bookkeeping it is.
+    A pid the kernel could not have assigned is damage like any other; the
+    exception tuple covers `OverflowError` so it becomes `DamagedRecord` with
+    the path, not a traceback out of `status`, `down` or start.
     """
     url = "http://127.0.0.1:24000/mcp"
     runtime.record_path(url).write_text(
@@ -247,13 +274,12 @@ def test_a_record_with_a_pid_outside_the_process_table_reads_as_absent(caplog) -
         ),
         encoding="utf-8",
     )
-    with caplog.at_level(logging.WARNING, logger=runtime.logger.name):
-        assert runtime.read_record(url) is None
-    assert "could not be read as a record" in caplog.text
+    with pytest.raises(runtime.DamagedRecord):
+        runtime.read_record(url)
 
 
 @pytest.mark.parametrize("pid", ["1e400", str(10**20), str(2**63)])
-def test_a_claim_with_a_pid_the_kernel_cannot_hold_reads_as_absent(pid: str) -> None:
+def test_a_claim_with_a_pid_the_kernel_cannot_hold_is_damage(pid: str) -> None:
     path = runtime.agent_claim_path("alpha")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -261,7 +287,8 @@ def test_a_claim_with_a_pid_the_kernel_cannot_hold_reads_as_absent(pid: str) -> 
         f'"headless":false}}',
         encoding="utf-8",
     )
-    assert runtime.read_claim("alpha") is None
+    with pytest.raises(runtime.DamagedRecord):
+        runtime.read_claim("alpha")
 
 
 # --- the client count the shared servers rest on ------------------------------

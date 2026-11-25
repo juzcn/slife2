@@ -111,6 +111,29 @@ async def test_unknown_tool_is_a_result_not_an_exception() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_hint_that_cannot_be_asked_is_named_in_the_generic_sentence() -> None:
+    """**A generic sentence may not stand in for a failed ask.**
+
+    The model knows the call failed; what it does not know is whether the name
+    is unknown or the catalogue could not be asked — and those send it to
+    different next steps.  The clause names the failure instead of leaving the
+    generic sentence to read as a verdict.
+    """
+
+    async def broken(name: str) -> CatalogueAnswer:
+        raise ConnectionError("the hub is still starting")
+
+    text, ok = await ToolRegistry(exists=broken).execute(
+        ToolCall(id="c1", name="wether")
+    )
+
+    assert ok is False
+    assert "unknown tool" in text
+    assert "could not be asked" in text
+    assert "the hub is still starting" in text
+
+
+@pytest.mark.asyncio
 async def test_an_unloaded_tool_is_told_to_load_not_to_search() -> None:
     """**A name the catalogue holds is not a name that does not exist.**
 

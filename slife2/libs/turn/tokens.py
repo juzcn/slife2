@@ -22,14 +22,14 @@ vocabulary GPT-4o and later are trained on.  **It ships with the package**:
 local read and parse — no network, no timeout, no proxy — about 186 ms once per
 process, and the recall's cost runs off the event loop.
 
-**The fallback remains the last resort**, not the ordinary path.  If the bundled
-vocabulary cannot be read — a broken install, or a tiktoken that no longer knows
-the name — the script measure answers: ASCII at four characters per token, every
-non-ASCII character at one.  That is deliberately conservative; a real BPE packs
-common CJK pairs into one token, so this runs high there.  It is one rule and no
-table of ranges, because a table is always missing the next block: the old one
-omitted emoji and made the fallback *under*count them by four to five times,
-which is the one direction a budget cannot afford.
+**A vocabulary that cannot be read is a damaged installation, and it fails
+loudly.**  The bundle ships with the package, so a missing or hash-mismatched
+file is not a machine that is running with less — it is an installation that
+needs repair.  There is no script-measure fallback: a permanent second measure
+would make an overestimate the normal answer for that process, and nothing would
+ever say a reinstall was owed.  The resolver raises `TokenizerUnavailable` with
+the bundle's path and the repair, and the call that needed a token count fails
+rather than guessing.  A repaired installation is picked up by a restart.
 
 **No vocabulary is exact for a non-OpenAI endpoint**, and this one is not
 claimed to be: a Qwen or DeepSeek model has its own.  What makes `o200k_base`
@@ -38,11 +38,9 @@ error is small and unbiased where a hand-written ratio's is structural.  The
 budget it feeds is a fraction of a window, so an estimate that is 5% wrong
 spends 5% of a window that was sized for it.
 
-**A failed read is remembered, but not forever.**  Retrying on every message
-would be one failed open per message; remembering it for the process's whole
-life would turn a reinstalled file into a permanent overestimate.  The attempt
-is retried after `_RETRY_AFTER`.  Nothing resolves at import: a process that
-never sizes a conversation never touches this.
+**Nothing resolves at import**: a process that never sizes a conversation never
+touches this.  A failed read is kept for the process's life, because it is a
+repair-and-restart fact rather than something a retry can heal.
 
 **What the number is for.**  The recall chooses what fits; none of it reports
 usage, and a caller that finds itself printing one has made a mistake this
@@ -55,8 +53,6 @@ import hashlib
 import json
 import logging
 import os
-import re
-import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -87,20 +83,24 @@ _BUNDLED_CACHE = Path(__file__).with_name("tiktoken_cache")
 _BUNDLED_SHA256 = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d"
 
 #: Resolved once per process, on the first estimate.  `None` means "not resolved
-#: yet"; `_failed_at` says when the last attempt failed, which is what the retry
-#: cooldown is measured from.
+#: yet"; `_failure` is the damage a failed resolve found, kept so every later
+#: estimate raises the same sentence rather than opening the file again.
 _encoding: Any = None
-_failed_at: float | None = None
+_failure: TokenizerUnavailable | None = None
 
-#: How long a failed read is remembered before the next attempt.  Long enough
-#: that a broken install does not pay a file open per message; short enough that
-#: a repair does not degrade this process for its whole life.
-_RETRY_AFTER = 600.0
+
+class TokenizerUnavailable(RuntimeError):
+    """The bundled vocabulary cannot be read, so no token count can be made.
+
+    **Damage, not a machine running with less.**  The bundle ships with the
+    package; a missing or hash-mismatched file is an installation that needs
+    repairing, and the caller that needed a count fails with the path and the
+    repair rather than using a permanent second measure.
+    """
 
 
 def _openai_encoding() -> Any:
-    """`o200k_base`, or `None` if this machine cannot read it — the seam a test
-    replaces to keep the suite off the vocabulary (see `tests/conftest.py`).
+    """`o200k_base` — the seam a test replaces to keep the suite off the vocabulary.
 
     Resolved lazily and never at import: the file is a few megabytes to parse,
     and a process that never sizes a conversation — a model backend, the TUI,
@@ -114,17 +114,15 @@ def _openai_encoding() -> Any:
 
     **The read is proven local before tiktoken is asked.**  A missing or
     hash-mismatched cache file sends tiktoken 0.14.0 to `requests.get` with *no
-    timeout*, so a broken install on a black-holed network would hang the turn
-    rather than reach the script measure.  The file tiktoken will read is
-    therefore checked here first — present, and the content hash tiktoken pins —
-    and a broken install falls back immediately, through the same warning and
-    cooldown a failed load always had.
+    timeout*, so a broken install on a black-holed network would hang the turn.
+    The file tiktoken will read is therefore checked here first — present, and
+    the content hash tiktoken pins — and a broken install raises
+    `TokenizerUnavailable` naming the bundle and the repair.
     """
-    global _encoding, _failed_at
+    global _encoding, _failure
     if _encoding is None:
-        now = time.monotonic()
-        if _failed_at is not None and now - _failed_at < _RETRY_AFTER:
-            return None
+        if _failure is not None:
+            raise _failure
         try:
             import tiktoken
 
@@ -147,66 +145,40 @@ def _openai_encoding() -> Any:
                     f"tiktoken pins: {bundle}"
                 )
             _encoding = tiktoken.get_encoding(_ENCODING)
-        except Exception as exc:  # noqa: BLE001 — any failure means "no vocabulary"
-            _failed_at = now
-            logger.warning(
-                "tokenizer_unavailable encoding=%s error=%s — falling back to the "
-                "script measure, which charges every non-ASCII character",
-                _ENCODING,
-                exc,
+        except Exception as exc:  # noqa: BLE001 — any failure is damaged install data
+            _failure = TokenizerUnavailable(
+                f"the tokenizer vocabulary ({_ENCODING}) cannot be read: {exc}. "
+                f"The bundle is {_BUNDLED_CACHE / _CACHE_KEY}; reinstall or "
+                f"repair the slife2 installation and restart."
             )
+            logger.error("%s", _failure)
+            raise _failure from exc
     return _encoding
 
-
-#: Characters per token for ASCII text, in the fallback measure.  Four is the
-#: long-standing figure for English prose under BPE, and the rationale the
-#: fallback runs on.
-_CHARS_PER_TOKEN = 4
 
 #: What one attached image is charged.  It is not text and cannot be counted as
 #: any; the figure is a fixed charge, and what it is for is keeping an
 #: image-bearing turn from looking free to a budget.  In practice the bytes never
 #: reach the db (an attachment is stored as a note), so this is reached only by
-#: the live message list.  **This is the one thing the real tokenizer cannot
-#: answer**, so it is charged the same way whichever measure is in force.
+#: the live message list.
 _IMAGE_TOKENS = 200
-
-#: The one rule of the fallback: ASCII text at `_CHARS_PER_TOKEN` characters per
-#: token, every non-ASCII character at one.  **No range table**, because a table
-#: is always missing the next block — the old one omitted emoji (U+1F300–U+1FAFF
-#: is East-Asian-Wide) and charged them at a quarter of a token each, four to
-#: five times under the real BPE.  One rule cannot have that hole.  The scan is a
-#: compiled regex so it happens in C; a recall measuring a long turn is the cost
-#: this protects.
-_NON_ASCII = re.compile("[^\x00-\x7f]")
-
-
-def _by_script(text: str) -> int:
-    """The fallback: ASCII at four characters per token, non-ASCII at one each.
-
-    Used when the bundled vocabulary cannot be read.  It is deliberately a
-    measure that errs high on non-ASCII text — a CJK page is charged one token
-    per character where the real BPE often packs two into one — because the one
-    direction a budget cannot afford is an undercount.  The previous table of
-    "wide" ranges charged every other non-ASCII script at a quarter of a token
-    and omitted emoji entirely.
-    """
-    _ascii_only, non_ascii = _NON_ASCII.subn("", text)
-    ascii_chars = len(text) - non_ascii
-    return non_ascii + (ascii_chars + _CHARS_PER_TOKEN - 1) // _CHARS_PER_TOKEN
 
 
 def estimate_text_tokens(text: str) -> int:
-    """About how many tokens `text` is, by the model's tokenizer or its scripts."""
+    """How many tokens `text` is, by the model's tokenizer.
+
+    **A vocabulary that cannot be read fails the caller** (`TokenizerUnavailable`)
+    rather than being estimated by a second measure: a permanent fallback would
+    make the degraded count the normal answer and nothing would say the install
+    needs repairing.
+    """
     if not text:
         return 0
     encoding = _openai_encoding()
-    if encoding is not None:
-        # `encode_ordinary` and not `encode`: the latter *refuses* text spelling
-        # a special token — `<|endoftext|>` — and a conversation may contain any
-        # text at all, including that, without the estimator raising a turn.
-        return len(encoding.encode_ordinary(text))
-    return _by_script(text)
+    # `encode_ordinary` and not `encode`: the latter *refuses* text spelling a
+    # special token — `<|endoftext|>` — and a conversation may contain any text
+    # at all, including that, without the estimator raising a turn.
+    return len(encoding.encode_ordinary(text))
 
 
 def _content_tokens(content: Any) -> int:

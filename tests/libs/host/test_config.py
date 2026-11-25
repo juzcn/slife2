@@ -2569,3 +2569,30 @@ def test_the_prompt_budget_reserves_the_completion_request() -> None:
         ModelSettings(model="m", context_window=100, max_tokens=200).prompt_window == 0
     ), "a completion wider than the window leaves no prompt space"
     assert ModelSettings(model="m").prompt_window == 0
+
+
+def test_status_warnings_name_a_bad_log_level_and_a_wsl_guess(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The two configuration degrades that have no log line of their own.**
+
+    A guessed WSL networking mode moves every port of the stack; a
+    `SLIFE2_LOG_LEVEL` this build cannot read loses the detail the operator
+    asked for.  Both are reported by `warnings()`, which `slife2 status`
+    prints, rather than being left in a daemon's log.
+    """
+    from slife2.libs.host import config
+
+    monkeypatch.setattr(config, "_WSINFO_GUESSED", True)
+    monkeypatch.setenv("SLIFE2_LOG_LEVEL", "loud")
+
+    found = config.warnings()
+    assert any("WSL networking mode" in one for one in found)
+    assert any("SLIFE2_LOG_LEVEL" in one and "loud" in one for one in found)
+
+    monkeypatch.setenv("SLIFE2_LOG_LEVEL", "DEBUG")
+    assert not any("SLIFE2_LOG_LEVEL" in one for one in config.warnings())
+
+    monkeypatch.delenv("SLIFE2_LOG_LEVEL")
+    monkeypatch.setattr(config, "_WSINFO_GUESSED", False)
+    assert config.warnings() == []

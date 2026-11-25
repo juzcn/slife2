@@ -72,6 +72,7 @@ def search_answer(
     worded: bool = False,
     browsed: bool = False,
     limit: int,
+    meaning: str = "",
 ) -> dict[str, Any]:
     """A search's page, dressed in the one envelope.
 
@@ -96,10 +97,17 @@ def search_answer(
     """
     measured = [score for score in scores if isinstance(score, float)]
     best = max(measured) if measured else None
-    return {
+    answer = {
         "results": list(results),
         "best": best,
         "confidence": None if browsed else confidence(best, worded=worded),
         "browsed": browsed,
         "limit": limit,
     }
+    if meaning:
+        # **The meaning leg's state, when a corpus has one.**  A page whose
+        # semantic half was never built is not a page the meaning measured;
+        # saying `not_indexed` keeps a keyword-only answer from reading as
+        # "nothing was similar" (the register's failure-read-as-verdict shape).
+        answer["meaning"] = meaning
+    return answer

@@ -389,10 +389,13 @@ def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path: Path) 
 
         with connection_to(store.path) as connection:
             connection.execute("DELETE FROM index_meta WHERE key = 'vector_identity'")
-        answer = await store.search(
-            keywords=["some"], sentences=["some"], embedder=StubEmbedder()
-        )
+        # A *keywords-only* search still answers, and says the meaning leg was
+        # never built; a sentence would be a question nothing can answer.
+        answer = await store.search(keywords=["some"], embedder=StubEmbedder())
         assert [row["key"] for row in answer["results"]] == ["one"]
+        assert answer["meaning"] == "not_indexed"
+        with pytest.raises(RuntimeError, match="semantic index is not built"):
+            await store.search(sentences=["some"], embedder=StubEmbedder())
 
     asyncio.run(go())
 
@@ -1405,7 +1408,15 @@ async def test_the_two_legs_answer_different_questions() -> None:
             client, "cabinet_search", sentences=[f"{WORD} in the body"]
         )
 
-    assert set(by_words) == {"results", "best", "confidence", "browsed", "limit"}
+    assert set(by_words) == {
+        "results",
+        "best",
+        "confidence",
+        "browsed",
+        "limit",
+        "meaning",
+    }
+    assert by_words["meaning"] == "ok"
     assert by_words["best"] == 1.0
     assert by_words["confidence"] == "sure"
     assert by_words["browsed"] is False

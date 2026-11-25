@@ -2486,14 +2486,24 @@ def _is_wsl() -> bool:
     return "microsoft" in platform.release().lower()
 
 
+#: Whether this process had to guess the WSL networking mode.  A fact
+#: `warnings()` reports, because the guess moves every port of the stack and
+#: nothing else says so.
+_WSINFO_GUESSED = False
+
+
 def _wsl_mirrored() -> bool:
     """Whether WSL's shared loopback is in use.
 
     `wslinfo --networking-mode` is the platform's own answer and is consulted
     first; `loopback0` is the interface mirrored mode creates, and is the
     fallback for a WSL that predates the tool.  Either is read once per process.
+
+    **The guess is reported, not silent.**  A wrong mode decides whether the
+    whole stack shifts its ports; `warnings()` carries the assumption to
+    `slife2 status`, because the failure has no log line of its own.
     """
-    global _MIRRORED
+    global _MIRRORED, _WSINFO_GUESSED
     if _MIRRORED is None:
         mirrored = False
         if _is_wsl():
@@ -2506,9 +2516,34 @@ def _wsl_mirrored() -> bool:
                 )
                 mirrored = result.stdout.strip() == "mirrored"
             except (OSError, subprocess.SubprocessError):
+                _WSINFO_GUESSED = True
                 mirrored = Path("/sys/class/net/loopback0").exists()
         _MIRRORED = mirrored
     return _MIRRORED
+
+
+def warnings() -> list[str]:
+    """Facts about this process's configuration that need a person's eye.
+
+    `slife2 status` prints these: a guessed WSL networking mode (the ports it
+    moves), and a `SLIFE2_LOG_LEVEL` this build cannot read (the detail the
+    operator asked for).  Both are the kind of degrade whose only other trace
+    is a daemon log nobody is reading.
+    """
+    found: list[str] = []
+    if _WSINFO_GUESSED:
+        found.append(
+            "WSL networking mode was guessed from /sys/class/net/loopback0 "
+            "(`wslinfo --networking-mode` could not run); the port offset "
+            "depends on that guess"
+        )
+    asked = os.environ.get("SLIFE2_LOG_LEVEL", "").strip()
+    if asked and not isinstance(getattr(logging, asked.upper(), None), int):
+        found.append(
+            f"SLIFE2_LOG_LEVEL={asked!r} is not a level this build knows; "
+            f"logging at INFO"
+        )
+    return found
 
 
 def port_offset(value: object | None = None) -> int:

@@ -1757,6 +1757,19 @@ class CabinetStore:
             except textindex.EmptyQuery:
                 if not any(sentence.strip() for sentence in sentences):
                     raise
+        # **A sentence is a question only the meaning leg can answer.**  The
+        # cabinet nobody has written to under this model has no `cabinet_vec`;
+        # a sentences-only search must fail rather than answer keyword-only,
+        # while a keywords-only search still answers and says
+        # `meaning: not_indexed`.
+        requested_meaning = any(sentence.strip() for sentence in sentences)
+        meaning_state = self._meaning_state()
+        if requested_meaning and meaning_state != "ok":
+            raise RuntimeError(
+                f"{self.path}: the semantic index is not built, so a "
+                f"sentences-only search has nothing to ask; run the sync (or "
+                f"restart) to build it, or search by `keywords` instead"
+            )
         if expression and not any(sentence.strip() for sentence in sentences):
             sentences = [" ".join(str(word) for word in keywords)]
 
@@ -1792,8 +1805,25 @@ class CabinetStore:
                     ),
                 )
                 for row in rows
-            ]
+            ],
+            "meaning": meaning_state,
         }
+
+    def _meaning_state(self) -> str:
+        """Whether the semantic leg can be asked: `ok` or `not_indexed`.
+
+        A recorded index whose table is gone is damage and raises, the same
+        answer `_nearest` gives; no table and no recorded identity is a cabinet
+        nobody has written to under this model — a keyword search may answer
+        around it, but a sentence cannot.
+        """
+        with self._connect() as connection:
+            if vector_table_gone(connection, vec_table="cabinet_vec"):
+                raise RuntimeError(
+                    f"{self.path}: the cabinet records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
+            return "ok" if table_exists(connection, "cabinet_vec") else "not_indexed"
 
     def _keyword_hits(
         self, expression: str, limit: int, clauses: list[str], values: list[Any]

@@ -123,6 +123,45 @@ from slife2.libs.turn.messages import Usage
 
 logger = logging.getLogger(__name__)
 
+
+class MissingTurns(LookupError):
+    """A caller named turns the store has no row for.
+
+    **Damage, not a shorter conversation.**  The live context and the index name
+    rows; a name with no row means the file was pruned or rebuilt underneath,
+    and the caller that was about to run on it must fail rather than continue on
+    a hole.  The ids are the repair's address.
+    """
+
+    def __init__(self, ids: Sequence[int]) -> None:
+        self.ids = [int(turn_id) for turn_id in ids]
+        super().__init__(
+            "the store has no row for turn(s) "
+            + ", ".join(str(turn_id) for turn_id in self.ids)
+            + "; repair the turn store (restore a backup, or delete it and "
+            "start afresh)"
+        )
+
+
+class UnreadableTurns(LookupError):
+    """A caller named turns whose stored body cannot be read.
+
+    The row exists and its body is damage — a torn write, a hand edit, a file
+    from another build.  Reading it as an empty turn would put a value the
+    damage did not make into a conversation, so the caller fails and names the
+    rows to repair.
+    """
+
+    def __init__(self, ids: Sequence[int]) -> None:
+        self.ids = [int(turn_id) for turn_id in ids]
+        super().__init__(
+            "the stored body of turn(s) "
+            + ", ".join(str(turn_id) for turn_id in self.ids)
+            + " cannot be read; repair the turn store (restore a backup, or "
+            "delete it and start afresh)"
+        )
+
+
 #: Characters an agent name may keep when it becomes a filename.  Everything
 #: else is replaced, because the name arrives from `--agent` on a command line
 #: and a path is not something a command line should be able to reach.
@@ -241,6 +280,11 @@ class TurnRecord:
     #: message out: it is `messages[0]`, and a reader that wants what was asked
     #: reads it there, where the model read it too.
     messages: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether `messages` is empty because the stored body could not be read.
+    #: **Damage is not an empty turn**: the row exists, and a reader that built
+    #: a conversation from the empty value would be reading a fact the damage
+    #: did not make.  The live context refuses the row; a browse shows the flag.
+    body_unreadable: bool = False
     #: A retrieval hook the model writes through `turn_summarize`.
     summary: str = ""
     tags: str = ""
@@ -287,12 +331,16 @@ class TurnRecord:
             "created_at": self.created_at,
             "user_message": _cut(user_message(self.messages), chars),
             "assistant_message": _cut(assistant_message(self.messages), chars),
+            # A browse must be able to say "this row's body is damaged" rather
+            # than show the empty halves as what was said.
+            "unreadable": self.body_unreadable,
         }
 
     def to_wire(self) -> dict[str, Any]:
         return {
             "turn_id": self.turn_id,
             "messages": self.messages,
+            "unreadable": self.body_unreadable,
             "summary": self.summary,
             "tags": self.tags,
             "created_at": self.created_at,
@@ -1223,8 +1271,10 @@ class TurnStore:
         with self._connect() as connection:
             return write_context(connection, turn_ids)
 
-    def turns_by_ids(self, turn_ids: Sequence[int]) -> list[TurnRecord]:
-        """Those turns, **in the order asked for**, and never re-sliced.
+    def fetch_turns(
+        self, turn_ids: Sequence[int]
+    ) -> tuple[list[TurnRecord], list[int]]:
+        """Those turns in the order asked for, and the ids no row has.
 
         The order is not decoration: the live-context list *is* an ordering (it
         records what a rebuild kept alongside what it recalled, which is not
@@ -1233,12 +1283,11 @@ class TurnStore:
         method that quietly re-sorted by rowid would undo a recall every time a
         conversation was restored.
 
-        Ids with no row are dropped rather than refused: a turn can be missing
-        because a file was rebuilt or a row pruned, and a restore that refused to
-        run over one absent id would turn a partial loss into a total one.  What
-        that costs is a conversation that comes back shorter than it was, so the
-        drop is counted and named in the log rather than passed over in silence —
-        the ids are the only thing that says a log is damaged at all.
+        **The missing ids are returned, not dropped.**  The caller of a live
+        context must fail on them — a restore that silently came back shorter is
+        a damaged file read as a decision — while the TUI transcript may still
+        draw the rows it has and name the damage.  `turns_by_ids` is the strict
+        form for callers that build a conversation.
 
         Chunked, because the list can be longer than one statement may bind
         (`MAX_SQL_VARS`) and an unbounded `IN (…)` is a query that works in
@@ -1256,14 +1305,28 @@ class TurnStore:
                 ).fetchall()
                 for row in rows:
                     found[int(row["turn_id"])] = _row_to_record(row)
-        if len(found) != len(wanted):
-            logger.warning(
-                "%d of %d turns in a live context have no row: %s",
-                len(wanted) - len(found),
-                len(wanted),
-                [turn_id for turn_id in wanted if turn_id not in found],
-            )
-        return [found[turn_id] for turn_id in wanted if turn_id in found]
+        return (
+            [found[turn_id] for turn_id in wanted if turn_id in found],
+            [turn_id for turn_id in wanted if turn_id not in found],
+        )
+
+    def turns_by_ids(self, turn_ids: Sequence[int]) -> list[TurnRecord]:
+        """Those turns, strictly — a missing row or a damaged body fails.
+
+        **A conversation is not built on a hole.**  A live-context id with no row
+        means the file was pruned or rebuilt underneath, and a row whose body
+        cannot be read means the file is damaged; either one needs repairing.
+        The two typed errors name the ids and the repair, and every caller that
+        builds a context — a restore, a rebuild, a rerank — lets them fail the
+        operation rather than continuing on a shorter or invented history.
+        """
+        records, missing = self.fetch_turns(turn_ids)
+        if missing:
+            raise MissingTurns(missing)
+        unreadable = [record.turn_id for record in records if record.body_unreadable]
+        if unreadable:
+            raise UnreadableTurns(unreadable)
+        return records
 
     def _time_ranked(
         self,
@@ -2010,16 +2073,19 @@ def append_context(connection: sqlite3.Connection, turn_id: int) -> list[int] | 
 
 
 def _row_to_record(row: sqlite3.Row) -> TurnRecord:
-    """Rebuild a record, tolerating a row whose `messages` will not read.
+    """Rebuild a record, carrying the damage of a body that will not read.
 
-    A corrupt row is one turn, and refusing to read *any* history because one
-    row is damaged would turn a small problem into a total one.
+    A corrupt body is one turn and not a history that cannot be read — but it
+    is **not** an empty turn either.  The flag makes the row's damage a value
+    the reader can act on: the live context refuses it, a browse names it.
     """
+    messages, unreadable = _body(
+        row["messages"], what=f"turn {int(row['turn_id'])}'s messages"
+    )
     return TurnRecord(
         turn_id=int(row["turn_id"]),
-        messages=_messages(
-            row["messages"], what=f"turn {int(row['turn_id'])}'s messages"
-        ),
+        messages=messages,
+        body_unreadable=unreadable,
         summary=str(row["summary"] or ""),
         tags=str(row["tags"] or ""),
         created_at=str(row["created_at"]),
@@ -2097,6 +2163,12 @@ def _readable_message(message: Mapping[str, Any]) -> bool:
     mapping (a mapping with no `function` is read as an empty one, which is what
     an id-less or name-less call already means).
     """
+    # **A role this build does not know is damage here, before the reader
+    # raises.**  The body is then a damaged row (`body_unreadable`), reported by
+    # a restore or refused by `turn_read`, rather than a `UnreadableMessage`
+    # escaping from deep inside a context build.
+    if message.get("role") not in ("system", "user", "assistant", "tool"):
+        return False
     calls = message.get("tool_calls")
     if calls is None:
         return True
@@ -2111,17 +2183,16 @@ def _readable_message(message: Mapping[str, Any]) -> bool:
     return True
 
 
-def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
-    """A stored turn's `messages`, tolerating one that will not read as them.
+def _body(raw: Any, *, what: str) -> tuple[list[dict[str, Any]], bool]:
+    """A stored body, and whether it is damage rather than an empty turn.
 
-    **For a field, and never for a structure.**  A turn whose `messages` are
-    damaged is one damaged turn, and refusing to read any history because of it
-    would turn a small problem into a total one — so the empty list is the
-    answer and the warning is the report.  `_structural` is the other half, and
-    the question that tells them apart is what the empty value *means*: here it
-    means "this one turn's body is unreadable", which is a smaller claim than
-    the damaged value made.  There it means something the damage did not
-    (SDD Appendix C).
+    **The flag is the difference between a field and a structure.**  A turn
+    whose `messages` are damaged is one damaged turn, and refusing to read any
+    history because of it would turn a small problem into a total one — so the
+    empty list lets a derived index carry on.  But the live context must not
+    read that empty value as what was said, so the damage travels beside it and
+    `TurnRecord` refuses to build a conversation on it.  The warning names the
+    row either way; the flag is what a caller acts on.
 
     **The *shape* is damage too.**  A stored value that parses to a string, a
     number, or a list of strings is readable JSON and is not `messages`, and
@@ -2152,9 +2223,19 @@ def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
         and all(isinstance(one, dict) for one in parsed)
         and all(_readable_message(one) for one in parsed)
     ):
-        return parsed
-    logger.warning("%s did not read as a list of messages; reading it as empty", what)
-    return []
+        return parsed, False
+    logger.warning("%s did not read as a list of messages; it is unreadable", what)
+    return [], True
+
+
+def _messages(raw: Any, *, what: str) -> list[dict[str, Any]]:
+    """The body for a derived index: the messages, or none when damaged.
+
+    The index is not a conversation — a turn with no searchable text is a turn
+    absent from the index, and the warning names it.  The live context uses
+    `_body` instead and refuses the damage (`TurnRecord.body_unreadable`).
+    """
+    return _body(raw, what=what)[0]
 
 
 def _structural(raw: Any, *, what: str) -> Any:

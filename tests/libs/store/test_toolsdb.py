@@ -1371,10 +1371,13 @@ def test_a_recorded_vector_index_that_lost_its_table_is_refused(tmp_path) -> Non
     # and `_meaning_of` has no table to read and contributes nothing.
     with connection_to(store.path) as connection:
         connection.execute("DELETE FROM meta WHERE key = 'vector_identity'")
-    answer = asyncio.run(
-        store.search(keywords=["open"], sentences=["open"], embedder=EMBEDDER)
-    )
+    # Keywords-only still answers, and says the meaning leg was never built;
+    # a sentence would be a question nothing can answer.
+    answer = asyncio.run(store.search(keywords=["open"], embedder=EMBEDDER))
     assert [row["name"] for row in answer["results"]] == ["browser__open"]
+    assert answer["meaning"] == "not_indexed"
+    with pytest.raises(RuntimeError, match="semantic index is not built"):
+        asyncio.run(store.search(sentences=["open"], embedder=EMBEDDER))
 
 
 def test_unloaded_only_means_not_in_the_list_and_keeps_the_document_families(

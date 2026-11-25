@@ -50,6 +50,7 @@ from slife2.libs.host.paths import data_dir
 from slife2.libs.host.runtime import (
     AgentClaim,
     ClientRecord,
+    DamagedRecord,
     ServerRecord,
     agent_key,
     clear_claim,
@@ -914,7 +915,14 @@ def _status_of(spec: ServerSpec) -> Outcome:
     "(not started by slife2)" — is what this makes reachable.
     """
     if probe(spec):
-        record = read_record(spec.url)
+        try:
+            record = read_record(spec.url)
+        except DamagedRecord as exc:
+            # **A record that cannot be read is not "not running".**  The
+            # server is answering; the file that says whose it is is damage,
+            # and the row names the repair rather than reporting a healthy
+            # unmanaged process.
+            return Outcome(spec, Status.FAILED, detail=str(exc))
         if record is None:
             return Outcome(
                 spec, Status.UNMANAGED, detail="no record; not started by slife2"
@@ -970,13 +978,33 @@ def stop(config: Config, *, everything: bool = False) -> Iterator[Outcome]:
     yield from _concurrently(_stop_one, specs(config))
     if everything:
         named = {spec.url for spec in specs(config)}
+        found, damaged = records()
         extra = [
             _spec_from_record(record)
-            for record in records()
+            for record in found
             if record.url.startswith("http") and record.url not in named
         ]
         if extra:
             yield from _concurrently(_stop_one, extra)
+        # **A damaged record is reported, and the sweep still goes on.**  The
+        # daemon it names may be live and unmanageable; the other records are
+        # still stopped.  The row has no URL to print, so the record's file
+        # name is the handle and the detail names the path.
+        for damage in damaged:
+            yield Outcome(
+                ServerSpec(
+                    name=damage.path.stem,
+                    module="",
+                    url="",
+                    host="",
+                    port=0,
+                    path="",
+                    expected_name="",
+                    expected_tool="",
+                ),
+                Status.FAILED,
+                detail=str(damage),
+            )
 
 
 def _spec_from_record(record: ServerRecord) -> ServerSpec:
@@ -1008,7 +1036,14 @@ def _stop_one(spec: ServerSpec) -> Outcome:
     `terminate`'s grace period, five seconds of it when a process will not go —
     which is why this is worth doing ten at a time rather than ten in a row.
     """
-    record = read_record(spec.url)
+    try:
+        record = read_record(spec.url)
+    except DamagedRecord as exc:
+        # **A damaged record is not stopped past.**  The process may be ours,
+        # but its ownership cannot be read; killing a pid from a file this
+        # build cannot parse is the one thing `down` refuses.  The row names
+        # the path and the repair.
+        return Outcome(spec, Status.FAILED, detail=str(exc))
     if record is None:
         status = Status.UNMANAGED if probe(spec) else Status.NOT_RUNNING
         return Outcome(spec, status, detail="no record; not started by slife2")

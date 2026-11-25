@@ -683,6 +683,31 @@ class TurnRuntime:
         turns = payload.get("turns")
         if not isinstance(turns, list):
             raise unreadable("the context store", "return the stored turns", payload)
+        # **A conversation is not built on a hole.**  The store reports a row
+        # with no turn, or a turn whose body cannot be read, rather than
+        # dropping it or reading it as empty; the live context refuses both.
+        # The window's own transcript reader draws the damage instead, which is
+        # why the report is a value here rather than an error out of the store.
+        missing = payload.get("missing") or []
+        unreadable_rows = payload.get("unreadable") or []
+        if not isinstance(missing, list) or not isinstance(unreadable_rows, list):
+            raise unreadable("the context store", "report the restore's damage", payload)
+        if missing or unreadable_rows:
+            raise RuntimeError(
+                "the stored conversation cannot be restored: "
+                + (
+                    f"turn(s) {missing} in the live context have no row; "
+                    if missing
+                    else ""
+                )
+                + (
+                    f"the stored body of turn(s) {unreadable_rows} cannot be read; "
+                    if unreadable_rows
+                    else ""
+                )
+                + "repair the turn store (restore a backup, or delete it and "
+                "start afresh)"
+            )
         # **The status bar's figure, taken from the turn it restored.**  A
         # conversation that has only restored has run no turn of its own, so
         # this is the size the bar shows until one does.  A size nobody

@@ -49,6 +49,7 @@ choice, with the author's consequences.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -65,6 +66,8 @@ from slife2.libs.plugin.protocol import (
     open_server,
     tool_payload_or_empty,
 )
+
+logger = logging.getLogger(__name__)
 
 #: The hub's key in `servers:`.  One system fact, not a capability: every job's
 #: model-facing tool path goes through the same process, and the convenience
@@ -188,6 +191,16 @@ def _answer(result: Any) -> tuple[str, Mapping[str, Any]]:
         for block in blocks
         if isinstance(text := getattr(block, "text", None), str)
     ]
+    if parts:
+        # **The job author gets the text; the log says why `data` is empty.**
+        # A tool that answered in prose is an answer, not a build mismatch —
+        # but a caller that reads `.data` without this line would not know
+        # whether the tool had no structured half or this process could not
+        # read one.
+        logger.info(
+            "a job's direct call answered in content text with no structured "
+            "mapping; `data` is empty and `text` carries the answer"
+        )
     return "\n".join(parts), {}
 
 

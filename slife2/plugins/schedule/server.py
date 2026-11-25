@@ -76,6 +76,7 @@ from fastmcp.exceptions import ToolError
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import at, now
 from slife2.helpers.timeutil import InvalidTimeBound, normalize_bound
+from slife2.libs.harness import degrade
 from slife2.libs.harness.handover import window_attached
 from slife2.libs.host.config import (
     AGENT_TASK_SERVER_NAME,
@@ -119,6 +120,7 @@ from slife2.plugins.schedule.store import (
     Run,
     ScheduleStore,
     Task,
+    database_path,
     moment_of,
 )
 
@@ -316,35 +318,19 @@ class RunLocks:
 # ── the ledgers ──────────────────────────────────────────────────────────────
 
 
-def ledgers() -> list[ScheduleStore]:
-    """Every agent's ledger on this machine, opened.
+def ledgers_with_damage() -> tuple[list[ScheduleStore], list[tuple[str, Path, str]]]:
+    """Every readable ledger, and the damaged ones the clock must report.
 
-    A file whose owner is not written down is **skipped with a warning** rather
-    than fired for the name of the directory it sits in: the directory holds the
-    sanitised agent name, so a run started under that name would go to an agent
-    that is not the ledger's — and it would look like it worked.
-
-    **A file that cannot be opened is a file skipped, not a clock stopped**, and
-    the skip is **loud**: a stray or truncated `schedule.db` raises out of
-    `adopt` — SQLite will not read a file that is not a database — and the whole
-    point of one loop over every agent is that one agent's damage is not every
-    agent's.  Skipping is what keeps the clock serving the ledgers it can, and
-    it is also the one failure the model cannot be shown: `schedule_list` reads
-    the caller's own ledger, so an operator asking about *another* agent's tasks
-    sees a healthy clock.  So the skip is an **error** naming the file, which is
-    the only place it can be seen, and it is why the ownerless-file warning
-    beside it is a different level: that file was never this build's and its
-    skip was designed (SDD §9.4), where this one is a damaged ledger somebody has to
-    go and look at (SDD Appendix C).
-
-    **Only the failures that mean "this file cannot be opened" are skipped.**
-    A broad `except Exception` would make a bug in `adopt` — or a schema this
-    build wrote and then cannot read — look like an operator's damaged file, and
-    the skip is the one shape that hides the clock's own defect.  A `TypeError`
-    is the clock's and propagates; SQLite's, the filesystem's and a stale
-    ledger's are the file's.
+    A ledger nobody can open is not a clock that stops: the other agents' tasks
+    still fire, and one damaged file must not take the machine's schedule with
+    it.  But it is **not silent** either — the affected agent's window is told
+    (`degrade.report`), because its tasks are not firing and its own
+    `schedule_list` may never be asked.  The tuple is `(agent guess, path,
+    reason)`; the agent is the directory name, the only name a damaged file
+    still carries.
     """
     found: list[ScheduleStore] = []
+    damaged: list[tuple[str, Path, str]] = []
     for ledger in schedule_dbs():
         try:
             store = ScheduleStore.adopt(ledger.path, ledger.home)
@@ -359,13 +345,27 @@ def ledgers() -> list[ScheduleStore]:
                     "it will be fired until it is deleted",
                     ledger.path,
                 )
+            damaged.append(
+                (
+                    ledger.path.parent.name,
+                    ledger.path,
+                    "predates this build's schedule columns; delete it",
+                )
+            )
             continue
-        except (OSError, sqlite3.DatabaseError):
+        except (OSError, sqlite3.DatabaseError) as exc:
             logger.error(
                 "%s could not be opened, so nothing in it will be fired until "
                 "an operator fixes it",
                 ledger.path,
                 exc_info=True,
+            )
+            damaged.append(
+                (
+                    ledger.path.parent.name,
+                    ledger.path,
+                    f"could not be opened ({exc}); fix or delete it",
+                )
             )
             continue
         if store is None:
@@ -376,7 +376,26 @@ def ledgers() -> list[ScheduleStore]:
             )
             continue
         found.append(store)
-    return found
+    return found, damaged
+
+
+def ledgers() -> list[ScheduleStore]:
+    """Every agent's ledger on this machine that can be opened.
+
+    The strict readers that only need the stores — a reconcile, a sweep, a
+    resolution — use this; the clock's pass uses `ledgers_with_damage` so the
+    damaged ones are reported to their windows rather than only to the log.
+
+    A file whose owner is not written down is **skipped with a warning** rather
+    than fired for the directory's name: the directory holds the sanitised agent
+    name, and a run started under it would go to an agent that is not the
+    ledger's — and it would look like it worked.  A file that cannot be opened
+    is skipped too, but it is **damage**: the clock keeps serving every other
+    agent, and the affected one is told (`ledgers_with_damage`).  Only failures
+    that mean "this file cannot be opened" are skipped; a `TypeError` out of
+    `adopt` is this build's bug and propagates.
+    """
+    return ledgers_with_damage()[0]
 
 
 async def fire(
@@ -814,7 +833,20 @@ async def poll_once(
     # after a just-started task would only record `running`, so nothing is lost
     # by asking before starting.
     did.extend(await reconcile(config, tasks_client=tasks_client))
-    for store in ledgers():
+    stores, damaged = ledgers_with_damage()
+    # **A ledger nobody can open is a schedule nobody is firing**, and the
+    # affected agent's window is told — its own `schedule_list` may never be
+    # asked.  The clock keeps serving every other ledger; the line is once per
+    # file per process.
+    for agent, path, reason in damaged:
+        await degrade.report(
+            config,
+            agent,
+            f"schedule_ledger:{path}",
+            "scheduled tasks are not firing",
+            reason,
+        )
+    for store in stores:
         # **One bad ledger is one ledger skipped, not a pass abandoned.**  A
         # failure the per-task repair below cannot answer — a damaged cron
         # expression, a store read that raises — would otherwise take the whole
@@ -882,6 +914,14 @@ async def poll_once(
                                 store.path,
                                 task.name,
                                 task.last_due or task.created_at,
+                            )
+                            await degrade.report(
+                                config,
+                                store.agent,
+                                f"schedule_anchor:{store.path}:{task.name}",
+                                f"scheduled task {task.name!r} skipped a pass",
+                                "its stored anchor was not a time; it was reset "
+                                "to now() — check the ledger",
                             )
                             continue
                         if verdict is None:
@@ -1203,7 +1243,26 @@ def build_server(
     locks = RunLocks()
 
     def store_for(agent: str) -> ScheduleStore:
-        return ScheduleStore.open(agent)
+        """This agent's ledger, or the tool error naming what to repair.
+
+        **An unopenable ledger is damage, not an empty schedule.**  The caller
+        asked about its own tasks; answering an empty list would say there are
+        none.  The path and the repair are the answer, and the other agents'
+        clocks are unaffected.
+        """
+        path = database_path(agent)
+        try:
+            return ScheduleStore.open(agent)
+        except StaleSchema as exc:
+            raise ToolError(
+                f"the schedule ledger at {path} predates this build's columns "
+                f"({exc}); delete it and let a new ledger be created"
+            ) from None
+        except (OSError, sqlite3.DatabaseError) as exc:
+            raise ToolError(
+                f"the schedule ledger at {path} cannot be opened ({exc}); "
+                f"repair or delete it"
+            ) from None
 
     agent_of = agent_reader("agent whose schedule it could be", "a schedule")
 

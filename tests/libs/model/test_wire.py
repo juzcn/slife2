@@ -33,6 +33,7 @@ from slife2.libs.turn.messages import (
     StreamChatResult,
     ToolCall,
     ToolSpec,
+    UnreadableMessage,
     Usage,
 )
 
@@ -327,30 +328,30 @@ def test_an_unreadable_reasoning_payload_is_dropped_and_named(caplog) -> None:
     assert "reasoning payload" in caplog.text
 
 
-def test_a_message_without_a_readable_role_keeps_its_shape() -> None:
-    """**A role that cannot be read is not permission to call it the user's.**
-
-    The three arms are told apart by what the message carries: a tool result
-    addresses a call, an assistant turn makes one, and anything else is the
-    person's.  The warning names the inference (`SDD Appendix C`); the
-    conversation keeps a message whose role would otherwise be guessed wrong.
-    """
-    tool = Message.from_wire({"content": "4", "tool_call_id": "c1"})
-    assistant = Message.from_wire(
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"content": "4", "tool_call_id": "c1"},
         {
             "content": "",
             "tool_calls": [
                 {"id": "c1", "function": {"name": "calc", "arguments": "{}"}}
             ],
-        }
-    )
-    user = Message.from_wire({"content": "hi"})
-    unknown = Message.from_wire({"role": "robot", "content": "hi"})
+        },
+        {"content": "hi"},
+        {"role": "robot", "content": "hi"},
+    ],
+)
+def test_a_message_without_a_readable_role_is_refused(raw: dict) -> None:
+    """**A role that cannot be read is not permission to guess one.**
 
-    assert tool.role == "tool"
-    assert assistant.role == "assistant"
-    assert user.role == "user"
-    assert unknown.role == "user", "an unknown role is not passed to a provider"
+    "user" puts words in the person's mouth; "assistant" makes the model the
+    author of something it did not say.  The shape can suggest an arm, but a
+    suggestion is not the sender's fact — the payload is refused with the
+    message, and the turn fails (`UnreadableMessage`).
+    """
+    with pytest.raises(UnreadableMessage, match="no readable role"):
+        Message.from_wire(raw)
 
 
 def test_stream_chat_result_from_wire_tolerates_an_empty_payload() -> None:

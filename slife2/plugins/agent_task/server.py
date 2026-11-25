@@ -102,7 +102,7 @@ import slife2.helpers.logcontext as logcontext
 import slife2.helpers.timeouts as _T
 from slife2.clients.toolclient import acquire_tool, remote_tools, tool_lookup
 from slife2.helpers.clock import now
-from slife2.libs.harness import dumps
+from slife2.libs.harness import degrade, dumps
 from slife2.libs.harness.handover import DeliveryFailed, hand_over
 from slife2.libs.host.config import (
     AGENT_TASK_SERVER_NAME,
@@ -1053,6 +1053,13 @@ def build_server(
                 "set stays over budget for every conversation's next request",
                 task.name,
                 exc,
+            )
+            await degrade.report(
+                current(),
+                task.agent,
+                f"trim:{task.name}",
+                "the tool list was not trimmed",
+                str(exc),
             )
             return
         if not unloaded:

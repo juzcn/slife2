@@ -131,6 +131,18 @@ def not_on_the_mesh(reason: str) -> str:
     return f"{GONE} {t('not_on_the_mesh', reason=reason)}"
 
 
+def degraded(effect: str, reason: str) -> str:
+    """A fallback fired: what the person can no longer count on, and why.
+
+    **The words are the interface's**, like every line here: the effect is a
+    sentence the caller owns ("scheduled tasks are not firing"), and the reason
+    is the cause plus the repair.  It is drawn once per condition
+    (`slife2.libs.harness.degrade`), because a persistent degrade is one fact and
+    not one line per poll.
+    """
+    return t("degraded", effect=effect, reason=reason)
+
+
 def online(name: str) -> str:
     """`⚡ jill online` — a peer, or a channel's link, is up.
 

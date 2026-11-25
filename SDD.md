@@ -172,9 +172,11 @@ the agent loop is a client of the tool hub and of the model backends.
 7. **Schema over prompt.** A tool's arguments, types and required fields are
    its JSON schema, sent with the tool and checked on the call. Prose carries
    intent; a constraint that fits a schema is not a prompt sentence.
-8. **No arbitrary fallback.** A fallback is a designed behaviour, registered in
-   Appendix C with what it does, what it gives up, and what it does not cover.
-   A failure read as a success is a bug.
+8. **No arbitrary fallback.** A fallback is a designed, **temporary** behaviour,
+   registered in Appendix C: it either heals by itself and is said, or the
+   operation that needs the damage repaired hard-fails.  A failure read as a
+   success is a bug; a degraded mode that never heals is a defect with a log
+   line.
 
 ### 2.4 Constraints
 
@@ -298,7 +300,7 @@ the project's `ruff` and `pyright` over the file it wrote and fix the findings.
 | Plugin vs library | A process if it holds a credential, SDK, or connection | The agent loop never holds a provider key; files are opened in-process. |
 | Configuration | One file, read per turn | An edit reaches the next turn rather than the next restart. |
 | Names | Model-facing names are semantic, never protocol names | `peer_agent_*`, `subagent_*`, `turn_read`; no `a2a` in anything the model reads. |
-| Failures | Raise or fail the turn; no silent fallbacks | A fallback must be registered, scoped, and stated. |
+| Failures | Raise or fail the turn; no silent fallbacks | A fallback heals or hard-fails, is registered, and is said. |
 
 ### 2.8 Quality attributes
 
@@ -630,9 +632,15 @@ releases if the holder dies; there is no stale-lock protocol.
 `slife2 status` reports each server as `running` (with its pid and start time),
 `running (external)`, `port held by something else`, or `not running`, and every
 A2A broker the configuration names — `peer_agent:` and `subagent.network:`, one
-row per address. `--json` gives the same rows as `servers` and `brokers`, with
-each row's log path. It exits 0 only when every server and every broker are
-usable, and 2 otherwise.
+row per address. `--json` gives the same rows as `servers` and `brokers`, each
+row's log path, and `warnings` for a configuration fact that changed what is in
+force (a guessed WSL networking mode, an unreadable `SLIFE2_LOG_LEVEL`). It
+exits 0 only when every server and every broker are usable, and 2 otherwise.
+
+**A record that exists and cannot be read is damage, not `not running`.** The
+row fails, naming the record and the repair; `down` refuses to signal past it,
+and `live_clients` fails rather than undercounting a client that may still be
+using the servers. A *missing* record remains the ordinary first start.
 
 `slife2 down` stops the servers this configuration names and that this build can
 prove it owns, and a broker slife2 started. It refuses while another live client
@@ -699,6 +707,11 @@ The container level is deliberate: `agents/jack/cabinet`, `agents/jack/media`,
 and `agents/jack/turns.db` belong to the maker, so a subagent named `cabinet`
 would otherwise collide with the maker's own directory. `subagent.yaml` records
 the model the subagent runs on, the role it was made for, and when it was made.
+**A record this build cannot read is damage, not the defaults**: the list marks
+the entry `unreadable` with the record's path, and a transcript or a run on that
+subagent fails naming it. Using the maker's model and the plain role would be a
+differently configured subagent, and a list that showed them would present a
+fact the damage did not make.
 The file is deleted with the directory. The configuration file holds only
 machine-wide facts: how many subagents a maker may have, and where the local
 network meets.
@@ -847,6 +860,12 @@ A tool that fails is a result, not an exception. `ToolRegistry.execute` answers
 threw all come back as `ok=False` with text the model can act on. What ends the
 turn is a failure outside that contract — a tool list that cannot be refreshed
 before a model call, or a model call that failed.
+
+**A message with no readable role is damage, not a guess.** The neutral message
+reader refuses it (`UnreadableMessage`) and the turn fails: the four roles are
+the contract every provider accepts, and inferring one would put words in the
+person's mouth or make the model the author of something it did not say. A
+stored body with the same damage fails at the row instead (§8.1).
 
 **A turn can compact its own live context, and the compaction is a view.** The
 loop is handed a `present` callback with the list it advances; the model is sent
@@ -1786,6 +1805,13 @@ A keyword list with no term in it (`[""]`, blanks) is no keyword leg: beside a
 sentence the meaning leg still runs, and alone there is nothing to search with
 and the call is refused.
 
+**A corpus with no vector index is not a corpus where nothing is similar.** If no
+index was ever recorded — a corpus nobody has embedded under this model — a
+sentences-only search fails, naming the missing index and the sync/restart; a
+keywords-only search still answers and carries `meaning: not_indexed`, so a
+keyword page is not read as the meaning leg's verdict. A *recorded* index whose
+table is gone is damage and fails either way.
+
 The two legs are fused by rank, not by raw score: `bm25` is unbounded and a
 cosine depends on the embedding model, while a rank is comparable by
 construction. Within one question that is the whole ordering. Across questions
@@ -1920,6 +1946,15 @@ turn ids is refused rather than coerced**: `true` is an `int` and a mapping
 iterates its keys, so a damaged value would otherwise add a turn nobody named —
 and the append path would write the wrong id back for good.
 
+**A live-context id with no row, and a turn body that will not parse, are damage
+the context refuses.** The store reports both (`fetch_turns`): a restore or
+rebuild that would run on the conversation hard-fails, naming the ids and the
+repair, while the window's transcript reader draws the damaged row as an error
+and counts only what it drew. A damaged body is **not an empty turn** — reading
+it as one puts a value the damage did not make into the conversation — and a
+missing id is **not a shorter context**. `turn_read` refuses the damaged row by
+name. Restore a backup, or delete the file and start afresh.
+
 **A read does not create the file.** A conversation that has never run and a
 removed subagent's stale name are the same absent store, and a read answers its
 empty shape rather than creating a directory with no `subagent.yaml` — which
@@ -1946,7 +1981,11 @@ the embedder's, measured on the catalogue (§7.5), the words override them in
 every corpus, and the tier labels a page without cutting it. **`turn_search`
 alone takes `exclude_context`** (default false): the turns a conversation is
 running on are still its history, and leaving them out is the caller's request,
-not the search's rule.
+not the search's rule. **`tool_search` and `cabinet_search` also carry
+`meaning`** (`ok` or `not_indexed`): a sentences-only call against a corpus whose
+index was never built fails, naming the sync, and a keywords-only page says its
+meaning leg was not asked. `turn_search` is gated on a ready index before it
+serves, so it needs no such field.
 
 Rules:
 
@@ -1984,11 +2023,11 @@ The token estimator uses `tiktoken`'s `o200k_base`, **bundled with the package**
 `TIKTOKEN_CACHE_DIR` at it, so a resolution is a local read and parse (~186 ms
 once per process) with no network. **It serves the context rebuild's recall
 budget and nothing else**: a tool result is bounded by bytes (§5.2.4), and a
-page or a dump reader fits itself by bytes too. The fallback is a last resort —
-ASCII at four characters per token and every non-ASCII character at one — and
-it errs high on non-ASCII text rather than low, which is the direction a budget
-can afford. Measured usage is unaffected: the provider's own count is what the
-record keeps.
+page or a dump reader fits itself by bytes too. **A missing or hash-mismatched
+bundle is a damaged installation, not a second measure**: the first count that
+needs it fails, naming the bundle and the reinstall/restart, rather than using a
+permanent script estimate that nothing would ever report. Measured usage is
+unaffected: the provider's own count is what the record keeps.
 
 ### 8.3 Cabinet
 
@@ -2196,6 +2235,15 @@ silently; the bridge answers the first with `session timeout` — a rejection
 wearing HTTP 200. Both error-envelope shapes are read, so the first loop ends,
 the window is told, and the model is given the bridge's own words.
 
+**Two writes are the login's, and both are reported rather than retried for
+ever.** The session file is the next start's record: a save that fails leaves
+the login live only in this process; `wechat_check_status` says
+`login_saved: false` and names the path, and the next cursor write tries again.
+The cursor is the stream's place: a failed write is retried on the next move,
+but three consecutive failures stop the poll (`cursor_saved: false`), because
+continuing would answer the replay window again after every restart. Fix the
+path or disk; a restart before the login file lands needs a new scan.
+
 While a login waits, the session holds the code itself: `wechat_check_status`
 hands out the drawn QR and what it encodes. A code that expires is replaced in
 the background and the replacement becomes the session's. A new login clears the
@@ -2282,7 +2330,12 @@ Rules specific to this system:
     can teach a group this receiver does not hold, never rewrite a roster it has.
     A `group_set` is idempotent: the same roster keeps the gid and leaves a
     receiver that already applied it unchanged; the repeat re-sends the notice,
-    which is how a member that missed the first one catches up.
+    which is how a member that missed the first one catches up. **A groups file
+    this build cannot read is damage, not an empty roster**: its bytes are
+    preserved as `<file>.corrupt` and every group tool fails naming that file,
+    while the peer network carries on without groups. A read that answered "no
+    groups" would be damage read as absence, and a write would overwrite the
+    bytes that still hold the memberships.
 13. **Leaving is autonomous, including for the owner.** An owner's departure
     transfers the group to the first remaining member, or disbands it.
 14. **Group traffic is directed, fire-and-forget, and never returns to its
@@ -2533,12 +2586,18 @@ so the row never promises a fire the poll will not run.
 The anchor is a compare-and-set in the ledger's own update: a fire whose instant
 is not later than the stored `last_due` leaves it alone, so two concurrent fires
 cannot move it backwards. A stored anchor that is not a time
-(`julianday(last_due)` is NULL, from a hand-edited ledger) is replaced by the
-next fire rather than raising, because nothing else could ever move it again.
+(`julianday(last_due)` is NULL, from a hand-edited ledger) is reset to this
+pass's moment (`now()`) rather than raising, because nothing else could ever move
+it again; the skipped pass is said in the agent's window.
 
 The ledger is one file per agent. The shared process finds agents by walking
 `agents/*/schedule.db` across every known home; a ledger carries the home it came
-from, because the home is a property of the request, never of the process.
+from, because the home is a property of the request, never of the process. **A
+ledger that cannot be opened is damage, and it hard-fails for the agent it
+belongs to**: that agent's schedule tools refuse, naming the path and the repair,
+and the clock reports it to that agent's window; every other agent's clock keeps
+running. An ownerless file is skipped with a warning instead — it was never this
+build's, so there is no repair to name.
 
 A fire is gated, then dispatched. The poll asks the terminal whether a window is
 showing the agent: one that is not is `missed`, because the answer would have
@@ -2641,7 +2700,9 @@ to an agent with no window is refused by name (`NO_WINDOW`).
 - **Model output is plain text.** Nothing a model produces is parsed as markup.
 - **A restored conversation is the server's.** `transcript` is read once when the
   window opens; the window keeps no copy. A failed read is not an empty
-  conversation.
+  conversation. **A stored turn whose body is unreadable is drawn as damage**,
+  not as an empty exchange, and the restored count counts only what was drawn
+  (§8.1).
 - **A rebuilt conversation uses the live drawing calls**, not a second rendering
   vocabulary.
 
@@ -2767,7 +2828,10 @@ Windows and WSL loopbacks are one address space and an unshifted second stack
 would be silently reused by the first. It defaults to 100 there and `0` disables
 it. The shift is applied by the config loader, so every process resolves the same
 addresses; the MQTT broker is not shifted, because it is the mesh's rendezvous
-rather than an instance endpoint.
+rather than an instance endpoint. **`wslinfo --networking-mode` is the platform's
+answer; when it cannot run, the mode is guessed from `/sys/class/net/loopback0`
+and `slife2 status` says so in `warnings`**, because that guess decides every
+port.
 
 An absent section takes its built-in default, not an error. For a capability
 whose default is empty that means *off*: no `peer_agent:` means the machine is
@@ -2810,7 +2874,12 @@ a watcher or a lock.
 ### 11.2 Secrets
 
 A value may be a literal, used as written; or `${VAR}`, resolved through the
-shell environment, then credstore's OS keyring.
+shell environment, then credstore's OS keyring. **An unresolved reference is
+left verbatim, and the use fails**: loading does not block on a missing secret;
+the provider call that needs it fails naming the reference, so exporting or
+storing it fixes the next call. A store that is present and refuses — a locked
+keyring — raises instead, because reading that as "not found" would send
+`${VAR}` as the secret.
 
 **Output protection covers credstore's values, and only those.** A credential
 resolved from credstore is registered in the resolving process and masked in
@@ -2920,6 +2989,13 @@ a status code. The startup report goes to stdout; a plugin's own output goes to
 its log. The server's own first line names its address, pid, data directory and
 config, and a line at shutdown closes the run.
 
+**The record is part of the start.** A server or client whose record or claim
+cannot be written does not run unrecorded: `status` would not see it and `down`
+would have no pid to stop, so the start fails naming the path. A record that
+exists and will not parse is the same damage read from the other side —
+`status`, `down` and `live_clients` fail naming it rather than reporting a live
+daemon as absent. A missing record is the ordinary first start.
+
 **Logs are for tracing, so every line is placed.** The format is
 `time level logger: [agent/subagent turn=<token>] message`. The conversation is
 established by `TraceMiddleware` from the call's `agent`/`subagent` arguments and
@@ -2954,7 +3030,8 @@ are not logged; the transcript is where words live. A background call is logged
 by `libs/harness/async_tasks.py` when it is scheduled and when it finishes.
 
 The root level is INFO. `SLIFE2_LOG_LEVEL`, read per process, raises it; a value
-that is not a level falls back to INFO and logs a warning. HTTP libraries,
+that is not a level logs at INFO and is named in `slife2 status`'s `warnings`, so
+the operator learns the setting did not take. HTTP libraries,
 provider SDKs, FastMCP and `uvicorn.access` are pinned to WARNING: their debug
 output can carry credentials, and an access line is one line per MCP request.
 `uvicorn.error` stays at INFO for the run boundaries. The FastMCP banner is
@@ -3010,6 +3087,13 @@ not against the daemon's working directory, which is the reconstructible runtime
 directory. The response is built from an open handle: the pin, the length and
 the bytes served are one observation of the file, so a file replaced while a
 request is in flight is never served under the old token.
+
+**A published URL is not a working one, and a probe that cannot answer is not a
+working one either.** The provider answers `reachable: true|false|null`:
+`expose_local_image` refuses on `false` (every fetch would answer 530) and on
+`null` hands the URL out with the caveat. `tunnel_status` reports
+`probe: failed`, `inherited`, and — for a CLI provider — `binary_source`
+(`named`, `path`, or `guessed`), so the program that actually ran is visible.
 
 Three providers are supported:
 
@@ -3285,9 +3369,9 @@ Each invariant is stated as an assertion. A change that violates one is a defect
    halves. The id joining a pair is acceptable to every provider as a call id.
 6. **A reading is never a verdict.** An empty answer, an unreadable payload, and
    a silent peer are three different facts, and each is named where it is read.
-7. **A failure that affects the design's behavior hard-fails rather than falling
-   back.** Every remaining fallback is registered in Appendix C, scoped, and
-   states what it does not cover.
+7. **A fallback is temporary: it heals by itself and is said, or the operation
+   that needs the damage repaired hard-fails.** Every remaining fallback is
+   registered in Appendix C with its outlet; **a log line is not an outlet**.
 8. **One rule, one place.** A name, a path, a cap, a sentence, or a vocabulary
    that two modules need is stated once and imported, never copied.
 9. **The configuration file is the only description of what exists.** Every
@@ -3315,11 +3399,21 @@ plugins probe their first stable, argument-free tool.
 
 ## Appendix C. Fallback register
 
-A fallback is a design behaviour, and it is the one kind that is invisible when
-wrong. Falling back is allowed; falling back undeclared is not.
+A fallback is a **temporary** degraded behaviour, and it is the one kind that is
+invisible when wrong.  Falling back is allowed; falling back undeclared, or
+falling back for ever, is not.
 
-A registered fallback states what it does, what it gives up, what it does not
-cover, and where the failure goes.
+**A fallback heals by itself** — a retry, the next turn, the next refresh, the
+next probe — and the failure is said: to the Agent in the answer it reads, or to
+the person as a `degrade` line in the window.  A fallback that needs repair is
+not one: the operation that needs the damage repaired **hard-fails**, naming
+what to fix, and is not registered here.  A permanent degraded mode is a defect
+with a log line.
+
+**`logger` is not an outlet.**  A failure that only reaches `runtime/logs/` is
+not registered here — it is a defect.  The "failure goes to" column names the
+Agent (the tool result or harness pair it reads) or the person (a window line,
+or a startup/`status` fact).
 
 The four shapes an undeclared fallback takes:
 
@@ -3333,59 +3427,56 @@ The four shapes an undeclared fallback takes:
 - **A weaker path is not a substitute for a missing capability.** Feature
   detection must not silently select a degraded branch.
 
-| Situation | Fallback | Gives up | Does not cover | Failure goes to |
-|---|---|---|---|---|
-| A secret reference does not resolve | Left verbatim; fails at the API call | Load-time certainty | A store that is present and refuses (raises) | The API error naming the reference |
-| A server reports no name | Probe by tool presence | Exact identity | A server that reports a name (compared exactly) | `open_server` raises, naming the URL |
-| The context decision fails | Keep the context in hand | The rebuild for that turn | A store that cannot be asked at restore (fails the turn) | The `_context_rebuild` pair, carrying the failure and the tool's error |
-| A selection is heavier than the prompt budget (`ceiling × (window - max_tokens)`) | Cut the oldest turns until it fits; a keep-all decision is not a no-op then | The turns the window cut | A single newest turn larger than the whole budget, which is also cut — the turn runs on its opening alone | The `_context_rebuild` pair's `fitted` count and `kept N of M` |
-| The selection decision fails, answers unreadably, or names an id the view does not offer | Compact nothing; the turn continues on its full view | The headroom a compaction would have bought | A turn whose next call overflows, which fails as any provider overflow does | The `_turn_compact` pair, carrying the failure and the tool's error |
-| Tokenizer vocabulary cannot be read locally (missing or hash-mismatched bundle), so no fetch is attempted | Script-aware character measure | Accuracy in both directions | Nothing; this is the floor | A warning, and a retry after a cooldown |
-| A tool fails | `ok: false` with text the model reads | A typed distinction between error and result | Harness failures, which fail the turn | The model reads the text |
-| A catalogue hint cannot be asked (the hub's answer is unreadable) | The call keeps its generic "unknown tool" sentence | The catalogue's explanation and next step | A readable answer | An INFO line naming the name |
-| A turn fails with an image attached | Drop every image from the live list, keeping the note | The bytes in the live conversation | An image attached after the repair; the record, which never had the pixels | The note, the dropped-image sentence, and the original error |
-| Text SQLite cannot encode | Normalise surrogates | The original code unit | Nothing; a failed write fails the turn | U+FFFD in the record |
-| A pid cannot be proven ours | Refuse to signal it | `down`'s reach on that machine | A pid it can prove | `down` says it cannot prove ownership |
-| A stored turn body will not parse, or a message's shape is not one the reader can take | Read as a turn with no messages | The turn's text and vector | A structural value, which is refused | A warning naming the row |
-| A stored `usage` breakdown will not parse, or is not the four-key shape | Read the turn without the split, keeping its totals | The token split for that turn | The turn's messages, which have their own row; a structural value, which is refused | A warning naming the row |
-| A live-context id has no row | Drop it and count it | The conversation is shorter | A row that exists but is damaged | A warning naming the ids |
-| A job's direct `call` answer is not a mapping (prose, a scalar, a malformed payload) | Read the content text; `data` is empty | The mapping distinction for a job call | A payload that parses as a mapping | The job's `text`, which the job author reads; `call_tool` still refuses a hub answer without `ok`/`text` |
-| A card has no presence property | Read as online | Telling omission from a claim | A deleted card, refused earlier | A retained offline card or last will |
-| An unopenable `schedule.db` | Skip the ledger and log an error | Every task in that ledger while damaged | A programming error, which propagates; bad rows, handled per pass | The error naming the path |
-| A stored anchor is not a time | Replace it with the next fire's instant | The damage itself — the old value is gone, and the fires between it and now are not replayed | A ledger that cannot be opened, which is skipped and logged | A warning naming the task and the old value; the new anchor; no row is invented for the gap |
-| A WeChat cursor write fails | Retry on the next move | This stream's place on disk | The in-memory cursor, which still acks | A warning naming the session file |
-| A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The scannable code | An installed renderer | The URL in the login answer |
-| A server-record or claim write fails | Log and continue | The record | A client record, which refuses the start | A warning naming the path |
-| A record is missing or malformed | Read as absent | The pid the record held | Nothing; this is the floor | A missing file is silent; a file that exists and cannot be read warns, naming the path |
-| A subagent record cannot be read | A list or a transcript reads it as absent and uses the defaults; a conversation that would run on it is refused | The model and role the record held, on the read paths; the turn, on the run path | A record that parses | A warning naming the record; the run's failure names the record and the reason |
-| A message has no readable role | Infer it from its shape: a tool result, an assistant tool call, else the user's | The role the sender wrote | A role this build knows | A warning naming the inferred role |
-| A Windows job forbids breakaway | Retry without the flag | Survival of the enclosing kill-on-close job | Nothing | A warning saying the server will not outlive its job |
-| No ancestor names this checkout | Use `~/.slife2` | The checkout's data directory | An override, which wins; a marker that cannot be read, which raises | A missing database or config |
-| The default CLI tunnel binary is not on PATH | Guess the platform's install location | Certainty about which copy ran | An explicitly named binary, which is refused when not found | The resolved path in `tunnel_status` |
-| A tunnel liveness or reachability probe cannot answer | Treat the tunnel as alive and its URL as reachable | Telling a broken probe from an outage | A transport the provider proves dead | A debug line and `tunnel_status` |
-| A progress line cannot be read | Drop it | The line's display | The terminal event, whose fields the transcript keeps | Nothing; the record is the first channel |
-| A turn weighs less than one token | Floor at one | Exactness for the smallest turns | Measured usage, which is the provider's | Nothing; the floor is the answer |
-| A probe threw | Treat the peer as not up | Whether the connect was refused or failed mid-handshake | A peer that answers and names another server; a code-level failure, warned | A warning for a code-level failure, debug for a connection failure |
-| `taskkill` could not run | Poll the pid and report | Why the force failed | A process that survives the poll | The pid the caller then polls |
-| A tool answer is not JSON-serialisable | Render a string form of the value (`default=str`) | The object's exact shape | An answer JSON can encode, or `None` | The rendered text in the record |
-| A lone surrogate reaches tool text | Escape it | Nothing the model needs | Text that is not a surrogate | Nothing; the request survives |
-| The post-turn trim cannot reach the hub | Skip the trim | The trim for that turn; the set stays over budget | The next turn, which fails loudly on a dead hub | A warning; an error for a task |
-| A bookkeeping file is already gone | Delete with `missing_ok` | The distinction between present and absent | An unlink that fails for another reason | A warning naming the path |
-| A log cannot be rotated | Leave it in place and warn | The ceiling | A log that is already gone | A warning naming the path |
-| A plugin's declaration refresh fails | Keep the sources it declared last time in the address book | Freshness of that plugin's sources | A plugin that answers with a changed list, which replaces them | A warning naming the plugin |
-| A mirrored document's file is gone | Index its row without a body; the readers refuse the file by name | The document's text in search and its read | A row that exists and a file that reads | A warning naming the row |
-| An inherited file-tunnel URL is present | Treat it as active and leave it alone | A liveness probe for a URL this process did not start | A URL this process started, which it probes and heals | `tunnel_status` |
-| `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | The requested detail | A value that names a level | A warning from the protocol module |
-| A subagent turn's answer cannot be read | Log it and answer the caller with no text; the turn is not retried | The turn's text | A readable answer | A warning naming the member |
-| The window's `attached` answer cannot be read | Answer "the window could not be asked" (`None`), not "no window" | The true/false answer | A parsed `attached` value | A warning naming the agent |
-| Closing a link fails | Suppress the teardown error | The report of a transport that did not tear down | The call path, where failures are values | A debug line naming the link |
-| The interface language cannot be detected | English | The operator's locale | A locale that resolves | Nothing; the window is English |
-| An A2A groups file will not parse | Move it aside as `.corrupt` and start with no groups | Every group in that file | A file that cannot be moved aside, where mutations refuse | A warning naming the path, and the preserved file |
-| A continuation has no `messageId` | Compare the request text with the task's last text | Telling a re-minted retry from a continuation that repeats the text | A peer that sends neither an id nor text, which is indistinguishable from a retry | A debug line naming the peer and the task |
-| A catalogue's or cabinet's vector table is absent and **no index was ever recorded** (a corpus nobody has embedded under this model) | The meaning leg answers empty; the keyword leg still answers | The semantic half of that search until the index is built | A recorded identity whose table is gone, which raises or is reported (the turn store's `index_status`); a malformed, wrong-width or corrupt table, which raises | `sync`/`index_status` reports the incomplete index |
-| The async registry is over `MAX_ASYNC_TASKS` with only finished undelivered tasks left | Drop the oldest finished tasks, their unread results with them | The one copy of a background result nobody read | Running tasks (never dropped); delivered results (text already cleared) | `check_async`/`cancel_async` refuse the id, naming the drop as a cause |
-| `wslinfo --networking-mode` cannot run | Mirrored mode is guessed from `/sys/class/net/loopback0` | Certainty about WSL networking without `wslinfo` | A platform that answers (its answer is used) | The offset decision the guess feeds |
-| A WeChat login save fails at scan confirmation | Keep the in-memory login and start the poll loop; the next cursor write saves it again | The login's on-disk record until that write (a restart before then needs a new scan) | A save that lands (the normal path) | A warning naming the session file |
+### Self-healing fallbacks
+
+| Situation | Fallback | Heals by | Failure goes to |
+|---|---|---|---|
+| The context decision fails | Keep the context in hand | The next boundary's decision | The `_context_rebuild` pair (Agent) and a window note |
+| A selection is heavier than the prompt budget | Cut the oldest turns until it fits | The next rebuild | The pair's `fitted` / `kept N of M` (Agent) |
+| The selection decision fails, answers unreadably, or names an id the view does not offer | Compact nothing; the turn continues on its full view | The next boundary's selector | The `_turn_compact` pair (Agent) and a window note |
+| A catalogue hint cannot be asked | The call keeps its generic "unknown tool" sentence, now naming the failed ask | The next call | The Agent's tool result |
+| A turn fails with an image attached | Drop every image from the live list, keeping the note | The next turn | The TUI error, the dropped-image sentence, and `[TURN-FAILED]` |
+| A tunnel liveness or reachability probe cannot answer | Treat the tunnel as alive for the decision; report `reachable: null`, `probe: failed` | The next probe | `tunnel_status`, and the `expose_local_image` caveat |
+| A plugin's declaration refresh fails | Keep the rows from the last refresh | The next refresh | `sources_stale` in `tool_search` / `tool_list` |
+| The post-turn trim cannot reach the hub | Skip the trim | The next turn, whose tool list fails loudly on a dead hub | A window `degrade` line |
+| A stored anchor is not a time | Reset it to `now()` | The next pass reads a whole anchor | A window `degrade` line |
+| A WeChat cursor write fails | Retry on the next move | The next cursor write; three failures are a hard failure, not a fallback | `wechat_check_status`'s `cursor_error` and a warning |
+| The window's `attached` answer cannot be read | Answer `None`, not "no window" | The next run | The run recorded `FAILED` with the reason |
+| The async registry is over `MAX_ASYNC_TASKS` | Drop the oldest finished tasks | `check_async` names the drop; the work can be run again | The tool's refusal |
+| A probe threw | Treat the peer as not up | The next probe | The offline line / warning |
+| `taskkill` could not run | Poll the pid | The pid may still exit | A warning naming the cause, and `down`'s detail |
+| A job's direct `call` answer is not a mapping | Read the content text; `data` is empty | The next call | The job author's `text` and an INFO line |
+| A server reports no name | Probe by tool presence | Every connection is checked | An INFO line naming the probe |
+| A card has no presence property | Read it as online, marked `presence: assumed` | The card's next claim | `peer_agent_list` |
+
+### Compatibility, platform readings, and tolerances
+
+These are not degrades: nothing failed that a retry could heal, and nothing needs
+repair.  They are recorded so a reader can tell them from the self-healing
+fallbacks above.
+
+| Situation | Reading | Where it is said |
+|---|---|---|
+| No ancestor names this checkout | Use `~/.slife2` | A missing database or config |
+| A record file is missing | Read as absent | `status` reports not running; the ordinary first start |
+| Text SQLite cannot encode | Normalise surrogates | U+FFFD in the record |
+| A bookkeeping file is already gone | `missing_ok` | An idempotent delete is not a fallback |
+| A log cannot be rotated | Leave it in place | A startup warning; the log ceiling is diagnostic |
+| A progress line cannot be read | Drop it | The record is the channel |
+| A turn weighs less than one token | Floor at one | Nothing; the floor is the answer |
+| A tool answer is not JSON-serialisable | Render `default=str` | The rendered text the model reads |
+| A lone surrogate reaches tool text | Escape it | Nothing; the request survives |
+| Closing a link fails | Suppress the teardown error | A debug line |
+| The interface language cannot be detected | English | The window is English |
+| A damaged install has no `qrcode` renderer | Leave the code empty and keep the URL | The URL in the login answer |
+| An inherited file-tunnel URL is present | Treat it as active | `tunnel_status.inherited`; an exposure refuses |
+| The default CLI tunnel binary is not on PATH | Guess the platform's install location | `tunnel_status.binary_source: guessed` |
+| A Windows job forbids breakaway | Start without it | A startup warning |
+| A continuation has no `messageId` | Compare the request text with the task's last text | A warning and a window note |
+| `wslinfo --networking-mode` cannot run | Guess from `/sys/class/net/loopback0` | `slife2 status`'s warnings |
+| `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | `slife2 status`'s warnings |
+| A subagent turn's answer cannot be read | The `""` is a log line only; the peer is answered by the member's own tool call | The warning naming the member |
+| A tool fails | `ok: false` with text the model reads | The model reads the text |
 
 Everything not in this register is a defect. A path that substitutes a weaker
 behaviour and is not here is an undeclared fallback. A fallback that stops being

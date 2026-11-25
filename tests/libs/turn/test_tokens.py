@@ -1,18 +1,11 @@
-"""The token estimator: the real tokenizer when it can be had, the fallback when not.
+"""The token estimator: one measure, and a damaged install fails loudly.
 
-Two branches, and both have to be right — the whole reason the fallback exists is
-that a machine without the vocabulary is supported rather than broken, so neither
-branch is the "real" one and the other a courtesy.
-
-`tests/conftest.py` pins the resolver to "no vocabulary" for the suite, so the
-tests that are *about* the tokenizer ask for the `real_tokenizer` fixture; the
-rest exercise the fallback, which is what a test run uses.
-
-What is asserted here is deliberately **not** a table of expected numbers.  The
-numbers belong to a vocabulary that is versioned upstream and fetched at runtime,
-so pinning them would pin somebody else's release — and would say nothing about
-the property that matters, which is that a real BPE over the same scripts is
-smaller and unbiased where a hand-written ratio is structurally high.
+There is no script-measure fallback.  The vocabulary ships with the package, so
+a missing or hash-mismatched bundle is an installation that needs repairing
+rather than a machine running with less; the resolver raises
+`TokenizerUnavailable` naming the bundle and the repair.  `tests/conftest.py`
+pins the resolver to a deterministic fake for the suite's speed, and the tests
+that are *about* the tokenizer ask for the `real_tokenizer` fixture.
 """
 
 from __future__ import annotations
@@ -20,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -28,81 +22,124 @@ from slife2.libs.turn import tokens
 pytestmark = pytest.mark.unit
 
 #: A sentence and its Chinese counterpart: the same shape of test through both
-#: scripts, because one ratio for the whole string is exactly what the fallback
-#: refuses to do.
+#: scripts.
 ENGLISH = "the quick brown fox jumps over the lazy dog, and then does it again"
 CHINESE = "敏捷的棕色狐狸跳过了那只懒狗，然后又跳了一次"
 
 
-# --- the fallback: the measure this module was built on -----------------------
+# --- a broken install is a hard failure ---------------------------------------
 
 
-def test_the_fallback_counts_the_two_scripts_separately() -> None:
-    """One ratio for the whole string is wrong by a factor of four on Chinese.
-
-    Which is the reason this measure exists at all rather than a single
-    `len(text) / 4`, and the reason it survived the move to a real tokenizer:
-    it is what answers when there is no vocabulary to ask.
+@pytest.mark.parametrize("damage", ["missing", "mismatch"])
+def test_a_damaged_bundle_raises_naming_the_path_and_the_repair(
+    monkeypatch, tmp_path: Path, tokenizer_resolver, damage: str
+) -> None:
+    """**Damage is not a second measure.**  A missing or hash-mismatched bundle
+    is an installation that needs repairing, so the caller that needed a count
+    fails with the bundle's path and the repair, not with a permanent estimate.
     """
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(tokens, "_openai_encoding", lambda: None)
+    import tiktoken
 
-        assert tokens.estimate_text_tokens("") == 0
-        # Latin: four characters to the token, rounded up.
-        assert tokens.estimate_text_tokens("abcd") == 1
-        assert tokens.estimate_text_tokens("abcde") == 2
-        # CJK: a token of its own, so the same character count is four times
-        # the estimate — which is the whole point.
-        assert tokens.estimate_text_tokens("你好世界") == 4
-        assert tokens._by_script(CHINESE) > tokens._by_script(ENGLISH) / 2
-        # **Every non-ASCII character costs at least one token, whatever the
-        # script.**  The old wide-range table omitted emoji (East-Asian-Wide)
-        # and charged Cyrillic, Greek and emoji at a quarter of a token, which
-        # undercounted a real BPE by four to five times — the one direction a
-        # budget cannot afford.
-        assert tokens.estimate_text_tokens("😀" * 8) == 8
-        assert tokens.estimate_text_tokens("Привет") == 6
+    if damage == "mismatch":
+        (tmp_path / tokens._CACHE_KEY).write_bytes(b"not the vocabulary")
+
+    calls: list[str] = []
+
+    def refuse(name: str):
+        calls.append(name)
+        raise AssertionError("get_encoding was asked with no readable bundle")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
+    monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_failure", None)
+
+    with pytest.raises(tokens.TokenizerUnavailable) as raised:
+        tokens.estimate_text_tokens(ENGLISH)
+
+    message = str(raised.value)
+    assert str(tmp_path) in message or str(tokens._BUNDLED_CACHE) in message
+    assert "reinstall" in message and "restart" in message
+    assert calls == [], "the local check refused before tiktoken could fetch"
+    assert tokens._failure is raised.value, "the damage is kept for later calls"
+
+
+def test_a_kept_failure_is_not_reopened(
+    monkeypatch, tmp_path: Path, tokenizer_resolver
+) -> None:
+    """A second estimate raises the kept failure without touching the file."""
+    import shutil
+
+    import tiktoken
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(tiktoken, "get_encoding", lambda name: None)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(cache))
+    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
+    monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_failure", None)
+
+    with pytest.raises(tokens.TokenizerUnavailable):
+        tokens.estimate_text_tokens(ENGLISH)
+    kept = tokens._failure
+
+    # Remove the directory: a resolver that retried would answer "missing" with
+    # a different path; the kept failure is the same object and sentence.
+    shutil.rmtree(cache)
+    with pytest.raises(tokens.TokenizerUnavailable) as raised:
+        tokens.estimate_text_tokens(ENGLISH)
+    assert raised.value is kept
+
+
+def test_a_failure_is_not_retried_on_the_next_message(
+    monkeypatch, tmp_path: Path, tokenizer_resolver
+) -> None:
+    """One failed resolve is not one failed open per message of every turn."""
+    import tiktoken
+
+    calls: list[str] = []
+
+    def refuse(name: str):
+        calls.append(name)
+        raise RuntimeError("no vocabulary here")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
+    monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_failure", None)
+
+    for _ in range(3):
+        with pytest.raises(tokens.TokenizerUnavailable):
+            tokens.estimate_text_tokens(ENGLISH)
+
+    assert calls == [], "the local file check refused before get_encoding"
+
+
+# --- the real tokenizer -------------------------------------------------------
 
 
 def test_a_special_token_spelling_does_not_raise(real_tokenizer) -> None:
     """A conversation may contain any text at all, including a token's own name.
 
     `tiktoken`'s `encode` *refuses* text spelling a special token unless it is
-    told not to — measured, not assumed: `encode_ordinary` answers 18 tokens for
-    the sentence below where `encode` raises `ValueError` — so a message quoting
-    `<|endoftext|>` would raise out of the estimator and fail a turn.  Neither
-    measure is allowed to care.
-
-    **Both measures, and the vocabulary is the reason the test exists.**  It used
-    to loop over two resolvers that both answered `None` — one patched the seam
-    `no_tokenizer_download` had already pinned to the same thing, the other
-    patched nothing — so both halves measured the fallback, which counts
-    characters and has nothing to refuse.  The one branch `encode_ordinary` was
-    chosen over `encode` for was the branch never run.
+    told not to, so the estimator was chosen to use `encode_ordinary`; a message
+    quoting `<|endoftext|>` must not fail a turn.
     """
     text = "a message that quotes <|endoftext|> and <|im_start|>"
-
-    assert tokens.estimate_text_tokens(text) > 0, "the real BPE over it"
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(tokens, "_openai_encoding", lambda: None)
-        assert tokens.estimate_text_tokens(text) > 0, "and the script measure"
+    assert tokens.estimate_text_tokens(text) > 0
 
 
-# --- the real tokenizer -------------------------------------------------------
+def test_the_real_tokenizer_is_smaller_than_the_characters(real_tokenizer) -> None:
+    """A real BPE over both scripts packs more than one character per token.
 
-
-def test_the_real_tokenizer_is_smaller_on_both_scripts(real_tokenizer) -> None:
-    """The reason for the change, stated as a property rather than a number.
-
-    The old measure rounded up at four characters per token for Latin text and
-    charged a whole token per CJK character; a real BPE is smaller than both, so
-    every budget that was spending a window on an inflated count now spends
-    less.  Asserting the direction is what can be asserted without pinning a
+    Asserting the direction is what can be asserted without pinning a
     vocabulary's release.
     """
     for text in (ENGLISH, CHINESE):
-        assert tokens.estimate_text_tokens(text) < tokens._by_script(text), text
+        assert tokens.estimate_text_tokens(text) < len(text), text
 
 
 def test_the_real_tokenizer_answers_the_same_way_twice(real_tokenizer) -> None:
@@ -110,27 +147,15 @@ def test_the_real_tokenizer_answers_the_same_way_twice(real_tokenizer) -> None:
     assert tokens.estimate_text_tokens(ENGLISH) == tokens.estimate_text_tokens(ENGLISH)
 
 
-# --- what both branches share -------------------------------------------------
+# --- what both resolvers share ------------------------------------------------
 
 
-def test_an_image_is_charged_the_same_way_by_either_measure(real_tokenizer) -> None:
+def test_an_image_is_charged_the_same_way_by_either_resolver(real_tokenizer) -> None:
     """The one thing a tokenizer cannot answer, so the one thing not to vary.
 
     An attachment is not text; it is charged a flat amount because a part that
-    looks free is a part every budget can afford.  Which estimator is in force
-    must not change that, or the same conversation would weigh differently
-    depending on whether a machine had a network.
-
-    **Both measures are taken, because the name is the claim.**  Only the
-    fallback half was measured here — inside a block that pinned the seam to the
-    same `None` the fixture had already pinned — so "by either measure" was an
-    assertion about one of them, and a tokenizer that charged an image
-    differently (or not at all) could not have failed it.
-
-    What is measured is the *difference* the image makes, rather than the
-    message's total: the two measures disagree about the text by design (that
-    disagreement is the point of the module), so the total is the one number
-    that cannot be compared across them.
+    looks free is a part every budget can afford.  The fake the suite uses and
+    the real vocabulary must charge it the same way.
     """
     with_image = {
         "role": "user",
@@ -145,17 +170,11 @@ def test_an_image_is_charged_the_same_way_by_either_measure(real_tokenizer) -> N
     }
 
     def image_costs() -> int:
-        """What the image adds to the message, under whichever measure is in force."""
         return tokens.estimate_message_tokens(
             with_image
         ) - tokens.estimate_message_tokens(text_only)
 
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(tokens, "_openai_encoding", lambda: None)
-        by_script = image_costs()
-
-    assert by_script == tokens._IMAGE_TOKENS, "the script measure"
-    assert image_costs() == tokens._IMAGE_TOKENS, "and the real tokenizer, the same"
+    assert image_costs() == tokens._IMAGE_TOKENS, "the real tokenizer"
 
 
 def test_a_turn_that_weighs_nothing_is_still_charged_one() -> None:
@@ -168,140 +187,12 @@ def test_a_turn_that_weighs_nothing_is_still_charged_one() -> None:
     assert tokens.estimate_turn_tokens([{"role": "user", "content": ""}]) == 1
 
 
-def test_a_failed_load_is_paid_for_once(monkeypatch, tokenizer_resolver) -> None:
-    """A machine without the vocabulary must not retry on every turn.
-
-    `tiktoken` raises when it cannot fetch the file — no network, a proxy that
-    blocks it, an air-gapped host — and the estimator is called per message, so
-    an un-remembered failure would be one failed fetch per message of every
-    conversation.  The attempt is made once and its answer kept, like a success.
-    """
-    import tiktoken
-
-    calls: list[str] = []
-
-    def refuse(name: str):
-        calls.append(name)
-        raise RuntimeError("no network here")
-
-    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
-    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
-    monkeypatch.setattr(tokens, "_encoding", None)
-    monkeypatch.setattr(tokens, "_failed_at", None)
-
-    for _ in range(3):
-        assert tokens.estimate_text_tokens(ENGLISH) > 0
-
-    assert calls == [tokens._ENCODING], "tried once inside the cooldown"
-
-
-def test_a_transient_failure_is_retried_after_the_cooldown(
-    monkeypatch, tokenizer_resolver
-) -> None:
-    """**One outage is not the process's whole life.**  The failure is remembered
-    for `_RETRY_AFTER` so an offline machine does not fetch per message, but a
-    machine that comes back online must get the real tokenizer again."""
-    import tiktoken
-
-    class Encoding:
-        def encode_ordinary(self, text: str) -> list[int]:
-            return [1, 2]
-
-    calls: list[str] = []
-
-    def refuse_once(name: str):
-        calls.append(name)
-        if len(calls) == 1:
-            raise RuntimeError("no network here")
-        return Encoding()
-
-    monkeypatch.setattr(tiktoken, "get_encoding", refuse_once)
-    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
-    monkeypatch.setattr(tokens, "_encoding", None)
-    monkeypatch.setattr(tokens, "_failed_at", None)
-
-    assert tokens.estimate_text_tokens(ENGLISH) > 0, "the fallback answered"
-    # Move the recorded failure past the cooldown without sleeping.
-    monkeypatch.setattr(
-        tokens,
-        "_failed_at",
-        tokens.time.monotonic() - tokens._RETRY_AFTER - 1,
-    )
-    assert tokens.estimate_text_tokens(ENGLISH) == 2
-
-    assert calls == [tokens._ENCODING, tokens._ENCODING], "retried after the cooldown"
-
-
-def test_a_missing_bundle_falls_back_without_asking_tiktoken(
-    monkeypatch, tmp_path, tokenizer_resolver
-) -> None:
-    """**A broken install must not reach the network.**  tiktoken 0.14.0 answers
-    a missing cache file with `requests.get` and *no timeout*, so asking it on a
-    black-holed network hangs the turn forever instead of reaching the script
-    measure.  The resolver checks the cache file first and falls back immediately
-    — `get_encoding` is never asked, and the failure is remembered for the
-    cooldown like any other failed load.
-
-    The directory is pinned with `setenv` rather than left to the resolver's
-    `setdefault`: that write is the code under test's, so `monkeypatch` would not
-    undo it, and a tmp directory left in the process env would be the next
-    test's cache.
-    """
-    import tiktoken
-
-    calls: list[str] = []
-
-    def refuse(name: str):
-        calls.append(name)
-        raise AssertionError("get_encoding was asked with no readable bundle")
-
-    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
-    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))  # an empty directory
-    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
-    monkeypatch.setattr(tokens, "_encoding", None)
-    monkeypatch.setattr(tokens, "_failed_at", None)
-
-    assert tokens.estimate_text_tokens(ENGLISH) == tokens._by_script(ENGLISH)
-    assert calls == [], "the load was refused before tiktoken could fetch"
-    assert tokens._failed_at is not None, "the failure is remembered for the cooldown"
-
-
-def test_a_corrupted_bundle_falls_back_without_asking_tiktoken(
-    monkeypatch, tmp_path, tokenizer_resolver
-) -> None:
-    """A hash-mismatched bundle is the same hazard by another road: tiktoken
-    *deletes* a cache file whose content hash is wrong and fetches a fresh one,
-    so the resolver verifies the hash before the load rather than letting the
-    fetch hang the turn."""
-    import tiktoken
-
-    calls: list[str] = []
-
-    def refuse(name: str):
-        calls.append(name)
-        raise AssertionError("get_encoding was asked with a corrupted bundle")
-
-    (tmp_path / tokens._CACHE_KEY).write_bytes(b"not the vocabulary")
-    monkeypatch.setattr(tiktoken, "get_encoding", refuse)
-    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(tokens, "_openai_encoding", tokenizer_resolver)
-    monkeypatch.setattr(tokens, "_encoding", None)
-    monkeypatch.setattr(tokens, "_failed_at", None)
-
-    assert tokens.estimate_text_tokens(ENGLISH) == tokens._by_script(ENGLISH)
-    assert calls == [], "the load was refused before tiktoken could delete and fetch"
-    assert tokens._failed_at is not None, "the failure is remembered for the cooldown"
-
-
 def _fresh_python(code: str) -> subprocess.CompletedProcess[str]:
     """Run *code* in a fresh, isolated interpreter — **UTF-8 on both ends**.
 
     `-X utf8` is the child's half: a piped interpreter on a Chinese Windows
     encodes stderr in the ANSI code page, so a log line with an em dash arrives
-    as GBK bytes.  `encoding="utf-8"` is the parent's half: without it the
-    reader thread decodes those bytes as UTF-8 and dies, and pytest reports the
-    test as passed with a `PytestUnhandledThreadExceptionWarning` beside it —
-    noise that hides the next real thread failure.
+    as GBK bytes.  `encoding="utf-8"` is the parent's half.
     """
     return subprocess.run(
         [sys.executable, "-I", "-X", "utf8", "-c", code],
@@ -313,10 +204,9 @@ def _fresh_python(code: str) -> subprocess.CompletedProcess[str]:
 
 def test_a_missing_bundle_never_touches_the_network() -> None:
     """The bundle branch itself, in a fresh process: no cache directory
-    configured and no bundled file, so the resolver points tiktoken at the
-    bundle and finds nothing.  `requests.get` is poisoned and `get_encoding`
-    refused — a fetch fails the test rather than hanging it, and the script
-    measure answers."""
+    configured and no bundled file, so the resolver raises before `requests.get`
+    could be reached.  Both are poisoned to fail the test rather than hang it.
+    """
     code = """
 import os
 import tempfile
@@ -341,9 +231,13 @@ tiktoken.get_encoding = never
 from slife2.libs.turn import tokens
 
 tokens._BUNDLED_CACHE = Path(tempfile.mkdtemp())
-assert tokens._openai_encoding() is None, "a missing bundle must fall back"
-assert tokens._failed_at is not None
-assert tokens.estimate_text_tokens("hello") == tokens._by_script("hello")
+try:
+    tokens._openai_encoding()
+except tokens.TokenizerUnavailable as exc:
+    assert "missing" in str(exc)
+    assert "reinstall" in str(exc)
+else:
+    raise AssertionError("a missing bundle must raise")
 """
     result = _fresh_python(code)
     assert result.returncode == 0, result.stderr
@@ -358,7 +252,7 @@ def test_resolving_the_vocabulary_is_not_a_cost_of_importing() -> None:
     Asserted in a fresh interpreter, because this one has already estimated.
     """
     result = _fresh_python(
-        "import slife2.libs.turn.tokens as t; print(t._encoding, t._failed_at)"
+        "import slife2.libs.turn.tokens as t; print(t._encoding, t._failure)"
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "None None"
@@ -368,10 +262,7 @@ def test_the_bundled_vocabulary_is_present_and_whole() -> None:
     """The cache file is package data, and it is the file tiktoken expects.
 
     The name is tiktoken's cache key (the SHA-1 of the URL) and the content is
-    verified against the hash the resolver checks before the load — the one
-    spelling of it (`tokens._BUNDLED_SHA256`, which the bundle's README also
-    records); a stale or truncated bundle fails here rather than at a user's
-    first recall.
+    verified against the hash the resolver checks before the load.
     """
     path = tokens._BUNDLED_CACHE / tokens._CACHE_KEY
 

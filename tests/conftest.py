@@ -33,6 +33,7 @@ what a hand-over needs.
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -242,21 +243,39 @@ def clean_registered_secrets():
     secrets.reset()
 
 
+#: The deterministic stand-in the suite uses for the vocabulary: the old script
+#: measure, kept here rather than in production.  Its numbers are what every
+#: other test was written against, so pinning it keeps those tests about their
+#: own subject; a test that is about the tokenizer asks for `real_tokenizer`.
+_FAKE_NON_ASCII = re.compile("[^\x00-\x7f]")
+
+
+def _fake_measure(text: str) -> int:
+    _ascii_only, non_ascii = _FAKE_NON_ASCII.subn("", text)
+    return non_ascii + (len(text) - non_ascii + 3) // 4
+
+
+class _FakeEncoding:
+    """What `_openai_encoding` answers in the suite: a cheap deterministic BPE."""
+
+    def encode_ordinary(self, text: str) -> list[int]:
+        return [0] * _fake_measure(text)
+
+
 @pytest.fixture(autouse=True)
 def no_tokenizer_download(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the suite on the fallback: no vocabulary parse per worker.
+    """Keep the suite off the real vocabulary: no parse per worker.
 
     `slife2.libs.turn.tokens` sizes a conversation with `tiktoken`'s `o200k_base`
     when it can read the bundled vocabulary, and reading it is a few megabytes
     parsed per *process* — under `-n auto`, once per worker, for a question most
-    tests never ask.  So the resolver is pinned to "no vocabulary" here, which
-    makes every test that sizes a turn use the script fallback — a branch that
-    has to work anyway, since a machine with a broken install is supported
-    rather than broken.  `tests/libs/turn/test_tokens.py` puts the real one back
-    by asking for the `real_tokenizer` fixture, and the bundle is part of the
-    package, so that fixture does not reach the network either.
+    tests never ask.  The resolver is pinned to a deterministic fake with the
+    old script measure's numbers, so every test that sizes a turn stays on the
+    numbers it was written against.  `tests/libs/turn/test_tokens.py` puts the
+    real one back by asking for the `real_tokenizer` fixture, and the bundle is
+    part of the package, so that fixture does not reach the network either.
     """
-    monkeypatch.setattr(tokens, "_openai_encoding", lambda: None)
+    monkeypatch.setattr(tokens, "_openai_encoding", lambda: _FakeEncoding())
 
 
 @pytest.fixture(autouse=True)

@@ -53,6 +53,13 @@ class SubagentSpec:
     model: str = ""
     #: What it is for, in the words its prompt uses (`DEFAULT_ROLE`).
     role: str = DEFAULT_ROLE
+    #: Whether the record exists but could not be read.  **A read does not
+    #: fabricate the defaults**: `model`/`role` are empty/plain because there is
+    #: nothing to read, not because the subagent was configured that way, and a
+    #: caller that shows them must show this flag beside them.
+    unreadable: bool = False
+    #: The sentence naming the record and the failure, when `unreadable`.
+    error: str = ""
 
 
 def subagent_spec(agent: str, subagent: str, *, strict: bool = False) -> SubagentSpec:
@@ -65,21 +72,42 @@ def subagent_spec(agent: str, subagent: str, *, strict: bool = False) -> Subagen
     `agent_dir(agent, "")` — the agent's own directory — out of a question about
     a file that lives under the subagent's own directory.
 
-    **`strict` is for the two callers that are about to run a conversation on
-    this answer.**  A record that cannot be read is not the default model and the
+    **`strict` is for the callers that are about to run a conversation on this
+    answer.**  A record that cannot be read is not the default model and the
     default role: running on them would silently move the subagent to the
-    maker's model and give it the plain role, with the warning below as the only
-    trace.  The run path therefore raises, naming the record, and the turn ends
-    as a harness failure.  A read — a list, a transcript — keeps the defaults,
-    because it is showing a directory that exists and has nothing to refuse.
+    maker's model and give it the plain role.  The run path raises, naming the
+    record, and the turn ends as a harness failure.
+
+    **A read keeps the flag, not the defaults.**  A list or a transcript shows
+    `model`/`role` as empty/plain only because the record could not be read, and
+    `unreadable`/`error` say so.  A caller that showed those values as the
+    subagent's configuration would be inventing a fact the damage did not make.
     """
     if not subagent:
         return SubagentSpec()
-    record = read_subagent(agent, subagent, strict=strict)
+    record, error = _read(agent, subagent)
+    if error is not None:
+        if strict:
+            raise ValueError(error)
+        return SubagentSpec(unreadable=True, error=error)
     return SubagentSpec(
         model=str(record.get("model") or ""),
         role=str(record.get("role") or DEFAULT_ROLE),
     )
+
+
+def _read(agent: str, subagent: str) -> tuple[dict[str, Any], str | None]:
+    """The record's mapping, or `({}, error)` when the file is damage."""
+    path = subagent_file(agent, subagent)
+    if not path.is_file():
+        return {}, None
+    try:
+        loaded = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, YAMLError) as exc:
+        return {}, f"the record of {path} could not be read: {exc}"
+    if not isinstance(loaded, dict):
+        return {}, f"the record of {path} is not a mapping"
+    return loaded, None
 
 
 def read_subagent(agent: str, subagent: str, *, strict: bool = False) -> dict[str, Any]:
@@ -105,22 +133,13 @@ def read_subagent(agent: str, subagent: str, *, strict: bool = False) -> dict[st
     damage is reported where a person can read it, and which never turns into a
     refusal of the thing the reader actually asked for.
     """
-    path = subagent_file(agent, subagent)
-    if not path.is_file():
-        return {}
-    try:
-        loaded = YAML(typ="safe").load(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, YAMLError) as exc:
+    record, error = _read(agent, subagent)
+    if error is not None:
         if strict:
-            raise ValueError(f"the record of {path} could not be read: {exc}") from exc
-        logger.warning("the record of %s could not be read: %s", path, exc)
+            raise ValueError(error)
+        logger.warning("%s", error)
         return {}
-    if not isinstance(loaded, dict):
-        if strict:
-            raise ValueError(f"the record of {path} is not a mapping")
-        logger.warning("the record of %s is not a mapping", path)
-        return {}
-    return loaded
+    return record
 
 
 __all__ = ["DEFAULT_ROLE", "SubagentSpec", "read_subagent", "subagent_spec"]

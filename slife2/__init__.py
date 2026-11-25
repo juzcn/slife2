@@ -670,6 +670,7 @@ def _broker_row(settings: Any) -> dict[str, Any]:
     a fact the report owes the reader, not a silence.
     """
     from slife2.libs.host.runtime import (
+        DamagedRecord,
         log_path,
         read_record,
         same_process,
@@ -679,7 +680,20 @@ def _broker_row(settings: Any) -> dict[str, Any]:
 
     url = log_url(settings)
     listening = tcp_listening(settings.broker_host, settings.broker_port)
-    record = read_record(url)
+    try:
+        record = read_record(url)
+    except DamagedRecord as exc:
+        # **Damage is not "not running".**  The broker's record cannot be read;
+        # the row says so and is not usable, rather than hiding the repair
+        # behind a state that reads as an ordinary stop.
+        return {
+            "name": BROKER_NAME,
+            "url": url,
+            "state": "unknown",
+            "status": str(exc),
+            "ok": False,
+            "log": str(log_path(url)),
+        }
     if listening is None:
         state, status, ok = "unknown", "unknown - the address did not resolve", False
     elif listening:
@@ -732,10 +746,16 @@ def _status(config: Config, *, as_json: bool = False) -> int:
     usable.  A human-readable status and a machine-readable one are one read of
     the same outcomes.
     """
+    from slife2.libs.host.config import warnings as config_warnings
     from slife2.libs.host.launcher import Status, statuses
 
     outcomes = list(statuses(config))
     brokers = [_broker_row(settings) for settings in _broker_settings(config)]
+    # **A configuration fact that moved the ports or lost the log detail.**
+    # These are the degrades that would otherwise only reach a daemon log;
+    # `status` is the command whose whole job is saying what is actually in
+    # force.
+    warnings = config_warnings()
     failed = sum(1 for outcome in outcomes if not outcome.ok)
     failed += sum(1 for row in brokers if not row["ok"])
     total = len(outcomes) + len(brokers)
@@ -751,6 +771,7 @@ def _status(config: Config, *, as_json: bool = False) -> int:
                     # every row — not the first — just as the exit code counts
                     # every row.
                     "brokers": brokers,
+                    "warnings": warnings,
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -770,6 +791,8 @@ def _status(config: Config, *, as_json: bool = False) -> int:
         _report("", outcome.spec.name, outcome.spec.url, suffix)
     for row in brokers:
         _report("", row["name"], row["url"], row["status"])
+    for warning in warnings:
+        print(f"slife2: warning: {warning}", file=sys.stderr)
     if failed:
         print(
             f"\nslife2: {failed} of {total} server(s) are not usable",
@@ -869,6 +892,7 @@ def _down(config: Config, *, force: bool = False, everything: bool = False) -> i
     # what keeps a broker *slife2 did not start* out of it: no record, no
     # signalling.  A stack going away is exactly the moment it should, since the
     # alternative is a machine left holding a broker nobody is using.
+    from slife2.libs.host.runtime import DamagedRecord
     from slife2.plugins.a2a.broker import BROKER_NAME, log_url, stop_failed
     from slife2.plugins.a2a.broker import stop as stop_broker
     from slife2.plugins.a2a.broker import stop_url as stop_broker_url
@@ -884,13 +908,31 @@ def _down(config: Config, *, force: bool = False, everything: bool = False) -> i
         from slife2.libs.host.runtime import records
 
         known = {url for url, _settings in targets}
+        found, damaged = records()
         targets += [
             (record.url, None)
-            for record in records()
+            for record in found
             if record.url.startswith("mqtt://") and record.url not in known
         ]
+        # **A damaged record may name a broker nobody can stop.**  It is reported
+        # and the take-down still stops every readable one; the exit code says
+        # the sweep was not whole.
+        for damage in damaged:
+            failed = True
+            print(f"slife2: {damage}", file=sys.stderr)
     for url, settings in targets:
-        said = stop_broker(settings) if settings is not None else stop_broker_url(url)
+        try:
+            said = (
+                stop_broker(settings) if settings is not None else stop_broker_url(url)
+            )
+        except DamagedRecord as exc:
+            # A broker record this build cannot read is damage: the broker may
+            # be live and unmanageable, so the row fails with the path and the
+            # rest of the take-down goes on.
+            anything = True
+            failed = True
+            _report("", BROKER_NAME, url, str(exc))
+            continue
         if said:
             anything = True
             _report("", BROKER_NAME, url, said)

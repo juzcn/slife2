@@ -935,6 +935,13 @@ def _wire(session: Session) -> None:
         would collapse whitespace and silently rename an identity the store and
         the roster both key by.
         """
+        if session.groups.load_error:
+            logger.error(
+                "a2a_group_event_dropped agent=%s — %s",
+                describe((session.agent, session.subagent)),
+                session.groups.load_error,
+            )
+            return
         event = group_store.parse_event(data)
         if event is None or event.kind != group_store.GROUP_MESSAGE:
             logger.warning(
@@ -963,6 +970,13 @@ def _wire(session: Session) -> None:
         spend a window line and a model's attention on bookkeeping.  The next
         group message carries the same roster anyway.
         """
+        if session.groups.load_error:
+            logger.error(
+                "a2a_group_event_dropped agent=%s — %s",
+                describe((session.agent, session.subagent)),
+                session.groups.load_error,
+            )
+            return
         event = group_store.parse_event(data)
         if event is None or event.kind not in group_store.GROUP_KINDS:
             logger.warning(
@@ -2323,7 +2337,16 @@ def build_server(
             await rebind(session)
         mesh = session.mesh
         own, *peers = mesh.list_agents()
-        found = {safe_name(card.agent_name): safe_name(card.status) for card in peers}
+        # The status and whether it was assumed from an absent `a2a-status`;
+        # a reader that can tell a claim from an assumption is owed the
+        # difference (`AgentCard.presence_assumed`).
+        found = {
+            safe_name(card.agent_name): (
+                safe_name(card.status),
+                bool(card.presence_assumed),
+            )
+            for card in peers
+        }
         if net is LOCAL:
             members = membership(agent)
             # **A card can outlive the directory it was held for.**  A removed
@@ -2333,7 +2356,9 @@ def build_server(
             # directory behind it is not a member.  The maker's own name stays:
             # a subagent's roster lists it as a peer.
             wanted = {safe_name(agent)} | {safe_name(one) for one in members}
-            found = {name: status for name, status in found.items() if name in wanted}
+            found = {
+                name: value for name, value in found.items() if name in wanted
+            }
             # `offline` is the card vocabulary's word and the honest one here:
             # nothing is listening for this member at this moment.  It says
             # nothing about whether a message would reach it — that is the one
@@ -2347,12 +2372,19 @@ def build_server(
             # a member nothing has woken.
             for name in members:
                 if name != mesh.agent_name:
-                    found.setdefault(safe_name(name), "offline")
+                    # A member nothing has woken has no card: `offline` is
+                    # this roster's word for it, and it was not assumed from a
+                    # card at all.
+                    found.setdefault(safe_name(name), ("offline", False))
         cards = [
             {"agent_name": safe_name(own.agent_name), "status": safe_name(own.status)}
         ] + [
-            {"agent_name": name, "status": status}
-            for name, status in sorted(found.items())
+            {
+                "agent_name": name,
+                "status": status,
+                **({"presence": "assumed"} if assumed else {}),
+            }
+            for name, (status, assumed) in sorted(found.items())
         ]
         error = mesh.collision or session.connect_error
         if not mesh.is_connected and not error:
@@ -2449,6 +2481,17 @@ def build_server(
             f"this conversation knows."
         )
 
+    def group_store_ready(session: Session) -> None:
+        """Refuse every group tool while the file is damage.
+
+        **A quarantined file is not an empty group list.**  The groups are in
+        the preserved `.corrupt` file; the store's `load_error` names it and the
+        repair.  A read that answered "no groups" would be damage read as
+        absence, and a write would overwrite the bytes that still hold them.
+        """
+        if session.groups.load_error:
+            raise ToolError(session.groups.load_error)
+
     def save_group_store(session: Session) -> None:
         """Persist a change the caller asked for; a failure is the caller's."""
         try:
@@ -2510,6 +2553,7 @@ def build_server(
         if net is LOCAL:
             group_roster_for_local(sender, roster)
         session = session_of(sender, mine)
+        group_store_ready(session)
         existing = session.groups.get(group)
         if existing is not None and existing.owner != me:
             raise ToolError(
@@ -2579,6 +2623,7 @@ def build_server(
         """
         sender, mine = speaker(ctx)
         session = session_of(sender, mine)
+        group_store_ready(session)
         settings = mesh_settings()
         error = session.groups.load_error
         if not error and not settings.configured:
@@ -2624,6 +2669,7 @@ def build_server(
         """
         sender, mine = speaker(ctx)
         session = session_of(sender, mine)
+        group_store_ready(session)
         found = session.groups.get(group)
         if found is None:
             raise unknown_group(group)
@@ -2657,6 +2703,7 @@ def build_server(
         sender, mine = speaker(ctx)
         me = member_name(sender, mine)
         session = session_of(sender, mine)
+        group_store_ready(session)
         found = session.groups.get(group)
         if found is None:
             raise unknown_group(group)
@@ -2705,6 +2752,7 @@ def build_server(
         sender, mine = speaker(ctx)
         me = member_name(sender, mine)
         session = session_of(sender, mine)
+        group_store_ready(session)
         found = session.groups.get(group)
         if found is None:
             raise unknown_group(group)
@@ -2795,6 +2843,7 @@ def build_server(
             raise ToolError("a group message cannot be empty.")
         me = member_name(sender, mine)
         session = session_of(sender, mine)
+        group_store_ready(session)
         found = session.groups.get(group)
         if found is None:
             raise unknown_group(group)

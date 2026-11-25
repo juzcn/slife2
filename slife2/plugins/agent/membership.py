@@ -145,23 +145,35 @@ def register_tools(
         `subagent_list` is the model's roster, it connects and wakes members to
         answer, and a screen that merely offers names must not do either.
 
-        A damaged record reads as the defaults, as it does for every read path
-        (`read_subagent`): losing a role to a half-written file is smaller than
-        refusing to list the conversation that exists.  A conversation that
-        would run on the answer is the other case and is strict — it refuses
-        rather than silently running the subagent as the maker's.
+        **A damaged record is shown as damage, not as the defaults.**  The entry
+        carries `unreadable: true` and the error naming the file; `model` and
+        `role` are absent for that entry rather than the maker's model and the
+        plain role, which would be facts the damage did not make.  A
+        conversation that would run on the answer is stricter still — it
+        refuses (`subagent_spec(..., strict=True)`).
 
         Args:
             agent: Whose subagents.
 
         Returns:
             `subagents`: one entry per directory, sorted by name, each with
-                `name`, `model` (empty for the maker's own) and `role`.
-                Empty is the honest answer for an agent that has made none.
+                `name`, `model` (empty for the maker's own) and `role`; a
+                damaged record adds `unreadable` and `error` instead of the
+                two settings.  Empty is the honest answer for an agent that has
+                made none.
         """
         found: list[dict[str, Any]] = []
         for directory in sorted(subagent_dirs(agent), key=lambda one: one.name):
             spec = subagent_spec(agent, directory.name)
+            if spec.unreadable:
+                found.append(
+                    {
+                        "name": directory.name,
+                        "unreadable": True,
+                        "error": spec.error,
+                    }
+                )
+                continue
             found.append(
                 {
                     "name": directory.name,

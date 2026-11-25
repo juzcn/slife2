@@ -24,8 +24,10 @@ from slife2.libs.store.catalogue import ToolStore
 from slife2.libs.store.db import (
     _TURN_COLUMNS,
     MAX_AGENT_NAME,
+    MissingTurns,
     StaleSchema,
     TurnStore,
+    UnreadableTurns,
     message_text,
     safe_agent_name,
     store_for,
@@ -248,7 +250,10 @@ async def test_a_damaged_row_does_not_hide_the_others(tmp_path, caplog, damage) 
 
     assert [r.messages for r in records] == [[{"role": "assistant", "c": 2}], []]
     assert records[1].messages == []
+    assert records[1].body_unreadable is True, "damage is not an empty turn"
+    assert records[0].body_unreadable is False
     assert listing["user_message"] == "" and listing["turn_id"] == 1
+    assert listing["unreadable"] is True
     # A row with no readable text owes no vector — the same state a turn that
     # held nothing to embed is in — so the file is indexed, and the plugin that
     # refuses to serve an unready one still comes up.
@@ -371,6 +376,48 @@ async def test_a_live_context_id_no_row_can_have_is_dropped(tmp_path) -> None:
 
     assert store.context_turns() == [1]
     assert [record.turn_id for record in store.turns_by_ids([1])] == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_missing_live_context_row_is_reported_not_dropped(tmp_path) -> None:
+    """**A name with no row is damage, not a shorter conversation.**
+
+    The live-context list says which turns the conversation is made of.  A list
+    naming a row the file no longer has means the file was pruned or rebuilt
+    underneath; a restore that dropped it would come back shorter and call that
+    a decision.  `fetch_turns` gives the caller both halves; `turns_by_ids`
+    refuses the missing one with the ids and the repair.
+    """
+    store = TurnStore(tmp_path / "jack.turn.db")
+    await _turn(store, "the question", "the answer", at=now())
+
+    records, missing = store.fetch_turns([1, 404])
+    assert [record.turn_id for record in records] == [1]
+    assert missing == [404]
+
+    with pytest.raises(MissingTurns) as raised:
+        store.turns_by_ids([1, 404])
+    assert raised.value.ids == [404]
+    assert "404" in str(raised.value) and "repair" in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_live_context_row_is_not_read_as_empty(tmp_path) -> None:
+    """The strict reader refuses a damaged body; the browse carries the flag."""
+    path = tmp_path / "jack.turn.db"
+    store = TurnStore(path)
+    await _turn(store, "the question", "the answer", at=now())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE turn SET messages = ? WHERE rowid = 1", ('"not messages"',)
+        )
+
+    (record,), _ = store.turns()
+    assert record.body_unreadable is True
+    with pytest.raises(UnreadableTurns) as raised:
+        store.turns_by_ids([1])
+    assert raised.value.ids == [1]
+    assert "cannot be read" in str(raised.value)
 
 
 @pytest.mark.asyncio
@@ -904,7 +951,9 @@ async def test_a_listing_carries_both_halves_of_the_exchange(tmp_path) -> None:
         "created_at",
         "user_message",
         "assistant_message",
+        "unreadable",
     }
+    assert listing["unreadable"] is False
     assert listing["created_at"] and listing["turn_id"] == record.turn_id
 
 

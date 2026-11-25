@@ -41,10 +41,20 @@ def test_the_makers_own_conversation_needs_no_record() -> None:
     assert subagents.subagent_spec("jack", "") == subagents.SubagentSpec()
 
 
-def test_a_damaged_record_reads_as_defaults_for_a_list_or_a_transcript() -> None:
+def test_a_damaged_record_is_flagged_for_a_list_not_read_as_defaults() -> None:
+    """**Damage is not "the maker's model and the plain role".**
+
+    `read_subagent` still answers `{}` for the removal path, where the file's
+    existence is the membership and the contents are not needed.  The spec a
+    list or a transcript shows carries `unreadable` and the error, so a reader
+    cannot mistake the empty settings for what the subagent was configured with.
+    """
     with a_record(":: not yaml ::"):
         assert subagents.read_subagent("jack", "helper") == {}
-        assert subagents.subagent_spec("jack", "helper") == subagents.SubagentSpec()
+        spec = subagents.subagent_spec("jack", "helper")
+        assert spec.unreadable is True
+        assert "could not be read" in spec.error
+        assert spec.model == "" and spec.role == subagents.DEFAULT_ROLE
 
 
 def test_a_damaged_record_refuses_a_conversation_that_would_run_on_it() -> None:

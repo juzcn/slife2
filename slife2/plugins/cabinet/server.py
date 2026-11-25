@@ -2680,12 +2680,14 @@ def _hits(found: dict[str, Any], *, limit: int) -> dict[str, Any]:
             f"cabinet_search could not read the cabinet's answer — `results` "
             f"came back as {rows!r}"
         )
+    meaning = found.get("meaning")
     return search_answer(
         rows,
         scores=[row.get("similarity") for row in rows],
         worded=any(row.get("matched_in") for row in rows),
         browsed=bool(found.get("browsed")),
         limit=limit,
+        meaning=str(meaning) if isinstance(meaning, str) else "",
     )
 
 

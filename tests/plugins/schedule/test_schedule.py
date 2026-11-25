@@ -2005,6 +2005,52 @@ async def test_a_ledger_that_cannot_be_opened_is_skipped_not_fatal() -> None:
     assert [store.agent for store in schedule_server.ledgers()] == [OTHER]
 
 
+async def test_a_damaged_ledger_is_reported_not_only_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The affected agent's window is told.**  The clock keeps serving every
+    readable ledger, but a schedule that is not firing is not a silence: the
+    damaged path and the repair go to that agent's window, once."""
+    broken = paths.schedule_db("jack")
+    broken.write_bytes(b"not a sqlite database")
+
+    async with Client(build()) as client:
+        await write(client, agent=OTHER)
+
+    stores, damaged = schedule_server.ledgers_with_damage()
+    assert [store.agent for store in stores] == [OTHER]
+    assert [path for _agent, path, _reason in damaged] == [broken]
+
+    reported: list[tuple[str, str, str]] = []
+
+    async def record(config, agent, code, effect, reason, *, client=None):
+        reported.append((agent, code, effect))
+        return True
+
+    monkeypatch.setattr(schedule_server.degrade, "report", record)
+    await schedule_server.poll_once(default_config(), reference=now())
+
+    assert reported == [
+        (
+            "jack",
+            f"schedule_ledger:{broken}",
+            "scheduled tasks are not firing",
+        )
+    ]
+
+
+async def test_the_callers_own_damaged_ledger_is_a_tool_error() -> None:
+    """`schedule_list` reads the caller's own ledger; an unopenable one is
+    damage, not an empty schedule, and the path is the repair."""
+    broken = paths.schedule_db(AGENT)
+    broken.parent.mkdir(parents=True, exist_ok=True)
+    broken.write_bytes(b"not a sqlite database")
+
+    async with Client(build()) as client:
+        with pytest.raises(ToolError, match="schedule ledger"):
+            await ask(client, SCHEDULE_LIST)
+
+
 async def test_a_programming_error_in_the_walk_is_not_read_as_an_unopenable_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

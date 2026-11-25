@@ -121,6 +121,11 @@ INSTRUCTIONS = (
 #: rather than talking to it.
 MAX_INFLIGHT = 16
 
+#: Consecutive cursor-write failures before the session stops polling.  Three
+#: polls is long enough for a transient lock to clear and short enough that a
+#: broken path is reported as damage rather than retried for ever.
+CURSOR_FAILURES = 3
+
 #: The login's filename inside one agent's directory.  **Not `wechat_<agent>`**:
 #: the directory is the agent, and a filename repeating it is a name to keep in
 #: step with a rename.
@@ -290,6 +295,19 @@ class Session:
         self.inflight: set[asyncio.Task[None]] = set()
         #: The last cursor written to the file, so it is written on change only.
         self.persisted: str = ""
+        #: Whether the login file holds this login.  A save that failed leaves
+        #: the login live in this process only; `wechat_check_status` says so,
+        #: and a restart before the file lands needs a new scan.
+        self.login_saved: bool = True
+        self.login_error: str = ""
+        #: Consecutive cursor-write failures, and the state once they stop the
+        #: poll.  **A file that cannot be written is damage, not a retry for
+        #: ever**: the stream's place is not durable, so a restart would answer
+        #: the replay window again.  After `CURSOR_FAILURES` the session stops
+        #: polling and the status names the path.
+        self.cursor_failures: int = 0
+        self.cursor_error: str = ""
+        self.cursor_terminal: bool = False
         #: A QR login in progress, and the four words for where it is.
         self.qr_state: str = ""  # "" | waiting | scanned | confirmed | expired | error
         self.qr_error: str = ""
@@ -867,7 +885,11 @@ class Wechat:
             session.agent,
             policy.base,
         )
-        while client.is_logged_in and not client.auth_failed:
+        while (
+            client.is_logged_in
+            and not client.auth_failed
+            and not session.cursor_terminal
+        ):
             # **First, before the poll blocks on the bridge**: this is where a
             # link that has just come up says so, and `poll_updates` waits for
             # the far end to have something to say — which, on a quiet account,
@@ -1034,16 +1056,37 @@ class Wechat:
         try:
             save_session(session.agent, written)
         except OSError as exc:
-            logger.warning(
-                "wechat %s: the ack cursor could not be written to %s: %s — "
-                "after a restart this stream is re-read from its old place, so "
-                "those messages are answered again",
-                session.agent,
-                session_path(session.agent),
-                exc,
+            session.cursor_failures += 1
+            session.cursor_error = (
+                f"the ack cursor could not be written to "
+                f"{session_path(session.agent)}: {exc} — after a restart this "
+                f"stream is re-read from its old place, so those messages are "
+                f"answered again"
             )
+            logger.warning(
+                "wechat %s: %s", session.agent, session.cursor_error
+            )
+            if session.cursor_failures >= CURSOR_FAILURES:
+                # **A file that has refused every retry is damage.**  The
+                # cursor is the stream's place; continuing would keep answering
+                # a replay window the process cannot remember.  The poll stops,
+                # and the status names the path to fix.
+                session.cursor_terminal = True
+                logger.error(
+                    "wechat %s: polling stopped after %d cursor-write failures; "
+                    "fix %s",
+                    session.agent,
+                    session.cursor_failures,
+                    session_path(session.agent),
+                )
             return
         session.persisted = cursor
+        session.cursor_failures = 0
+        session.cursor_error = ""
+        # The cursor write is a whole login save; a login that landed here is
+        # saved now, whatever the confirmation-time write did.
+        session.login_saved = True
+        session.login_error = ""
 
     # ── The typing indicator ─────────────────────────────────────────────
 
@@ -1390,14 +1433,16 @@ class Wechat:
         try:
             save_session(session.agent, saved)
         except OSError as exc:
-            logger.warning(
-                "wechat %s: the login could not be saved to %s: %s — it is "
-                "live in this process and the next cursor write saves it "
-                "again; a restart before the file lands needs a new scan",
-                session.agent,
-                session_path(session.agent),
-                exc,
+            session.login_saved = False
+            session.login_error = (
+                f"the login could not be saved to {session_path(session.agent)}: "
+                f"{exc} — it is live in this process and the next cursor write "
+                f"tries again; a restart before the file lands needs a new scan"
             )
+            logger.warning("wechat %s: %s", session.agent, session.login_error)
+        else:
+            session.login_saved = True
+            session.login_error = ""
         logger.info("wechat %s: logged in", session.agent)
 
     # ── The tools ────────────────────────────────────────────────────────
@@ -1557,6 +1602,15 @@ class Wechat:
             "qr": session.qr if qr_state in ("waiting", "scanned") else "",
             "qr_url": (session.qr_url if qr_state in ("waiting", "scanned") else ""),
             "error": error,
+            # **Two writes can fail without the live login failing.**  The
+            # login file is the next start's record; the cursor is this
+            # stream's place.  Both are damage when they do not land, and the
+            # status says which, so a model does not read a live login as a
+            # durable one.
+            "login_saved": session.login_saved,
+            "login_error": session.login_error,
+            "cursor_saved": not session.cursor_terminal,
+            "cursor_error": session.cursor_error,
         }
 
     def _peer(self, session: Session) -> tuple[str, str, bool]:

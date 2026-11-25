@@ -2050,6 +2050,9 @@ async def test_a_plugin_whose_declaration_fails_keeps_its_address_book_entry() -
         assert "somewhere__thing" in await found(hub, "somewhere__thing")
         # A search is a refresh, so this second search is the second ask.
         assert "somewhere__thing" in await found(hub, "somewhere__thing")
+        stale = await call(
+            hub, "tool_search", {"keywords": ["somewhere"], "sentences": []}
+        )
         answer = await call(hub, "somewhere__thing")
 
     assert answer["ok"] is False, "the fake plugin has no such tool, so it refused"
@@ -2057,6 +2060,12 @@ async def test_a_plugin_whose_declaration_fails_keeps_its_address_book_entry() -
         "the call did not reach the plugin that declares the source — its "
         "address-book entry was dropped because one report was late"
     )
+    # **And the answer says the source is stale**, rather than presenting the
+    # carried rows as the current truth.
+    sources_stale = json.loads(stale["text"])["sources_stale"]
+    assert any(
+        "cli-server" in one and "still installing" in one for one in sources_stale
+    ), sources_stale
 
 
 @pytest.mark.asyncio

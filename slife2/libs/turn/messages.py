@@ -36,6 +36,17 @@ logger = logging.getLogger(__name__)
 Role = Literal["system", "user", "assistant", "tool"]
 
 
+class UnreadableMessage(ValueError):
+    """A message on the wire carries no readable role.
+
+    **Damage, not a gap to infer.**  The sender wrote a role this build does not
+    know, or none at all; guessing it would give the model history a shape
+    nobody stated.  The turn fails with the message, and the sender's build is
+    what needs repairing.  A stored body with the same damage is caught at the
+    row (`slife2.libs.store.db._readable_message`).
+    """
+
+
 def read_arguments(name: str, raw: str) -> tuple[dict[str, Any], str | None]:
     """The arguments *raw* carries, or why the call must not be dispatched.
 
@@ -326,23 +337,17 @@ class Message:
 
         role = raw.get("role")
         if role not in ("system", "user", "assistant", "tool"):
-            # **A message with no readable role is damage, and "user" is the
-            # worst default to give it silently**: it puts words in the
-            # person's mouth.  The shape still says which arm it belongs to —
-            # a tool result addresses a call, an assistant turn makes one — so
-            # the message keeps its place, and the warning says what was
-            # inferred (SDD Appendix C).
-            role = (
-                "tool"
-                if raw.get("tool_call_id")
-                else "assistant"
-                if tool_calls
-                else "user"
-            )
-            logger.warning(
-                "a message carried no readable role (%r); reading it as %r",
-                raw.get("role"),
-                role,
+            # **A message with no readable role is damage, and inferring one is
+            # the worst answer**: "user" puts words in the person's mouth, and
+            # "assistant" makes the model the author of something it did not
+            # say.  The shape can suggest an arm, but a suggestion is not the
+            # sender's fact; the payload is refused, the message names it, and
+            # the turn fails.  A stored body with the same damage is caught one
+            # level earlier (`_readable_message`), where it is a damaged row.
+            raise UnreadableMessage(
+                f"a message carried no readable role ({raw.get('role')!r}); "
+                "the sender's build is damaged — repair the process that "
+                "produced it"
             )
 
         return cls(

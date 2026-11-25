@@ -106,8 +106,10 @@ from slife2.libs.plugin.protocol import (
 from slife2.libs.plugin.vocabulary import TURN_SUMMARIZE
 from slife2.libs.store.answer import search_answer
 from slife2.libs.store.db import (
+    MissingTurns,
     StaleSchema,
     TurnStore,
+    UnreadableTurns,
     assistant_message,
     read_store_for,
     store_for,
@@ -833,6 +835,15 @@ def build_server(
         record = await off_loop(store.turn, turn_id) if store is not None else None
         if record is None:
             raise ValueError(f"no turn {turn_id} in {describe((agent, subagent))}")
+        if record.body_unreadable:
+            # **Damage is not an empty turn.**  The row exists and its body does
+            # not; returning an empty message list would read as a turn that
+            # said nothing.  The id and the repair are the answer.
+            raise ToolError(
+                f"the stored body of turn {turn_id} in "
+                f"{describe((agent, subagent))} cannot be read; repair the turn "
+                f"store (restore a backup, or delete it and start afresh)"
+            )
         wire = record.to_wire()
         # **The bill fields answer the operator's question, not this reader's.**
         # `token_count` was the sum of every model call the turn made, each
@@ -945,7 +956,7 @@ def build_server(
         records = {
             record.turn_id: record
             for record in await off_loop(
-                store.turns_by_ids, [turn_id for turn_id, _ in ranked]
+                _strict_records, store, [turn_id for turn_id, _ in ranked]
             )
         }
         entries: list[dict[str, Any]] = []
@@ -1051,8 +1062,30 @@ def build_server(
             return messages[0]
         return None
 
-    def _rows(store: TurnStore, turn_ids: list[int]) -> list[dict[str, Any]]:
-        return [record.to_wire() for record in store.turns_by_ids(turn_ids)]
+    def _rows(
+        store: TurnStore, turn_ids: list[int]
+    ) -> tuple[list[dict[str, Any]], list[int]]:
+        """The stored rows, **with damage carried rather than dropped**.
+
+        A missing row or an unreadable body is a fact the caller must decide
+        about: `restore` returns it to the conversation's two readers (the agent
+        refuses it, the window draws it), and `rebuild` fails on it because it
+        is about to build the context a turn runs on.
+        """
+        records, missing = store.fetch_turns(turn_ids)
+        return [record.to_wire() for record in records], missing
+
+    def _damaged(rows: list[dict[str, Any]]) -> list[int]:
+        return [
+            int(row["turn_id"]) for row in rows if bool(row.get("unreadable"))
+        ]
+
+    def _strict_records(store: TurnStore, turn_ids: list[int]) -> list[Any]:
+        """Those rows, with a missing or damaged one as the tool's error."""
+        try:
+            return store.turns_by_ids(turn_ids)
+        except (MissingTurns, UnreadableTurns) as exc:
+            raise ToolError(str(exc)) from None
 
     def _decision_words(decision: Decision) -> str:
         """The decision's two fields as `recall_decided` spells them.
@@ -1146,10 +1179,12 @@ def build_server(
             subagent: Which of that agent's conversations; empty for its own.
 
         Returns:
-            `messages` (the rebuilt list), `turn_ids` (what it was built from —
-            the caller should adopt it, since a turn named by the list and no
-            longer stored is dropped here and must not be kept in hand), and
-            `turns` (the stored rows themselves).
+            `messages` (the rebuilt list), `turn_ids` (what it was built from),
+            `turns` (the stored rows themselves), and the damage lists
+            `missing` / `unreadable`.  **The damage is reported, not dropped**:
+            the live-context caller refuses a restore with either list non-empty
+            (`slife2.libs.turn.runtime`), while the window's transcript reader
+            draws the rows it has and names the damage.
 
             `turns` is here for the reader that wants the conversation rather
             than the context: a terminal that has just opened has to *show* what
@@ -1163,19 +1198,46 @@ def build_server(
             # A conversation that was never written is this list unchanged — the
             # honest answer for a genuinely new key, and for a subagent that has
             # been removed, whose name must not be recreated by a read.
-            return {"messages": list(messages), "turn_ids": [], "turns": []}
+            return {
+                "messages": list(messages),
+                "turn_ids": [],
+                "turns": [],
+                "missing": [],
+                "unreadable": [],
+            }
         turn_ids = await off_loop(store.context_turns)
         if not turn_ids:
-            return {"messages": list(messages), "turn_ids": [], "turns": []}
-        rows = await off_loop(_rows, store, turn_ids)
+            return {
+                "messages": list(messages),
+                "turn_ids": [],
+                "turns": [],
+                "missing": [],
+                "unreadable": [],
+            }
+        rows, missing = await off_loop(_rows, store, turn_ids)
+        unreadable = _damaged(rows)
+        readable = [row for row in rows if not bool(row.get("unreadable"))]
         rebuilt = decisions.consistent(
-            decisions.messages_from_turns(rows, head=_head(messages))
+            decisions.messages_from_turns(readable, head=_head(messages))
         )
-        restored = [int(row["turn_id"]) for row in rows]
+        restored = [int(row["turn_id"]) for row in readable]
         logger.info(
             "restored %d turn(s) for %s", len(restored), describe((agent, subagent))
         )
-        return {"messages": rebuilt, "turn_ids": restored, "turns": rows}
+        if missing or unreadable:
+            logger.error(
+                "restore_damaged agent=%s missing=%s unreadable=%s",
+                describe((agent, subagent)),
+                missing,
+                unreadable,
+            )
+        return {
+            "messages": rebuilt,
+            "turn_ids": restored,
+            "turns": rows,
+            "missing": missing,
+            "unreadable": unreadable,
+        }
 
     def _configured_prompt_window(model: str) -> int:
         """The prompt budget the config gives *model*: window minus `max_tokens`.
@@ -1616,14 +1678,34 @@ def build_server(
                 reason="recalled" if decision.recall is not None else "asked",
             )
 
-        rows = await off_loop(_rows, store, target)
+        rows, missing = await off_loop(_rows, store, target)
+        # **A named turn with no row, or a row whose body cannot be read, is
+        # damage the rebuild refuses.**  The list and the log disagree — a file
+        # was rebuilt or pruned underneath — and a context assembled from part
+        # of a selection is neither what the model decided nor what it had.  The
+        # ids and the repair are the tool error; the turn keeps the context it
+        # had, and the operator repairs the store.
+        if missing or _damaged(rows):
+            logger.error(
+                "recall_abandoned missing=%s unreadable=%s",
+                missing,
+                _damaged(rows),
+            )
+            raise ToolError(
+                "the selected turns cannot be read: "
+                + (
+                    f"turn(s) {missing} have no row; " if missing else ""
+                )
+                + (
+                    f"the stored body of turn(s) {_damaged(rows)} cannot be read; "
+                    if _damaged(rows)
+                    else ""
+                )
+                + "repair the turn store (restore a backup, or delete it and "
+                "start afresh)"
+            )
         if len(rows) != len(target):
-            # A named turn with no row: the list and the log disagree, which
-            # means a file was rebuilt or pruned underneath.  The selection
-            # cannot be applied, so it is the tool's error and the context is
-            # not written — a context assembled from part of a selection is
-            # neither what the model decided nor what it had.
-            logger.warning("recall_abandoned reason=unfetchable")
+            logger.error("recall_abandoned reason=unfetchable")
             raise ToolError("the selected turns could not be fetched")
 
         rebuilt = decisions.consistent(
@@ -1887,7 +1969,7 @@ def build_server(
         """
         if not ask or not order:
             return order, ""
-        rows = await off_loop(store.turns_by_ids, order)
+        rows = await off_loop(_strict_records, store, order)
         if not rows:
             return order, "failed"
         ids = [int(record.turn_id) for record in rows]
@@ -1926,7 +2008,7 @@ def build_server(
         """
         return {
             record.turn_id: estimate_turn_tokens(record.messages)
-            for record in store.turns_by_ids(turn_ids)
+            for record in _strict_records(store, turn_ids)
         }
 
     return mcp

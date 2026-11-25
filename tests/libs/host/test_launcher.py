@@ -1360,14 +1360,17 @@ def test_the_last_client_stops_a_backend_another_config_started(
     monkeypatch.setattr(
         launcher,
         "records",
-        lambda: [
-            runtime.ServerRecord(
-                name="llm:openai-completions",
-                url="http://127.0.0.1:24999/mcp",
-                pid=123,
-                config="",
-            )
-        ],
+        lambda: (
+            [
+                runtime.ServerRecord(
+                    name="llm:openai-completions",
+                    url="http://127.0.0.1:24999/mcp",
+                    pid=123,
+                    config="",
+                )
+            ],
+            [],
+        ),
     )
 
     list(launcher.stop(default_config(), everything=True))
@@ -1390,11 +1393,14 @@ def test_a_plain_stop_stays_with_this_config(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(
         launcher,
         "records",
-        lambda: [
-            runtime.ServerRecord(
-                name="other", url="http://127.0.0.1:24999/mcp", pid=123, config=""
-            )
-        ],
+        lambda: (
+            [
+                runtime.ServerRecord(
+                    name="other", url="http://127.0.0.1:24999/mcp", pid=123, config=""
+                )
+            ],
+            [],
+        ),
     )
 
     list(launcher.stop(default_config()))

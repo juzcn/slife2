@@ -1800,6 +1800,21 @@ class ToolStore:
                 "listing is `ToolStore.page`"
             )
 
+        # **A sentence is a question only the meaning leg can answer.**  A
+        # corpus nobody has embedded under this model has no vector table; a
+        # sentences-only search over it must fail rather than answer with
+        # keyword rows that cannot match, while a keywords-only search still
+        # answers and says `meaning: not_indexed` — the register's damage-is-
+        # not-absence rule, applied to a derived index.
+        requested_meaning = any(s.strip() for s in sentences)
+        meaning_state = await off_loop(self._meaning_state)
+        if requested_meaning and meaning_state != "ok":
+            raise RuntimeError(
+                f"{self.path}: the semantic index is not built, so a "
+                f"sentences-only search has nothing to ask; run the sync (or "
+                f"restart) to build it, or search by `keywords` instead"
+            )
+
         # **The words are a sentence when they are all there is**, but a
         # keyword list with no term in it is no keyword leg.  The cabinet's
         # search states the same rule: the two are different inputs to the two
@@ -1877,7 +1892,27 @@ class ToolStore:
                 )
                 for row in rows
             ],
+            "meaning": meaning_state,
         }
+
+    def _meaning_state(self) -> str:
+        """Whether the semantic leg can be asked: `ok` or `not_indexed`.
+
+        **A recorded index whose table is gone is damage and raises**, the same
+        answer `_nearest` gives; the two must not disagree about the same file.
+        No vector table and no recorded identity is a corpus nobody has embedded
+        under this model — an empty meaning leg that a keyword search may still
+        answer around, but a sentence cannot.
+        """
+        with self._connect() as connection:
+            if vector_table_gone(
+                connection, vec_table="tool_vec", meta_table="meta"
+            ):
+                raise RuntimeError(
+                    f"{self.path}: the catalogue records a vector index but its "
+                    "table is gone; restart to rebuild the index"
+                )
+            return "ok" if table_exists(connection, "tool_vec") else "not_indexed"
 
     def page(
         self,

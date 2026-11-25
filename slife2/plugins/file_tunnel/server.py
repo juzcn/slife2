@@ -731,7 +731,8 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         # loop: a probe that accepted but does not answer would otherwise stall
         # every other call this server is answering, including the share a
         # remote model is fetching.
-        if not await asyncio.to_thread(tunnel.is_reachable):
+        reachability = await asyncio.to_thread(tunnel.reachability)
+        if reachability is False:
             raise ToolError(
                 "the tunnel has published a URL but nothing is "
                 "reaching it from outside right now — every fetch would answer "
@@ -750,7 +751,21 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             if found.token != previous:
                 exposed.revoke(found.token, owner)
             raise ToolError("the tunnel went away as the file was published.")
-        return {"url": url, "token": found.token, "file": found.name}
+        answer: dict[str, Any] = {
+            "url": url,
+            "token": found.token,
+            "file": found.name,
+        }
+        if reachability is None:
+            # **The URL is handed out, but not as a proven one.**  The probe
+            # could not answer, so the safe decision (do not tear the tunnel
+            # down) is kept; the caveat is the fact the caller is owed.
+            answer["reachability"] = (
+                "the tunnel's liveness probe could not answer, so this URL is "
+                "handed out without proof that it is served — try it, and "
+                "`tunnel_status` has the detail"
+            )
+        return answer
 
     @mcp.tool(name="unexpose_local_image", meta=FOR_THE_MODEL)
     async def unexpose_local_image(ctx: Context, token: str) -> dict[str, Any]:
@@ -811,14 +826,23 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             # The same guard, for the same reason: an SDK transport has no
             # binary, and a double may report none — never a non-path.
             binary = ""
+        binary_source = getattr(tunnel, "binary_source", "")
+        if not isinstance(binary_source, str):
+            binary_source = ""
+        reachability = await asyncio.to_thread(tunnel.reachability)
         return json.dumps(
             {
                 "state": state["state"],
                 "url": state.get("url", ""),
                 "reason": state.get("reason", ""),
-                "reachable": await asyncio.to_thread(tunnel.is_reachable),
+                # True, false, or **null when the probe could not answer**.
+                # The old `true` was a failure read as a success.
+                "reachable": reachability,
+                "probe": "failed" if reachability is None else "ok",
+                "inherited": bool(tunnel.inherited),
                 "provider": config.file_tunnel.active,
                 "binary": binary,
+                "binary_source": binary_source,
                 "edge_ip": edge_ip,
                 "edge_via_proxy": bool(getattr(tunnel, "edge_via_proxy", False)),
                 "exposed": len(exposed),

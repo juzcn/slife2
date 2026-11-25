@@ -212,32 +212,40 @@ class ServerRecord:
         )
 
 
+class DamagedRecord(OSError):
+    """A bookkeeping file exists and cannot be read.
+
+    **Damage is not absence.**  A missing record is the ordinary first start; a
+    file that is there and will not parse is a crash-truncated write, a hand
+    edit, or a record from another build.  Reading it as absent made a running
+    server look record-less — `slife2 down` had no pid to stop — and the repair
+    could never be asked for.  The reader raises instead, naming the path and
+    what to do.
+    """
+
+    def __init__(self, path: Path, exc: BaseException) -> None:
+        self.path = path
+        super().__init__(
+            f"the record at {path} exists but cannot be read ({exc}); repair or "
+            f"remove it"
+        )
+
+
 def _read_json_dataclass[RecordT](
     path: Path, factory: Callable[[dict[str, Any]], RecordT]
 ) -> RecordT | None:
     """Read the JSON object at `path` and hand it to `factory`, or None.
 
-    **A file that is missing, truncated or malformed reads as absent, not as an
-    error.**  Both files this reads are bookkeeping — a record names a pid, a
-    claim names a holder — and refusing to start because a crash truncated one
-    would be a worse failure than losing the number it held.  `factory` is the
-    half each caller answers for itself: which fields it needs.  A field this
-    build's writer always emits is required here too — a hole is not an older
-    record this reader should fill in.
-
-    **This is a registered fallback, and its cost is real**: a record whose
-    damage is read as absence makes a running server look record-less, and
-    `slife2 down` then has no pid to stop.  *Gives up:* the pid a damaged record
-    held.  *Does not cover:* nothing — this is the floor, and a caller that
-    knows the file must exist (`read_claim`, `read_record`) still only learns
-    that it does not.  *Failure goes:* a warning naming the path, because a file
-    that exists and cannot be read is damage — the writer's warning is not
-    enough when a crash or another build left the file (SDD Appendix C).
-
-    **A missing file and a damaged one are told apart where the answer is
-    produced.**  Both read as absent, which is what lets a crash-truncated file
-    block nothing; only the damaged one is logged, so the reader is not the
-    third party left guessing which happened.
+    **A missing file is absent; a damaged one is an error.**  Both files this
+    reads are bookkeeping — a record names a pid, a claim names a holder — and
+    a missing one is the ordinary first start.  A file that exists and cannot
+    be parsed is damage: a crash-truncated write, a hand edit, a record from
+    another build.  Reading it as absent made a running server look record-less
+    (`down` had no pid) and a damaged claim unnameable, so it raises
+    `DamagedRecord` with the path and the repair.  `factory` is the half each
+    caller answers for itself: which fields it needs.  A field this build's
+    writer always emits is required here too — a hole is not an older record
+    this reader should fill in.
 
     The broad `except` is the point rather than a shortcut, and each arm is a
     different way the file fails to be one: `read_text` raises `OSError` when it
@@ -245,7 +253,7 @@ def _read_json_dataclass[RecordT](
     `factory` raises `KeyError`/`TypeError`/`ValueError` when the object is not
     the shape it expects.  **`OverflowError` is the fifth**: JSON `1e400`
     parses to `inf`, and `int(inf)` is an overflow rather than a value — a
-    damaged pid is damage like the rest, and this reader may not raise.
+    damaged pid is damage like the rest.
     """
     try:
         return factory(json.loads(path.read_text(encoding="utf-8")))
@@ -253,11 +261,7 @@ def _read_json_dataclass[RecordT](
         return None
     except (OSError, ValueError, KeyError, TypeError, OverflowError) as exc:
         if path.exists():
-            logger.warning(
-                "%s could not be read as a record (%s); reading it as absent",
-                path,
-                exc,
-            )
+            raise DamagedRecord(path, exc) from exc
         return None
 
 
@@ -315,22 +319,32 @@ def read_record(url: str) -> ServerRecord | None:
     return _read_json_dataclass(record_path(url), _record_from)
 
 
-def records() -> list[ServerRecord]:
-    """Every server record on this machine, readable ones only.
+def records() -> tuple[list[ServerRecord], list[DamagedRecord]]:
+    """Every server record on this machine, and the damaged ones.
 
     **A take-down that is the last client's stops the machine's daemons, not
     one config's.**  The servers are shared, so another config may have started
     a backend this one never names — and a last client that stopped only its own
     `specs` left that daemon running, invisible to both `status` and `down`.  The
-    files are the only machine-wide list there is; a record this reader cannot
-    parse is skipped, exactly as `read_record` answers it.
+    files are the only machine-wide list there is.
+
+    **A damaged record is returned, not skipped.**  One unreadable file may
+    name a live daemon nobody can stop; the caller reports it and still stops
+    the records that are readable, because one damaged file must not leave every
+    other daemon running.  The error names the path and the repair.
     """
     found: list[ServerRecord] = []
+    damaged: list[DamagedRecord] = []
     for path in sorted(_sub("servers").glob("*.json")):
-        record = _read_json_dataclass(path, _record_from)
+        try:
+            record = _read_json_dataclass(path, _record_from)
+        except DamagedRecord as exc:
+            logger.error("%s", exc)
+            damaged.append(exc)
+            continue
         if record is not None:
             found.append(record)
-    return found
+    return found, damaged
 
 
 #: The largest pid this platform's process table can hold.  POSIX's `pid_t` is
@@ -378,8 +392,20 @@ def _record_from(raw: dict[str, Any]) -> ServerRecord:
 
 
 def write_record(record: ServerRecord) -> None:
-    """Record a running server, atomically — `_write_json_atomic` is the how."""
-    _write_json_atomic(record_path(record.url), record)
+    """Record a running server, atomically; **a record that did not land fails**.
+
+    The record is how `status` sees the server and how `down` has a pid to stop.
+    A server whose record cannot be written is a daemon nobody can manage, so
+    the start fails with the path and the repair rather than continuing
+    unrecorded — the same rule the client record already keeps.
+    """
+    path = record_path(record.url)
+    if not _write_json_atomic(path, record):
+        raise OSError(
+            f"could not write the server record at {path}; a server that cannot "
+            f"be recorded cannot be found by `slife2 status` or stopped by "
+            f"`slife2 down` — fix the path and restart"
+        )
 
 
 def _remove(path: Path) -> None:
@@ -472,7 +498,7 @@ def read_claim(name: str) -> AgentClaim | None:
 
 
 def write_claim(claim: AgentClaim) -> None:
-    """Claim an agent name, atomically.
+    """Claim an agent name, atomically; **a claim that did not land fails**.
 
     `_write_json_atomic` is the mechanic; what has to stay said here is *why
     this file of all of them* needs it.  This is the one two instances race
@@ -481,8 +507,17 @@ def write_claim(claim: AgentClaim) -> None:
     against a name, it fails to parse one and takes the name for free.  The
     window is small and the failure is exactly the one this file exists to
     prevent.
+
+    The kernel lock is the authority on the name, but the claim carries the
+    holder and the `headless` fact the prompt reads; a start that cannot write
+    it would run with an identity nobody can describe.  It fails, with the path.
     """
-    _write_json_atomic(agent_claim_path(claim.name), claim)
+    path = agent_claim_path(claim.name)
+    if not _write_json_atomic(path, claim):
+        raise OSError(
+            f"could not claim agent {claim.name!r} at {path}; fix the path and "
+            f"restart"
+        )
 
 
 def clear_claim(name: str) -> None:
@@ -1181,25 +1216,34 @@ def terminate(pid: int, *, grace: float | None = None) -> bool:
     signal and hold no state worth flushing — they are stateless by design — so
     a kind shutdown would only be ceremony.
 
-    **A `taskkill` that failed to run does not fail the stop, and that is a
-    registered fallback.**  The Windows branch suppresses `OSError` and
-    `SubprocessError` and then polls the pid, so a `taskkill` that could not be
-    launched raises nothing out of `stop`.  *Gives up:* why the force failed —
-    the caller learns only that the process is still alive, not that `taskkill`
-    was unavailable.  *Does not cover:* a process that survives the poll, which
-    this reports as `False` and `stop` reports as a server it could not stop.
-    *Failure goes:* the still-alive pid the caller polls (SDD Appendix C).
+    **A `taskkill` that failed to run does not fail the stop.**  The Windows
+    branch catches `OSError` and `SubprocessError`, names the failure in the
+    log, and then polls the pid — the process may still go, and the caller's
+    question is whether it did.  *Does not cover:* a process that survives the
+    poll, which this reports as `False` and `stop` reports as a server it could
+    not stop.  *Failure goes:* the warning naming the pid and the reason, and
+    the still-alive pid the caller polls (SDD Appendix C).
     """
     if not pid_alive(pid):
         return True
 
     grace = _T.timeouts.grace.kill if grace is None else grace
     if sys.platform == "win32":
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
+        try:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
                 timeout=grace + _T.timeouts.ready.reap,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            # **The stop still polls, but the cause is no longer silent.**  The
+            # old `suppress` left `down` saying only "pid did not exit", which
+            # cannot be told from a process that refused to die.  A `down` is a
+            # client process, so this warning is on the terminal that asked.
+            logger.warning(
+                "taskkill could not run for pid %d (%s); polling the pid instead",
+                pid,
+                exc,
             )
     else:
         import signal

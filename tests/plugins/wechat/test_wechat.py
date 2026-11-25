@@ -446,6 +446,8 @@ async def test_a_login_whose_save_failed_still_polls(
     assert facts["connected"] is True
     assert facts["polling"] is True, "the status reads the loop, not the token alone"
     assert facts["error"] == ""
+    assert facts["login_saved"] is False, "the login file did not land"
+    assert str(session_path("jack")) in facts["login_error"]
     assert any(
         str(session_path("jack")) in record.getMessage() for record in caplog.records
     ), "the failed save left nothing to find"
@@ -916,6 +918,41 @@ async def test_a_cursor_that_could_not_be_written_is_said_out_loud(
     assert any(
         str(session_path("jack")) in record.getMessage() for record in caplog.records
     ), "a cursor that could not be saved left nothing to find"
+
+
+@pytest.mark.asyncio
+async def test_a_cursor_file_that_refuses_every_retry_stops_the_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Damage, not a retry for ever.**  The cursor is the stream's place; a
+    file that has refused `CURSOR_FAILURES` writes is not going to hold it, and
+    continuing would keep answering the replay window on every restart.  The
+    poll stops, and the status names the path and says `cursor_saved: false`.
+    """
+    signed_in("jack")
+    made = rig(monkeypatch)
+
+    def refuse(agent: str, session: Mapping[str, Any]) -> Path:
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr(wechat, "save_session", refuse)
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: session.client.is_logged_in)
+        made.bridge.cursor = "cursor-1"
+        session.client.updates_buf = "cursor-1"
+        for _ in range(wechat.CURSOR_FAILURES):
+            made.plugin._persist(session)
+        facts = await made.plugin.status(session)
+    finally:
+        await made.close()
+
+    assert session.cursor_terminal is True
+    assert session.cursor_failures >= wechat.CURSOR_FAILURES
+    assert str(session_path("jack")) in session.cursor_error
+    assert facts["cursor_saved"] is False
+    assert "cursor" in facts["cursor_error"]
 
 
 @pytest.mark.asyncio

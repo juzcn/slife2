@@ -205,6 +205,13 @@ _STRINGS: dict[str, dict[str, str]] = {
         "en": "{name} offline",
         "zh": "{name} 离线",
     },
+    # A fallback fired and the person should know: `effect` is what they can no
+    # longer count on, `reason` is the cause and the repair.  Once per
+    # condition (`slife2.libs.harness.degrade`), never per poll.
+    "degraded": {
+        "en": "! {effect} — {reason}",
+        "zh": "！{effect} — {reason}",
+    },
     # ── a restored conversation (`slife2.tui.restore`) ────────────────────
     # One stored row the screen could not read.  The row itself goes to the log;
     # this is what the person is told, because the note under it counts what did
