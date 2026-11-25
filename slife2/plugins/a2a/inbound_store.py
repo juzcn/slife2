@@ -88,24 +88,17 @@ class InboundTask:
     """Which ``SendMessage`` this task is on (1 for the first)."""
 
     seen_ids: list[str] = field(default_factory=list)
-    seen_texts: list[str] = field(default_factory=list)
     updated: float = field(default_factory=time.monotonic)
 
     def seen(self, message_id: str) -> bool:
         """Whether this message id has already been accepted for this task."""
         return bool(message_id) and message_id in self.seen_ids
 
-    def last_text(self) -> str:
-        return self.seen_texts[-1] if self.seen_texts else ""
-
-    def remember(self, message_id: str, text: str) -> None:
+    def remember(self, message_id: str) -> None:
         """Record one accepted message for retry detection."""
         if message_id and message_id not in self.seen_ids:
             self.seen_ids.append(message_id)
             del self.seen_ids[:-_MAX_SEEN]
-        if text and (not self.seen_texts or self.seen_texts[-1] != text):
-            self.seen_texts.append(text)
-            del self.seen_texts[:-_MAX_SEEN]
 
 
 class InboundStore:
@@ -124,7 +117,6 @@ class InboundStore:
         context_id: str = "",
         kind: str = "task",
         message_id: str = "",
-        text: str = "",
     ) -> InboundTask:
         """A task just arrived — this process now holds its bridge."""
         if not task_id:
@@ -141,11 +133,11 @@ class InboundStore:
             self._tasks[task_id] = task
         elif context_id and not task.context_id:
             task.context_id = context_id
-        task.remember(message_id, text)
+        task.remember(message_id)
         task.updated = time.monotonic()
         return task
 
-    def begin_round(self, task_id: str, message_id: str, text: str) -> bool:
+    def begin_round(self, task_id: str, message_id: str) -> bool:
         """Resume an interrupted task on a continuation's new round."""
         task = self._tasks.get(task_id)
         if task is None or task.state != INTERRUPTED:
@@ -154,7 +146,7 @@ class InboundStore:
         task.interrupt = ""
         task.question = ""
         task.round += 1
-        task.remember(message_id, text)
+        task.remember(message_id)
         task.updated = time.monotonic()
         return True
 

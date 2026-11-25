@@ -239,11 +239,11 @@ def estimate_message_tokens(message: Mapping[str, Any]) -> int:
 
 
 def estimate_turn_tokens(messages: Sequence[Mapping[str, Any]]) -> int:
-    """About how many tokens one turn costs, floored at one.
+    """About how many tokens one turn costs: the sum of its messages.
 
-    The floor is load-bearing in the direction people get wrong:
-    a turn that weighs nothing is a turn every budget can afford, so a recall
-    would fill its window with empty turns and report success.  One is a lie, but
-    it is a lie that bounds the count.
+    **No floor.**  A turn with nothing in it costs nothing, and saying so is
+    true; every writer here records the turn's opening message, so a zero
+    weight means a list this build did not write.  The budget that reads this
+    walks a bounded candidate list, so a free turn cannot make it loop.
     """
-    return max(sum(estimate_message_tokens(message) for message in messages), 1)
+    return sum(estimate_message_tokens(message) for message in messages)

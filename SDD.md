@@ -3466,14 +3466,11 @@ fallbacks above.
 | A bookkeeping file is already gone | `missing_ok` | An idempotent delete is not a fallback |
 | A log cannot be rotated | Leave it in place | A startup warning; the log ceiling is diagnostic |
 | A progress line cannot be read | Drop it | The record is the channel |
-| A turn weighs less than one token | Floor at one | Nothing; the floor is the answer |
-| A tool answer is not JSON-serialisable | Render `default=str` | The rendered text the model reads |
 | A lone surrogate reaches tool text | Escape it | Nothing; the request survives |
 | Closing a link fails | Suppress the teardown error | A debug line |
 | The interface language cannot be detected | English | The window is English |
 | An inherited file-tunnel URL is present | Treat it as active | `tunnel_status.inherited`; an exposure refuses |
 | A Windows job forbids breakaway | Start without it | A startup warning |
-| A continuation has no `messageId` | Compare the request text with the task's last text | A warning and a window note |
 | `wslinfo --networking-mode` cannot answer | Guess from `/sys/class/net/loopback0` | `slife2 status`'s warnings |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | `slife2 status`'s warnings |
 | A tool fails | `ok: false` with text the model reads | The model reads the text |

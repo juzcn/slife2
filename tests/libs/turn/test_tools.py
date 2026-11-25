@@ -14,6 +14,8 @@ what they *do* are next to it.  See `tests/plugins/skills/test_skills_server.py`
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from slife2.libs.plugin.protocol import UnreadableAnswer
@@ -26,6 +28,7 @@ from slife2.libs.turn.tools import (
     Tool,
     ToolFailed,
     ToolRegistry,
+    as_tool_text,
 )
 
 pytestmark = pytest.mark.unit
@@ -51,6 +54,10 @@ async def _unreadable(_arguments: dict) -> str:
     raise UnreadableAnswer("the toolhub did not return a tool list")
 
 
+async def _unrenderable(_arguments: dict) -> dict:
+    return {"path": Path("/tmp/x")}
+
+
 def registry() -> ToolRegistry:
     return ToolRegistry(
         [
@@ -58,6 +65,7 @@ def registry() -> ToolRegistry:
             Tool(spec=spec("raises"), run=_raises),
             Tool(spec=spec("reports"), run=_reports),
             Tool(spec=spec("unreadable"), run=_unreadable),
+            Tool(spec=spec("unrenderable"), run=_unrenderable),
         ]
     )
 
@@ -68,6 +76,7 @@ def test_specs_are_advertised() -> None:
         "raises",
         "reports",
         "unreadable",
+        "unrenderable",
     }
 
 
@@ -345,3 +354,26 @@ async def test_a_harness_failure_is_not_read_as_a_tool_that_said_no() -> None:
     mismatch must fail the turn (SDD Appendix C)."""
     with pytest.raises(UnreadableAnswer):
         await registry().execute(ToolCall(id="c1", name="unreadable"))
+
+
+def test_an_answer_json_cannot_encode_is_refused_not_rendered() -> None:
+    """**A tool body returning an object JSON does not know is a defect.**
+
+    Every tool that crosses MCP is JSON already, and the in-process bodies
+    answer primitives, so this can only be our own tool body handing back a
+    `Path`, `bytes`, `datetime` or a dataclass.  `default=str` rendered it as
+    `"PosixPath('/tmp/x')"` — a plausible answer the model reads and nobody is
+    told is wrong.
+    """
+    with pytest.raises(TypeError):
+        as_tool_text({"path": Path("/tmp/x")})
+
+
+@pytest.mark.asyncio
+async def test_an_unrenderable_answer_reaches_the_model_as_an_error() -> None:
+    """The registry's contract still holds: the defect is an error result, not
+    an exception that ends the turn — but it is visibly an error, never a
+    rendered answer."""
+    text, ok = await registry().execute(ToolCall(id="c1", name="unrenderable"))
+    assert ok is False
+    assert text.startswith("Error: TypeError:"), text

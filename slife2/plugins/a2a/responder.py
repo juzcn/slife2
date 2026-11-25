@@ -11,10 +11,11 @@ needs and upstream does not have:
    stream-final but **not terminal**: no artifact and no terminal status are
    published, and the state stays ``interrupted``.
 2. A new ``SendMessage`` with the same ``Task.id`` and ``context_id`` continues
-   an interrupted task.  A retry (the same ``messageId``, or the same text when
-   a peer does not send one) replays the current state instead of running the
-   handler again.  The upstream ``Task.id``-only dedup cannot tell the two
-   apart, which is why it is replaced.
+   an interrupted task.  A retry (the same ``messageId``) replays the current
+   state instead of running the handler again; a message that carries no id is
+   refused rather than guessed at, because a continuation is only a new
+   ``Message`` with a new id.  The upstream ``Task.id``-only dedup cannot tell
+   the two apart, which is why it is replaced.
 3. A terminal task accepts no new message: a new ``messageId`` is refused with
    ``-32602``; a retry replays the stored artifact + terminal status.
 4. ``CancelTask`` on an interrupted task is a withdrawal (there is no in-flight
@@ -131,8 +132,8 @@ class StreamCallback(Protocol):
     async def __call__(self, message: str, *, type: str = "text") -> None: ...
 
 
-def _raw_message(data: dict) -> tuple[str, str, str]:
-    """``(messageId, text, contextId)`` from a raw SendMessage payload.
+def _raw_message(data: dict) -> tuple[str, str]:
+    """``(messageId, contextId)`` from a raw SendMessage payload.
 
     `A2ARequest.from_json` deliberately discards ``messageId`` (the profile's
     SDK does not need it), but the retry/continuation decision does: a retry
@@ -147,14 +148,8 @@ def _raw_message(data: dict) -> tuple[str, str, str]:
         message = {}
     message_id = message.get("messageId")
     context_id = message.get("contextId")
-    parts = message.get("parts")
-    text = ""
-    if isinstance(parts, list) and parts and isinstance(parts[0], dict):
-        value = parts[0].get("text")
-        text = value if isinstance(value, str) else ""
     return (
         message_id if isinstance(message_id, str) else "",
-        text,
         context_id if isinstance(context_id, str) else "",
     )
 
@@ -424,7 +419,7 @@ class Responder:
             )
             return
         req = result
-        message_id, text, context_id = _raw_message(data)
+        message_id, context_id = _raw_message(data)
         message_type = str(_variables(data).get("message_type") or "task_request")
 
         # The profile's binding property is advisory for transport visibility;
@@ -464,7 +459,6 @@ class Responder:
                     context_id=context_id,
                     kind="message",
                     message_id=message_id,
-                    text=text,
                 )
                 self._inbound.terminal(task_id, COMPLETED, "")
                 await self._publish_status(
@@ -500,7 +494,6 @@ class Responder:
                 context_id=context_id,
                 kind="task" if message_type != "message" else "message",
                 message_id=message_id,
-                text=text,
             )
             self._start_round(
                 client,
@@ -522,19 +515,24 @@ class Responder:
             )
             return
 
-        duplicate = bool(message_id and record.seen(message_id))
         if not message_id:
-            # **No id: the task's LAST text is the retry's fingerprint**
-            # (SDD Appendix C).  Any of the remembered texts would swallow a
-            # continuation that repeats an older round's words as a retry of
-            # that round; only the last one is what a re-send of the current
-            # request repeats.  The comparison cannot tell a re-minted retry
-            # from a continuation that repeats the text — the distinction the
-            # register gives up — so the fallback says it fired: a debug line
-            # naming the peer and the task.
-            duplicate = bool(text) and text == record.last_text()
-            if duplicate:
-                log.debug("a2a_retry_by_text task=%s peer=%s", task_id, peer)
+            # **No id: refused rather than guessed.**  A retry republishes the
+            # same serialized payload, so its id is stable; a continuation is a
+            # new Message with a new id.  Without one the two are separable only
+            # by text, and that comparison swallows a continuation repeating the
+            # last round's words as a retry — so the peer is told what is
+            # missing instead (SDD Appendix C).
+            await self._send_error(
+                client,
+                response_topic,
+                correlation,
+                A2A_INVALID_PARAMS,
+                "SendMessage has no message.messageId; a retry cannot be told "
+                "from a continuation without one — the peer must stamp it.",
+            )
+            return
+
+        duplicate = record.seen(message_id)
 
         if record.state in TERMINAL_STATUSES:
             if duplicate:
@@ -556,9 +554,8 @@ class Responder:
             # **A retry replays working; a new message is refused.**  The
             # retry is the same `messageId` — this build's requester always
             # stamps one and its ladder republishes the identical payload —
-            # or, for a peer that sends none, the last-text comparison above
-            # (SDD Appendix C).  A new id with repeated text is a new message,
-            # not a retry: the register's text fallback is the no-id case.
+            # and a message that stamps none was refused above.  A new id with
+            # repeated text is a new message, not a retry.
             if duplicate:
                 await self._publish_status(
                     client,
@@ -596,7 +593,7 @@ class Responder:
             )
             return
 
-        self._inbound.begin_round(task_id, message_id, text)
+        self._inbound.begin_round(task_id, message_id)
         record = self._inbound.get(task_id)
         if record is not None:
             self._start_round(

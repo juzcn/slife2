@@ -177,14 +177,15 @@ def test_an_image_is_charged_the_same_way_by_either_resolver(real_tokenizer) -> 
     assert image_costs() == tokens._IMAGE_TOKENS, "the real tokenizer"
 
 
-def test_a_turn_that_weighs_nothing_is_still_charged_one() -> None:
-    """The floor is load-bearing: a free turn is a turn every budget can afford.
+def test_a_turn_that_weighs_nothing_costs_nothing() -> None:
+    """The sum, not a floored sum.
 
-    The recall would fill a window with empty turns and report success, which is
-    why the floor is here rather than at each caller.
+    Every writer records a turn's opening message, so a zero weight means a
+    list this build did not write; charging it one token would be a lie about a
+    turn that carries nothing.
     """
-    assert tokens.estimate_turn_tokens([]) == 1
-    assert tokens.estimate_turn_tokens([{"role": "user", "content": ""}]) == 1
+    assert tokens.estimate_turn_tokens([]) == 0
+    assert tokens.estimate_turn_tokens([{"role": "user", "content": ""}]) == 0
 
 
 def _fresh_python(code: str) -> subprocess.CompletedProcess[str]:

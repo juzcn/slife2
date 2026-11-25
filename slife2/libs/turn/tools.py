@@ -179,12 +179,16 @@ def as_tool_text(answer: Any) -> str:
     tool's whole output once vanished from a request with nothing said.
 
     `None` is the empty string rather than the text `"null"`, which is a result
-    that is not there; everything else is JSON, with `default=str` so that an
-    object the encoder does not know becomes text instead of failing the turn
-    (SDD Appendix C's register, where what that gives up is named).  **The one
-    rewrite is a lone surrogate**, on the string path too: a provider's JSON can
-    hand us one in an argument, it is not encodable as UTF-8, and passing it
-    through made the next request fail on the transport rather than render.
+    that is not there; everything else is JSON, and **an object the encoder does
+    not know fails here rather than becoming its `str`**: every tool that
+    crosses MCP is JSON already, and the in-process bodies answer primitives,
+    so an unserialisable answer is a tool body's defect — rendered as
+    `PosixPath('/tmp/x')` it would be a plausible answer nobody is told is
+    wrong.  `ToolRegistry.execute` reports the `TypeError` as the model's error
+    result.  **The one rewrite is a lone surrogate**, on the string path too: a
+    provider's JSON can hand us one in an argument, it is not encodable as
+    UTF-8, and passing it through made the next request fail on the transport
+    rather than render.
 
     **`ensure_ascii=False`, and then a real UTF-8 encode.**  `True` would escape
     every character outside ASCII — a note written in Chinese would reach the
@@ -196,11 +200,7 @@ def as_tool_text(answer: Any) -> str:
     """
     if answer is None:
         return ""
-    text = (
-        answer
-        if isinstance(answer, str)
-        else json.dumps(answer, ensure_ascii=False, default=str)
-    )
+    text = answer if isinstance(answer, str) else json.dumps(answer, ensure_ascii=False)
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
