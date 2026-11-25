@@ -2484,6 +2484,27 @@ def _is_wsl() -> bool:
 _WSINFO_GUESSED = False
 
 
+def _loopback0_interface() -> bool:
+    """Whether mirrored mode's `loopback0` interface is present.
+
+    **A path that cannot be read is not an absent one.**  Only "no such
+    interface" answers `False`; any other failure raises, because reading it
+    as NAT would leave a WSL instance on the Windows port set — the collision
+    the port offset exists to prevent (SDD Appendix C).
+    """
+    path = Path("/sys/class/net/loopback0")
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise ConfigError(
+            f"cannot read {path}: {exc} — WSL's networking mode decides the "
+            "port offset, and an unreadable interface is not evidence of NAT"
+        ) from exc
+    return True
+
+
 def _wsl_mirrored() -> bool:
     """Whether WSL's shared loopback is in use.
 
@@ -2491,7 +2512,12 @@ def _wsl_mirrored() -> bool:
     first; `loopback0` is the interface mirrored mode creates, and is the
     fallback for a WSL that predates the tool.  Either is read once per process.
 
-    **The guess is reported, not silent.**  A wrong mode decides whether the
+    **An answer that is not one of the two modes is no answer.**  A command
+    that cannot run, exits non-zero, or prints neither `nat` nor `mirrored` is
+    "could not answer" and goes to the interface — never NAT, which is the
+    reading that collides with the Windows stack.
+
+    **The fallback is reported, not silent.**  A wrong mode decides whether the
     whole stack shifts its ports; `warnings()` carries the assumption to
     `slife2 status`, because the failure has no log line of its own.
     """
@@ -2506,10 +2532,18 @@ def _wsl_mirrored() -> bool:
                     text=True,
                     timeout=_T.timeouts.ready.probe,
                 )
-                mirrored = result.stdout.strip() == "mirrored"
             except (OSError, subprocess.SubprocessError):
+                result = None
+            answer = (
+                result.stdout.strip()
+                if result is not None and result.returncode == 0
+                else ""
+            )
+            if answer in ("nat", "mirrored"):
+                mirrored = answer == "mirrored"
+            else:
                 _WSINFO_GUESSED = True
-                mirrored = Path("/sys/class/net/loopback0").exists()
+                mirrored = _loopback0_interface()
         _MIRRORED = mirrored
     return _MIRRORED
 
@@ -2526,7 +2560,7 @@ def warnings() -> list[str]:
     if _WSINFO_GUESSED:
         found.append(
             "WSL networking mode was guessed from /sys/class/net/loopback0 "
-            "(`wslinfo --networking-mode` could not run); the port offset "
+            "(`wslinfo --networking-mode` could not answer); the port offset "
             "depends on that guess"
         )
     _, unknown_level = loglevel.configured_level()

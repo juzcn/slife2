@@ -2829,9 +2829,9 @@ would be silently reused by the first. It defaults to 100 there and `0` disables
 it. The shift is applied by the config loader, so every process resolves the same
 addresses; the MQTT broker is not shifted, because it is the mesh's rendezvous
 rather than an instance endpoint. **`wslinfo --networking-mode` is the platform's
-answer; when it cannot run, the mode is guessed from `/sys/class/net/loopback0`
-and `slife2 status` says so in `warnings`**, because that guess decides every
-port.
+answer; when it cannot answer — it cannot run, exits non-zero, or names neither
+`nat` nor `mirrored` — the mode is guessed from `/sys/class/net/loopback0` and
+`slife2 status` says so in `warnings`**, because that guess decides every port.
 
 An absent section takes its built-in default, not an error. For a capability
 whose default is empty that means *off*: no `peer_agent:` means the machine is
@@ -3474,7 +3474,7 @@ fallbacks above.
 | An inherited file-tunnel URL is present | Treat it as active | `tunnel_status.inherited`; an exposure refuses |
 | A Windows job forbids breakaway | Start without it | A startup warning |
 | A continuation has no `messageId` | Compare the request text with the task's last text | A warning and a window note |
-| `wslinfo --networking-mode` cannot run | Guess from `/sys/class/net/loopback0` | `slife2 status`'s warnings |
+| `wslinfo --networking-mode` cannot answer | Guess from `/sys/class/net/loopback0` | `slife2 status`'s warnings |
 | `SLIFE2_LOG_LEVEL` is not a level | Log at INFO and name the value | `slife2 status`'s warnings |
 | A subagent turn's answer cannot be read | The `""` is a log line only; the peer is answered by the member's own tool call | The warning naming the member |
 | A tool fails | `ok: false` with text the model reads | The model reads the text |

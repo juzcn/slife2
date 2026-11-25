@@ -8,6 +8,7 @@ that are absent rather than defaulted.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -33,6 +34,11 @@ from slife2.libs.host.config import (
     resolve_secret,
 )
 from slife2.libs.host.paths import DATA_ENV_VAR
+
+#: The real WSL mode reader, captured at import: the autouse `isolated_runtime`
+#: fixture replaces the module attribute with `lambda: False`, and the tests
+#: below are about the reader itself.
+_real_wsl_mirrored = slife2.libs.host.config._wsl_mirrored
 
 A_PROVIDER = """
 providers:
@@ -1489,6 +1495,104 @@ def test_an_offset_past_the_port_range_is_refused(
 
     with pytest.raises(ConfigError, match="is not a port"):
         load(write(tmp_path, "wsl_port_offset: 70000\n" + NETWORKS))
+
+
+@pytest.mark.parametrize("answer, expected", [("mirrored", True), ("nat", False)])
+def test_wsl_mode_comes_from_wslinfo_when_it_answers(
+    answer, expected, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The platform's own answer is used, and nothing is guessed."""
+    from slife2.libs.host import config
+
+    monkeypatch.setattr(config, "_MIRRORED", None)
+    monkeypatch.setattr(config, "_WSINFO_GUESSED", False)
+    monkeypatch.setattr(config, "_is_wsl", lambda: True)
+    monkeypatch.setattr(
+        config.subprocess,
+        "run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0], 0, answer + "\n", ""),
+    )
+
+    assert _real_wsl_mirrored() is expected
+    assert config._WSINFO_GUESSED is False
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        None,  # cannot run at all
+        subprocess.CompletedProcess([], 1, "", "boom"),  # exits non-zero
+        subprocess.CompletedProcess([], 0, "", ""),  # names no mode
+        subprocess.CompletedProcess([], 0, "nat later\n", ""),  # not a mode word
+    ],
+)
+def test_a_wsl_answer_that_is_not_a_mode_is_no_answer(
+    result, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**A failure is not a verdict.**  None of these may read as NAT.
+
+    The mode decides every port of the stack, and reading an unanswerable
+    `wslinfo` as NAT is what lets a mirrored WSL instance collide with the
+    Windows servers — so each of these falls back to the interface, reported
+    through `warnings()`.
+    """
+    from slife2.libs.host import config
+
+    monkeypatch.setattr(config, "_MIRRORED", None)
+    monkeypatch.setattr(config, "_WSINFO_GUESSED", False)
+    monkeypatch.setattr(config, "_is_wsl", lambda: True)
+    monkeypatch.setattr(config, "_loopback0_interface", lambda: True)
+
+    def run(*a, **k):
+        if result is None:
+            raise OSError("wslinfo is not installed")
+        return result
+
+    monkeypatch.setattr(config.subprocess, "run", run)
+
+    assert _real_wsl_mirrored() is True, "the interface says mirrored"
+    assert config._WSINFO_GUESSED is True
+
+
+def test_a_missing_loopback_interface_is_not_mirrored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from slife2.libs.host import config
+
+    real_stat = Path.stat
+
+    def missing(self: Path, *args, **kwargs):
+        if self.name == "loopback0":
+            raise FileNotFoundError(self)
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", missing)
+
+    assert config._loopback0_interface() is False
+
+
+def test_a_loopback_interface_that_cannot_be_read_is_not_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**A value that cannot be read is not a value that is absent.**
+
+    Reading an unreadable `/sys/class/net/loopback0` as "not mirrored" would
+    leave a mirrored WSL instance on the Windows port set; the path is named
+    as the thing to look at instead.
+    """
+    from slife2.libs.host import config
+
+    real_stat = Path.stat
+
+    def denied(self: Path, *args, **kwargs):
+        if self.name == "loopback0":
+            raise PermissionError("denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+
+    with pytest.raises(ConfigError, match="cannot read .*loopback0"):
+        config._loopback0_interface()
 
 
 def test_a_tool_servers_secrets_go_through_the_same_chain(
