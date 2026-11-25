@@ -257,6 +257,32 @@ async def test_rerank_answers_none_when_the_endpoint_has_no_cross_encoder() -> N
 
 
 @pytest.mark.asyncio
+async def test_the_connection_asks_the_embedder_for_its_reranker() -> None:
+    """**The capability is the embedder's answer, not a `getattr` probe.**
+
+    `rerank` is part of the `Embedder` contract: a provider with no
+    cross-encoder answers `None`, and a test double implements the same method.
+    The old probe made a double without it mean "no reranker", so an object
+    that forgot the method silently selected the fused order.
+    """
+
+    class Reranker:
+        identity = "stub:reranker"
+        dimension = 2
+        max_chars = 100
+
+        async def embed(self, texts: list[str]) -> list[list[float]]:
+            return [[0.0, 1.0] for _ in texts]
+
+        async def rerank(self, query, documents, top_n=None):
+            return [(0, 0.5)]
+
+    connection = EmbedderConnection(SimpleNamespace(), embedder=Reranker())
+
+    assert await connection.rerank("q", ["a"]) == [(0, 0.5)]
+
+
+@pytest.mark.asyncio
 async def test_rerank_maps_indices_back_and_sorts() -> None:
     client = _RerankClient(
         {

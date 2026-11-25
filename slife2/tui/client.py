@@ -687,14 +687,21 @@ class MCPAgentClient(_MCPClient):
         # after the call, so the connection stays: the server answered, and it
         # is the answer this build cannot read.
         payload = result.data
-        text = payload.get("text") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            raise _unreadable("answer the turn", payload)
+        text = payload.get("text")
         if not isinstance(text, str):
             raise _unreadable("answer the turn", payload)
         # **A folded reply is not a missing one**, and the flag travels with the
         # text for the same reason the text is read here rather than from the
         # events: the window has to know whether to open a block, and no event
-        # can tell it when there are none.
-        injected = bool(payload.get("injected")) if isinstance(payload, dict) else False
+        # can tell it when there are none.  The server's one reply literal
+        # always writes it, so a missing or non-bool flag is an answer this
+        # build cannot read — reading it as False draws a folded reply as its
+        # own turn.
+        injected = payload.get("injected")
+        if not isinstance(injected, bool):
+            raise _unreadable("answer the turn", payload)
         return TurnReply(text=text, injected=injected)
 
 

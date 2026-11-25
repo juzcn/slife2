@@ -118,6 +118,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
 
 import slife2.helpers.timeouts as _T
+from slife2.helpers import loglevel
 from slife2.libs.host import secrets as _secret_registry
 from slife2.libs.host.model_config import (
     API_PROTOCOLS,
@@ -927,18 +928,23 @@ def _credstore_lookup(key: str) -> str | None:
     resolves whether it was exported or stored with ``credstore set``.
 
     **No backend at all degrades to "not found"; a backend that failed does
-    not.**  credstore itself answers None when this host has no keyring — a CI
-    runner, a container — and that is the declared degrade: the chain steps past
-    it to the reference.  A keyring that *is* there and refused (locked, corrupt,
-    a platform credstore does not support) raises instead, because reading that
-    as "not found" turns a credential nobody could read into a credential that
-    is absent, and the `${VAR}` text then travels as the secret itself
-    (SDD Appendix C).  The failure lands where the secret is resolved.
+    not.**  `credstore` is a declared dependency, so the *package* is always
+    there in a working install; its `get_credential` answers None when this host
+    has no keyring — a CI runner, a container — and that is the declared
+    degrade: the chain steps past it to the reference.  A missing package is a
+    damaged installation, and its `ImportError` is the resolving operation's
+    failure rather than "this host has no store" (SDD Appendix C).  A keyring
+    that *is* there and refused (locked, corrupt, a platform credstore does not
+    support) raises instead, because reading that as "not found" turns a
+    credential nobody could read into a credential that is absent, and the
+    `${VAR}` text then travels as the secret itself.  The failure lands where
+    the secret is resolved.
+
+    The import is local rather than at module scope because every process loads
+    this module and most never resolve a secret.
     """
-    try:
-        from credstore import get_credential
-    except ImportError:
-        return None  # credstore is not installed: there is no backend to consult
+    from credstore import get_credential
+
     return get_credential(key)
 
 
@@ -954,12 +960,12 @@ def resolve_secret(value: object) -> str:
     used, with its own name intact — the API call that returns a `401` naming
     nothing is the reason (SDD Appendix C).
 
-    **A keyring that is not installed degrades; a keyring that failed does
-    not.**  With no `credstore` there is no backend to consult, and the chain
-    steps past it to the reference.  With one installed, a `get_credential`
-    that raises — the backend is locked — is allowed out: reading it as "not
-    found" would leave the `${VAR}` text to travel as the secret itself.  The
-    failure lands where the secret is resolved.
+    **A keyring backend that is absent degrades; one that failed does not.**
+    With no backend `credstore` answers None and the chain steps past it to the
+    reference.  A `get_credential` that raises — the backend is locked, or the
+    package itself is missing from a damaged installation — is allowed out:
+    reading it as "not found" would leave the `${VAR}` text to travel as the
+    secret itself.  The failure lands where the secret is resolved.
     """
     if not isinstance(value, str):
         return str(value)
@@ -1191,10 +1197,6 @@ class ModelSettings:
     #: the other two wires have no such parameter.  See
     #: `slife2.plugins.llm.anthropic_server.cache_control_parameter`.
     cache_control: str = ""
-
-    @property
-    def label(self) -> str:
-        return self.name or self.model
 
     @property
     def accepts_images(self) -> bool:
@@ -1692,13 +1694,12 @@ DEFAULT_TOOL_LOAD = 100
 #:   an `_async` call returns.  A list without them leaves a background call
 #:   running with no way to ask where it stands or stop it.
 #:
-#: **Spelled here rather than imported from the hub**, because this module is a
-#: library and `slife2.plugins.toolhub.server` is a server — the same split
-#: `slife2.plugins.toolhub.server.SKILL_USE` documents.  The two spellings are held
-#: together by `tests/libs/host/test_config.py`; the hub reads the list itself
-#: from the store (`ToolStore.autoload`), and refuses an unload of any name on
-#: it, so the tools that start loaded, the tools the budget may not evict and
-#: the tools the model may not unload are one list.
+#: **Spelled here rather than imported from the skills plugin**, because this
+#: module is a library and `slife2.plugins.skills.playbooks` is a plugin.  The
+#: two spellings are held together by `tests/libs/host/test_config.py`; the hub
+#: reads the list itself from the store (`ToolStore.autoload`), and refuses an
+#: unload of any name on it, so the tools that start loaded, the tools the
+#: budget may not evict and the tools the model may not unload are one list.
 REQUIRED_AUTOLOAD: tuple[str, ...] = (
     "tool_search",
     "tool_list",
@@ -2103,11 +2104,10 @@ class FileTunnelSettings:
         return {key: resolve_deferred(value) for key, value in found.items()}
 
 
-#: The one broker implementation this build speaks to.  `A2ASettings` defaults
-#: its `provider:` to it and both mesh sections refuse any other written name
-#: (`_MESH_FIELDS`); the plugin's own `MOSQUITTO` is the same word on the
-#: serving side, and neither imports the other — a host module must not pull in
-#: a server.
+#: The one broker implementation this build speaks to.  Both mesh sections
+#: accept a `provider:` key and refuse any other written name (`_MESH_FIELDS`);
+#: the plugin's own `MOSQUITTO` is the same word on the serving side, and
+#: neither imports the other — a host module must not pull in a server.
 _BROKER_PROVIDER = "mosquitto"
 
 
@@ -2131,14 +2131,15 @@ class A2ASettings:
     config load is the shape this project refuses: a config naming a transport
     that does not exist is a mistake in a file a person edits, and a warning on
     the way past it means the model is offered `peer_agent_*` tools for a mesh
-    that was silently switched off.  So the field is a `provider:` naming the broker
-    implementation, exactly one value is accepted, and anything else is a
-    `ConfigError` at load.  Adding a provider is a second accepted name in
-    `_MESH_FIELDS` and a driver in `slife2/a2a/`; it is not a config value.
+    that was silently switched off.  So the section takes a `provider:` key
+    naming the broker implementation, exactly one value is accepted, and
+    anything else is a `ConfigError` at load.  **The key is a constraint rather
+    than a setting**: the name is validated and not stored, because there is
+    nothing downstream for it to select.  Adding a provider is a second accepted
+    name in `_MESH_FIELDS` and a driver in `slife2/a2a/`; it is not a config
+    value.
     """
 
-    #: The broker implementation.  `mosquitto` is the only one this build has.
-    provider: str = _BROKER_PROVIDER
     #: Whether the operator wrote the section.  Not a field in the file — it is
     #: what "the section was there" means, and it is what the plugin reads to
     #: decide whether this machine is on the mesh.  Which *agents* are is the
@@ -2353,15 +2354,6 @@ class Config:
             known = ", ".join(sorted(self.servers)) or "(none)"
             raise ConfigError(f"unknown server {name!r}; known: {known}") from None
 
-    def url_for(self, reference: str = "") -> str:
-        """The endpoint serving a model reference.
-
-        The *family's* server, not the provider's: a provider has no address of
-        its own, because one process speaks one wire format for all of them.
-        """
-        _, provider, _ = self.resolve(reference)
-        return self.server(provider.api).url
-
     def plugins(self) -> list[str]:
         """Every server slife2 itself brings up, in the order it must start.
 
@@ -2537,11 +2529,11 @@ def warnings() -> list[str]:
             "(`wslinfo --networking-mode` could not run); the port offset "
             "depends on that guess"
         )
-    asked = os.environ.get("SLIFE2_LOG_LEVEL", "").strip()
-    if asked and not isinstance(getattr(logging, asked.upper(), None), int):
+    _, unknown_level = loglevel.configured_level()
+    if unknown_level:
         found.append(
-            f"SLIFE2_LOG_LEVEL={asked!r} is not a level this build knows; "
-            f"logging at INFO"
+            f"SLIFE2_LOG_LEVEL={unknown_level!r} is not a level this build "
+            f"knows; logging at INFO"
         )
     return found
 
@@ -3051,26 +3043,35 @@ def _read_broker(value: Any, where: str) -> tuple[Any, Any]:
     return found.get("host"), found.get("port")
 
 
+def _read_broker_provider(value: Any, where: str) -> None:
+    """A `provider:` naming the one broker this build speaks, and nothing stored.
+
+    **The key is a constraint, not a setting.**  It exists so a file cannot name
+    a broker this build does not implement and be answered by a mesh that is
+    silently off — the same rule `file_tunnel.default` states (SDD §12.1): a
+    name in a file a person edits is either one this build has or a mistake to
+    report.  With exactly one accepted name there is nothing for the settings to
+    carry, so the reader answers None and `parse_section` leaves the dataclass
+    alone.
+    """
+    name = read_text(value, where)
+    if name is None:
+        return None
+    if name != _BROKER_PROVIDER:
+        raise SectionError(
+            f"{where}: {name} is not a broker this build speaks to (the only "
+            f"one is {_BROKER_PROVIDER}); leave the key out, or leave the "
+            f"section out to stay off the mesh"
+        )
+    return None
+
+
 #: The keys either mesh section reads.  `peer_agent:` and `subagent:` are two
 #: namespaces on one broker (`Net`), so a `provider:`/`broker:`/`org:` means the
 #: same thing in both; `unit:` is the remote one's alone and `max_running:` the
 #: local one's, so each section adds those from its own tuple.
 _MESH_FIELDS: tuple[Field, ...] = (
-    Field(
-        "provider",
-        read_text,
-        # **An unknown `provider:` is refused rather than downgraded.**  The
-        # same rule `file_tunnel.default` states (SDD §12.1): a name in a file a
-        # person edits is either one this build has or a mistake to report.
-        # Falling back would leave `peer_agent_*` tools offered to a model for a
-        # mesh that is not running — the silence-with-tools outcome.
-        check=bound(
-            lambda name: name == _BROKER_PROVIDER,
-            "{value} is not a broker this build speaks to (the only one is "
-            + _BROKER_PROVIDER
-            + "); leave the key out, or leave the section out to stay off the mesh",
-        ),
-    ),
+    Field("provider", _read_broker_provider),
     Field("broker", _read_broker, attrs=("broker_host", "broker_port")),
     Field("org", read_text),
 )

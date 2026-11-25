@@ -60,7 +60,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 import httpx2
 
@@ -304,8 +304,6 @@ def _ngrok_tunnel_alive(public_url: str) -> bool | None:
     """
     try:
         ngrok = _import_ngrok()
-        if ngrok is None:
-            return None
         get_listeners = getattr(ngrok, "get_listeners", None)
         if get_listeners is None:
             return None
@@ -329,7 +327,6 @@ def _ngrok_tunnel_alive(public_url: str) -> bool | None:
         return None
 
 
-@runtime_checkable
 class TunnelProvider(Protocol):
     """What ``server.py`` needs from a tunnel.  See the module docstring."""
 
@@ -364,6 +361,21 @@ class TunnelProvider(Protocol):
     def reachability(self) -> bool | None: ...
 
     def is_reachable(self) -> bool: ...
+
+    @property
+    def edge_ip(self) -> str:
+        """The edge address a CLI transport is dialling, or empty when unknown."""
+        ...
+
+    @property
+    def edge_via_proxy(self) -> bool:
+        """Whether the edge address is a fake-IP proxy's answer."""
+        ...
+
+    @property
+    def binary_path(self) -> str:
+        """The program a CLI transport resolved, or empty for an SDK transport."""
+        ...
 
     @property
     def binary_source(self) -> str: ...

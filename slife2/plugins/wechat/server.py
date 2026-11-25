@@ -187,9 +187,6 @@ def render_qr(content: str) -> str:
     one is a damaged installation that fails at import with every other one,
     rather than a machine that hands back a URL as if it were a code.
     """
-    if not content:
-        return ""
-
     code = qrcode.QRCode(border=1, box_size=1)
     code.add_data(content)
     code.make(fit=True)
@@ -375,7 +372,16 @@ def _read_session(path: Path) -> tuple[dict[str, Any], str]:
     except Exception as e:  # noqa: BLE001 — a corrupt cache is a cache miss
         logger.warning("wechat session %s could not be read: %s; ignoring it", path, e)
         return {}, f"the saved login at {path} could not be read ({e})"
-    return (raw if isinstance(raw, dict) else {}), ""
+    if not isinstance(raw, dict):
+        # **A document that parses but is not a login is damage too.**  The only
+        # writer is `save_session`, which writes a mapping; a list, a scalar or
+        # an empty file is a file this build did not write, and answering {}
+        # without a note would tell somebody who already scanned to scan a first
+        # code — the exact reading the exception branch above refuses.
+        note = f"the saved login at {path} is not a login record"
+        logger.warning("wechat session %s is not a login record; ignoring it", path)
+        return {}, note
+    return raw, ""
 
 
 def save_session(agent: str, session: Mapping[str, Any]) -> Path:

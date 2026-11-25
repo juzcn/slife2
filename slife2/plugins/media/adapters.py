@@ -35,7 +35,7 @@ import re
 import secrets
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol
 
 import httpx2
 
@@ -295,7 +295,6 @@ class _HttpClientMixin:
             self._client = None
 
 
-@runtime_checkable
 class MediaAdapter(Protocol):
     """What one provider's endpoint can be asked for.
 

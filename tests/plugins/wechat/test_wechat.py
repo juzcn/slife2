@@ -634,7 +634,6 @@ def test_the_qr_is_drawn_as_something_that_can_be_scanned() -> None:
 
     assert len(drawn.splitlines()) > 5
     assert set(drawn) & {"█", "▀", "▄"}
-    assert render_qr("") == ""
 
 
 # --- messages become turns ----------------------------------------------------
@@ -1627,6 +1626,30 @@ async def test_a_damaged_login_file_is_named_rather_than_read_as_no_login(
     # `error` is the note, and an empty one is "nothing was ever saved" — so a
     # damaged file has to fill it or the two read alike.
     assert "could not be read" in answer["error"]
+    assert "wechat.yaml" in answer["error"], "the file at fault is named"
+
+
+@pytest.mark.asyncio
+async def test_a_login_file_that_parses_to_a_non_mapping_is_damage_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A list parses, but it is not a login this build wrote.
+
+    The only writer is `save_session`, which writes a mapping, so answering
+    `{}` with no note here told somebody who already scanned to scan a first
+    code — the same damage-read-as-absence the parse failure refuses.
+    """
+    path = session_path("jack")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("- not\n- a login\n", encoding="utf-8")
+    made = rig(monkeypatch)
+    async with Client(
+        served(http=made.bridge, deliver=made.delivery, note=made.notes)
+    ) as client:
+        answer = await ask(client, "wechat_check_status")
+
+    assert answer["connected"] is False
+    assert "not a login record" in answer["error"]
     assert "wechat.yaml" in answer["error"], "the file at fault is named"
 
 

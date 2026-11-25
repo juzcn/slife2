@@ -99,23 +99,9 @@ from slife2.plugins.a2a.mesh import (
     safe_name,
 )
 from slife2.plugins.a2a.server import (
-    CHANNEL,
     FORGET,
     JOIN,
     MAX_QUEUED,
-    PEER_BROADCAST,
-    PEER_CANCEL_TASK,
-    PEER_CONTINUE_TASK,
-    PEER_GROUP_LEAVE,
-    PEER_GROUP_LIST,
-    PEER_GROUP_MEMBER_LIST,
-    PEER_GROUP_REMOVE,
-    PEER_GROUP_SEND_MESSAGE,
-    PEER_GROUP_SET,
-    PEER_LIST,
-    PEER_SEND_MESSAGE,
-    PEER_TASK_LIST,
-    PEER_TASK_RESPONSE,
     USED,
     WINDOW,
     Session,
@@ -130,6 +116,24 @@ from slife2.plugins.a2a.task_store import TaskStore, get_store
 from slife2.tui.client import MCPMeshClient
 
 pytestmark = pytest.mark.unit
+
+#: The remote network's names, derived the way every registration derives them
+#: (`Net.tool`).  They are the tests' aliases rather than production constants:
+#: a second spelling in the server was one more list to keep in step.
+CHANNEL = REMOTE.channel
+PEER_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
+PEER_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
+PEER_TASK_RESPONSE = REMOTE.tool(TASK_RESPONSE)
+PEER_CONTINUE_TASK = REMOTE.tool(CONTINUE_TASK)
+PEER_LIST = REMOTE.tool(LIST)
+PEER_BROADCAST = REMOTE.tool(BROADCAST)
+PEER_TASK_LIST = REMOTE.tool(TASK_LIST)
+PEER_GROUP_SET = REMOTE.tool(GROUP_SET)
+PEER_GROUP_LIST = REMOTE.tool(GROUP_LIST)
+PEER_GROUP_MEMBER_LIST = REMOTE.tool(GROUP_MEMBER_LIST)
+PEER_GROUP_REMOVE = REMOTE.tool(GROUP_REMOVE)
+PEER_GROUP_LEAVE = REMOTE.tool(GROUP_LEAVE)
+PEER_GROUP_SEND_MESSAGE = REMOTE.tool(GROUP_SEND_MESSAGE)
 
 AGENT = "jack"
 PEER = "jill"
@@ -4651,7 +4655,6 @@ def test_a_corrupt_group_file_is_set_aside_not_overwritten(tmp_path: Path) -> No
     store = group_store.GroupStore.load(path)
 
     assert store.groups == {}
-    assert store.quarantined is True
     assert ".corrupt" in store.load_error and "repair" in store.load_error
     assert not path.exists(), "the unreadable file was left where a write would meet it"
     assert path.with_name("groups.yaml.corrupt").read_text(encoding="utf-8") == (
@@ -4674,10 +4677,57 @@ def test_a_second_corruption_does_not_destroy_the_first_preserved_copy(
     store = group_store.GroupStore.load(path)
 
     assert store.groups == {}
-    assert store.quarantined is True
     assert store.load_error, "the refusal is visible to every mutation"
     assert corrupt.read_text(encoding="utf-8") == "the first damage"
     assert path.read_text(encoding="utf-8") == "groups: [also broken"
+
+
+def test_an_unreadable_group_entry_quarantines_the_file_not_just_the_entry(
+    tmp_path: Path,
+) -> None:
+    """**One bad entry is damage to the file, not a group to skip.**
+
+    The file is machine-written, so an entry this build cannot read is a file
+    this build did not write.  Skipping it left the other groups in memory and
+    the next successful save rewrote the file without it — damage made
+    permanent by the first event after load (SDD Appendix C).
+    """
+    path = tmp_path / "groups.yaml"
+    path.write_text(
+        "version: 1\n"
+        "groups:\n"
+        "  team:\n"
+        "    gid: g1\n"
+        "    owner: jack\n"
+        "    members: [jack]\n"
+        "    updated: now\n"
+        "  broken: not-a-mapping\n",
+        encoding="utf-8",
+    )
+
+    store = group_store.GroupStore.load(path)
+
+    assert store.groups == {}, "the good entry is not served beside the damage"
+    assert "broken" in store.load_error
+    assert path.with_name("groups.yaml.corrupt").is_file(), "the bytes survive"
+
+
+def test_an_unreadable_tombstone_quarantines_the_file(tmp_path: Path) -> None:
+    """A tombstone is machine-written too; a broken one is the file's damage."""
+    path = tmp_path / "groups.yaml"
+    path.write_text(
+        f"version: {group_store.SCHEMA_VERSION}\n"
+        "groups: {}\n"
+        "tombstones:\n"
+        "  - gid: g1\n",
+        encoding="utf-8",
+    )
+
+    store = group_store.GroupStore.load(path)
+
+    assert store.groups == {}
+    assert "tombstone" in store.load_error
+    assert path.with_name("groups.yaml.corrupt").is_file()
 
 
 def test_a_group_message_teaches_the_group_and_is_delivered() -> None:

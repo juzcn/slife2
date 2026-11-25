@@ -99,6 +99,7 @@ class FakeTunnel:
         self.edge_ip = ""
         self.edge_via_proxy = False
         self.binary_path = ""
+        self.binary_source = ""
 
     @property
     def is_active(self) -> bool:
@@ -635,6 +636,27 @@ async def test_status_names_the_program_that_actually_ran() -> None:
         reported = await ask(client, "tunnel_status")
 
     assert '"binary": "/opt/cf/cloudflared"' in reported
+
+
+@pytest.mark.asyncio
+async def test_status_reports_the_edge_and_the_binary_source() -> None:
+    """**The facts are the provider's own**, read directly from the contract.
+
+    `edge_ip`, `edge_via_proxy` and `binary_source` were probed with `getattr`
+    so a double missing one reported "not observed"; every provider has them,
+    and a missing one is now an error rather than a quieter answer.
+    """
+    tunnel = FakeTunnel()
+    tunnel.edge_ip = "203.0.113.7"
+    tunnel.edge_via_proxy = True
+    tunnel.binary_source = "guessed"
+
+    async with Client(server_for(tunnel)) as client:
+        reported = await ask(client, "tunnel_status")
+
+    assert '"edge_ip": "203.0.113.7"' in reported
+    assert '"edge_via_proxy": true' in reported
+    assert '"binary_source": "guessed"' in reported
 
 
 @pytest.mark.asyncio

@@ -527,6 +527,12 @@ class StubEmbedder:
             vectors.append(counts)
         return vectors
 
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]] | None:
+        """No cross-encoder: the contract's capability answer, not an error."""
+        return None
+
 
 async def keep_the_context(
     agent: str, subagent: str, model: str, messages: list[Any], *, usage: str = ""
@@ -565,6 +571,11 @@ class FailingEmbedder:
     message: str = "the embedding endpoint is down"
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError(self.message)
+
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]] | None:
         raise RuntimeError(self.message)
 
 

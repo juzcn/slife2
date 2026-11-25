@@ -1074,7 +1074,7 @@ async def test_a_waiter_keeps_the_lock_its_holder_is_about_to_release(
 
     async def holder(tag: str, inside: asyncio.Event) -> None:
         async with RunLocks.held(locks, store, "nightly"):
-            seen[tag] = locks.for_task(store, "nightly")
+            seen[tag] = locks._locks[key]
             inside.set()
             await release.wait()
 

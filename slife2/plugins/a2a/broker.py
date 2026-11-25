@@ -72,7 +72,7 @@ from slife2.libs.host.runtime import (
 logger = logging.getLogger(__name__)
 
 #: The broker binary, and the only provider this build has
-#: (`A2ASettings.provider` refuses anything else at config load).
+#: (`provider:` in both mesh sections refuses anything else at config load).
 MOSQUITTO = "mosquitto"
 
 #: What the broker is called in the records and in what `stop` reports — the

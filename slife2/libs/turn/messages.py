@@ -37,13 +37,14 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 
 class UnreadableMessage(ValueError):
-    """A message on the wire carries no readable role.
+    """A message carries no readable role, or no readable tool call.
 
     **Damage, not a gap to infer.**  The sender wrote a role this build does not
-    know, or none at all; guessing it would give the model history a shape
-    nobody stated.  The turn fails with the message, and the sender's build is
-    what needs repairing.  A stored body with the same damage is caught at the
-    row (`slife2.libs.store.db._readable_message`).
+    know, a `tool_calls` entry that is not an object, or neither field at all;
+    guessing would give the model history a shape nobody stated.  The turn fails
+    with the message, and the sender's build is what needs repairing.  A stored
+    body with the same damage is caught at the row
+    (`slife2.libs.store.db._readable_message`).
     """
 
 

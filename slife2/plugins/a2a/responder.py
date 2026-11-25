@@ -29,7 +29,6 @@ the responder read one answer to "what is this task now".
 
 from __future__ import annotations
 
-import abc
 import asyncio
 import json
 import logging
@@ -189,10 +188,13 @@ def _wire_outcome(record: InboundTask) -> str:
     return record.interrupt if record.state == INTERRUPTED else record.state
 
 
-class Responder(abc.ABC):
-    """Base class for the plugin's agents.
+class Responder:
+    """The protocol engine: rounds, continuation, terminal policy and the card.
 
-    Subclass and implement :meth:`on_request`; call :meth:`run`.
+    **A plain base, not an ABC.**  `MeshResponder` is the one implementation and
+    the only subclass; the abstract machinery bought an instantiation check no
+    caller ran, and the hook is stated by the engine's own call rather than by a
+    decorator.  A second transport implements :meth:`on_request` the same way.
     """
 
     def __init__(
@@ -216,7 +218,6 @@ class Responder(abc.ABC):
         self._rounds: dict[str, asyncio.Task] = {}
         self._stopping = False
 
-    @abc.abstractmethod
     async def on_request(
         self,
         request: A2ARequest,
@@ -224,7 +225,11 @@ class Responder(abc.ABC):
         *,
         continuation: bool = False,
     ) -> RoundOutcome:
-        """Handle one round.  ``continuation`` is true for a resumed task."""
+        """Handle one round.  ``continuation`` is true for a resumed task.
+
+        `MeshResponder` implements this; nothing else calls the base.
+        """
+        raise NotImplementedError
 
     async def on_cancel(self, task_id: str, peer: str) -> None:  # noqa: B027 - a no-op default hook, not an abstract obligation
         """A peer withdrew an interrupted task; the harness may want to know."""

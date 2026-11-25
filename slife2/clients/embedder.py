@@ -406,15 +406,12 @@ class EmbedderConnection:
     ) -> list[tuple[int, float]] | None:
         """The reranker this provider has, or `None` when it has none.
 
-        The injected test embedder is asked the same way: a double that can
-        rerank answers, and one that cannot is a provider without a
-        cross-encoder rather than an error.
+        **`rerank` is part of the embedder contract** (`slife2.libs.store.index`):
+        a provider with no cross-encoder answers `None`, and a test double is a
+        provider of that contract rather than an object this call probes.
         """
         embedder = await self.get()
-        method = getattr(embedder, "rerank", None)
-        if method is None:
-            return None
-        return await method(query, documents, top_n)
+        return await embedder.rerank(query, documents, top_n)
 
     async def close(self) -> None:
         if self._client is not None:

@@ -38,6 +38,7 @@ widget.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -81,6 +82,8 @@ from slife2.libs.turn import plan
 from slife2.libs.turn.context import context_usage
 from slife2.libs.turn.events import ToolCallFinished, ToolCallStarted
 from slife2.tui.theme import GLYPHS, PALETTE
+
+logger = logging.getLogger(__name__)
 
 #: Every marker this window knows how to take back off, handed to `strip_marker`
 #: together.  A marker that is not in here is one this window does not know
@@ -858,7 +861,14 @@ class ChatView(VerticalScroll):
         # cannot happen.  The map is cleared as each turn opens (`add_user`), so
         # a call id reused by a later turn cannot find the earlier panel either.
         widget = self._tools.pop(call_id, None)
-        if widget is None:  # pragma: no cover - a result without a start
+        if widget is None:
+            # **A result with no panel is said, not dropped.**  A live pair
+            # always has its start (the tap replays from the beginning), so this
+            # is a replayed transcript with a duplicate call id or a process
+            # that joined after the start.  There is no panel to complete; the
+            # result still belongs in the conversation, and the line is what
+            # makes the missing panel findable.
+            logger.warning("tool result without a panel: call_id=%s", call_id)
             return
         # `ok` is the positive phrasing and `set_complete` wants the negative
         # one.  Naming both ends after the same thing is how these get swapped;

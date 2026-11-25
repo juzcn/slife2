@@ -418,13 +418,13 @@ def require(source: Path, home: Path) -> int:
     _add(needed, hints, "uv", "bootstrap")
     _add(needed, hints, "python", "bootstrap")
 
-    if config.peer_agent.configured and config.peer_agent.provider == "mosquitto":
-        _add(needed, hints, "mosquitto", "peer_agent.provider")
-    if (
-        config.subagent.network.configured
-        and config.subagent.network.provider == "mosquitto"
-    ):
-        _add(needed, hints, "mosquitto", "subagent.provider")
+    # **A configured mesh means the one broker this build speaks.**  `provider:`
+    # is validated at load and only `mosquitto` is accepted, so there is no
+    # second value to compare against here.
+    if config.peer_agent.configured:
+        _add(needed, hints, "mosquitto", "peer_agent")
+    if config.subagent.network.configured:
+        _add(needed, hints, "mosquitto", "subagent")
 
     # The provider classes own the default binary names; reading them here is
     # what keeps this helper from spelling `ssh`/`cloudflared` a second time.

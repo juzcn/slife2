@@ -8,6 +8,7 @@ that are absent rather than defaulted.
 from __future__ import annotations
 
 import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -121,7 +122,7 @@ def test_the_defaults_resolve() -> None:
     assert model.model == "deepseek-flash"
     # A provider has no address of its own: it is reached through the server for
     # its protocol, which one process speaks for every provider that uses it.
-    assert config.url_for("deepseek/deepseek-flash").startswith("http://")
+    assert config.server(provider.api).url.startswith("http://")
 
 
 def test_every_api_has_a_backend_module() -> None:
@@ -201,10 +202,8 @@ def test_a_name_the_model_may_not_unload_is_spelled_on_both_sides() -> None:
     from slife2.libs.host.config import REQUIRED_AUTOLOAD
     from slife2.plugins.skills import playbooks as skills
     from slife2.plugins.skills.server import CONFIG_KEY, SOURCE
-    from slife2.plugins.toolhub.server import SKILL_USE
 
-    assert SKILL_USE == skills.USE_TOOL
-    assert SKILL_USE in REQUIRED_AUTOLOAD
+    assert skills.USE_TOOL in REQUIRED_AUTOLOAD
 
     # And the two ids a declared row must keep apart: the source is what the
     # catalogue files the rows under and the key is what the launcher starts.
@@ -295,7 +294,7 @@ def test_a_provider_carries_its_credentials_and_its_models(tmp_path) -> None:
     assert provider.base_url == "https://example.test/v1"
     assert list(provider.models) == ["big", "small"]
     # ...and it is reached through the server for its protocol.
-    assert config.url_for("local/big") == config.server("openai-completions").url
+    assert config.server(provider.api).url == config.server("openai-completions").url
 
 
 def test_a_model_keeps_only_what_was_configured(tmp_path) -> None:
@@ -340,9 +339,8 @@ providers:
         load(path)
 
 
-def test_a_model_name_falls_back_to_its_id(tmp_path) -> None:
+def test_a_model_entry_keeps_its_input(tmp_path) -> None:
     provider = load(write(tmp_path, A_PROVIDER)).provider("local")
-    assert provider.model("small").label == "small"
     assert provider.model("small").input == ("text",)
 
 
@@ -1032,7 +1030,7 @@ def test_a_reference_is_provider_slash_model(tmp_path) -> None:
     config = load(write(tmp_path, A_PROVIDER))
     name, provider, model = config.resolve("local/big")
     assert (name, model.model) == ("local", "big")
-    assert config.url_for("local/big") == config.server("openai-completions").url
+    assert config.server(provider.api).url == config.server("openai-completions").url
 
 
 def test_a_bare_provider_name_means_its_first_model(tmp_path) -> None:
@@ -1296,6 +1294,22 @@ def test_no_keyring_at_all_still_degrades_to_the_reference(
     assert resolve_secret("${SLIFE2_TEST_KEY}") == "${SLIFE2_TEST_KEY}"
 
 
+def test_a_missing_credstore_is_damage_not_an_absent_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The package is a declared dependency; only its backend may be absent.**
+
+    The lookup used to catch `ImportError` and answer None, so an installation
+    missing `credstore` read as "this host has no keyring" and every `${VAR}`
+    stayed a literal.  A missing declared package is a damaged installation and
+    its ImportError is the resolving operation's failure (SDD Appendix C).
+    """
+    monkeypatch.setitem(sys.modules, "credstore", None)
+    monkeypatch.delenv("SLIFE2_TEST_KEY", raising=False)
+    with pytest.raises(ImportError):
+        resolve_secret("${SLIFE2_TEST_KEY}")
+
+
 def test_reference_embedded_in_a_larger_string(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SLIFE2_TEST_HOST", "example.test")
     assert resolve_secret("https://${SLIFE2_TEST_HOST}/v1") == "https://example.test/v1"
@@ -1375,6 +1389,24 @@ subagent:
 peer_agent:
   provider: mosquitto
 """
+
+
+def test_the_broker_provider_key_is_a_constraint_not_a_setting(tmp_path) -> None:
+    """**`provider:` validates and is not stored.**
+
+    `mosquitto` is the only broker this build speaks, so the name has nothing to
+    select: a stored field would be a value no reader could use (and the
+    installer's old comparison was against its only possible value).
+    """
+    config = load(write(tmp_path, NETWORKS))
+    assert config.peer_agent.configured is True
+    assert not hasattr(config.peer_agent, "provider")
+
+
+def test_an_unknown_broker_provider_is_refused(tmp_path) -> None:
+    """A name this build does not speak is a config mistake, not a quiet mesh."""
+    with pytest.raises(ConfigError, match="not a broker this build speaks"):
+        load(write(tmp_path, NETWORKS.replace("mosquitto", "rabbitmq")))
 
 
 def test_wsl_mirrored_networking_moves_every_server_port(

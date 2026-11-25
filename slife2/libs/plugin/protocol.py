@@ -88,6 +88,7 @@ from mcp.server.transport_security import RequestBodyLimitMiddleware
 from mcp.shared._httpx_utils import create_mcp_http_client
 
 import slife2.helpers.logcontext as logcontext
+import slife2.helpers.loglevel as loglevel
 import slife2.helpers.timeouts as _T
 import slife2.libs.host.config as config
 from slife2 import __version__
@@ -1104,7 +1105,7 @@ def serve(
     """
     host = args.host or server.host
     port = args.port or server.port
-    path = getattr(args, "path", None) or server.path
+    path = args.path or server.path
     if not is_loopback_host(host):
         raise ConfigError(
             f"{name}: {host!r} is not loopback — {LOOPBACK_BOUNDARY}; "
@@ -1152,7 +1153,10 @@ def serve(
             transport="http",
             host=host,
             port=port,
-            path=server.path,
+            # **The override, not the file's.**  `--path` is what the launcher
+            # probes, and the record above is written with it; binding
+            # `server.path` announced one URL and served another.
+            path=path,
             # **No banner, for two reasons.**  It is ~20 lines of ASCII art at
             # every server start, in a file whose first useful line is ours; and
             # `log_server_banner` calls `check_for_newer_version`, so every start
@@ -1235,17 +1239,11 @@ def _log_level() -> tuple[int, str]:
     lever — read per process, so one noisy server can be raised without turning
     DEBUG on for every server.
 
-    An unreadable value is not a reason to refuse to start: the server logs at
-    INFO and says the value was not a level (the second half of the pair, so the
-    fallback is not itself silent).
+    The reading itself is `slife2.helpers.loglevel`'s, the one decoder
+    `slife2 status` warns from as well: two rules for one environment variable
+    could have the warning name a level the daemon rejects.
     """
-    asked = os.environ.get("SLIFE2_LOG_LEVEL", "").strip()
-    if not asked:
-        return logging.INFO, ""
-    level = logging.getLevelName(asked.upper())
-    if isinstance(level, int):
-        return level, ""
-    return logging.INFO, asked
+    return loglevel.configured_level()
 
 
 def _root_handler() -> logging.Handler:

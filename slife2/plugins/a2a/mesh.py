@@ -491,18 +491,17 @@ class MeshResponder(Responder):
         try:
             message_type = request.variables.get("message_type", "task_request")
             if message_type == "task_response":
-                # **Unreachable, and kept as a guard rather than a path.**
-                # `Responder._on_send_message` answers a response-typed frame
-                # before a record or a round exists, so nothing here can be
-                # started for one.  If a future caller reaches this, an empty
-                # `completed` would be the terminal that path no longer invents
-                # for a known task — its comment has the whole argument.
-                logger.info(
-                    "a2a_inbound_response_ignored task=%s from=%s",
-                    task_id,
-                    peer,
+                # **A response-typed frame cannot start a round.**
+                # `Responder._on_send_message` answers one before a record or a
+                # round exists, so this path is closed by that call rather than
+                # by a branch here.  If a caller ever reaches it, the round fails
+                # loudly: an invented `completed` would settle a task nobody
+                # answered, and its requester would forget every routing entry
+                # for the real artifact.
+                raise RuntimeError(
+                    "a2a: a task_response frame reached the request path; "
+                    "`Responder._on_send_message` must answer one before a round"
                 )
-                return RoundOutcome(COMPLETED, "")
             if message_type == "message":
                 # MESSAGE: a conversational message — not a task.  Enqueue it
                 # and finish once the agent's conversation has taken it: the

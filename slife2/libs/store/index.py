@@ -933,6 +933,12 @@ class Embedder(Protocol):
 
     async def embed(self, texts: list[str]) -> list[list[float]]: ...
 
+    async def rerank(
+        self, query: str, documents: list[str], top_n: int | None = None
+    ) -> list[tuple[int, float]] | None:
+        """One cross-encoder call, or `None` when the endpoint serves none."""
+        ...
+
 
 async def checked_vectors(
     embedder: Embedder, texts: Sequence[str], *, unit: str, so: str

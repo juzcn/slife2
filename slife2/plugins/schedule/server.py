@@ -247,23 +247,6 @@ class RunLocks:
         #: "nobody", and that is when both entries go.
         self._leases: dict[tuple[str, str, str], int] = {}
 
-    def for_task(self, store: ScheduleStore, name: str) -> asyncio.Lock:
-        """This task's lock, made on the first ask.
-
-        The key is `home_key`'s canonical spelling rather than the caller's: a
-        tool call and a poll resolve the same ledger through two spellings of
-        one directory, and two locks for one task is the race this class is.
-
-        **A direct caller keeps the entry** — there is no lease to give back —
-        so production goes through `held`, which leases and prunes.
-        """
-        key = (home_key(store.home), store.agent, name)
-        found = self._locks.get(key)
-        if found is None:
-            found = asyncio.Lock()
-            self._locks[key] = found
-        return found
-
     def _lease(
         self, store: ScheduleStore, name: str
     ) -> tuple[tuple[str, str, str], asyncio.Lock]:

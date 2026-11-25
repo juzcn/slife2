@@ -816,19 +816,9 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         otherwise invisible.
         """
         state = tunnel.status()
-        edge_ip = getattr(tunnel, "edge_ip", "")
-        if not isinstance(edge_ip, str):
-            # A test double or a future transport: report "not observed"
-            # rather than serialising something that is not an address.
-            edge_ip = ""
-        binary = getattr(tunnel, "binary_path", "")
-        if not isinstance(binary, str):
-            # The same guard, for the same reason: an SDK transport has no
-            # binary, and a double may report none — never a non-path.
-            binary = ""
-        binary_source = getattr(tunnel, "binary_source", "")
-        if not isinstance(binary_source, str):
-            binary_source = ""
+        edge_ip = tunnel.edge_ip
+        binary = tunnel.binary_path
+        binary_source = tunnel.binary_source
         reachability = await asyncio.to_thread(tunnel.reachability)
         return json.dumps(
             {
@@ -844,7 +834,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
                 "binary": binary,
                 "binary_source": binary_source,
                 "edge_ip": edge_ip,
-                "edge_via_proxy": bool(getattr(tunnel, "edge_via_proxy", False)),
+                "edge_via_proxy": tunnel.edge_via_proxy,
                 "exposed": len(exposed),
             },
             ensure_ascii=False,

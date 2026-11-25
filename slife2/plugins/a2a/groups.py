@@ -531,10 +531,10 @@ class GroupStore:
     #: Why the file could not be read, or could not be quarantined.  While this
     #: is set, **every group tool refuses**: the groups are not "none", they are
     #: a file that needs repairing, and a read that answered an empty list would
-    #: be damage read as absence.
+    #: be damage read as absence.  A `load_error` naming a preserved copy is the
+    #: one fact the `.corrupt` file and the refusal share; a second boolean said
+    #: the same thing to nobody in production.
     load_error: str = ""
-    #: Whether the file was set aside as `.corrupt` because it could not be read.
-    quarantined: bool = False
 
     @classmethod
     def load(cls, path: Path | None) -> GroupStore:
@@ -556,12 +556,19 @@ class GroupStore:
         for name, entry in groups.items():
             group = _group_from_yaml(name, entry)
             if group is None:
-                logger.warning(
-                    "a2a_group_entry_invalid path=%s group=%r — skipped", path, name
+                # **One unreadable entry is damage to the file, not a group to
+                # skip.**  The file is machine-written, so an entry this build
+                # cannot read is a file this build did not write; carrying on
+                # would drop the group from `store.groups`, and the next
+                # successful save would erase it from disk (SDD Appendix C: a
+                # value that cannot be read is not a value that is absent).
+                return store._quarantine(
+                    f"the group entry {name!r} is not a group this build understands"
                 )
-                continue
             store.groups[group.name] = group
-        store._load_tombstones(raw.get("tombstones"))
+        damage = store._load_tombstones(raw.get("tombstones"))
+        if damage:
+            return store._quarantine(damage)
         return store
 
     def _quarantine(self, reason: str) -> GroupStore:
@@ -577,9 +584,15 @@ class GroupStore:
         the first preserved copy alone and keeps this file in place, still
         refusing.  Either way `load_error` is set, so nothing writes over the
         bytes that still hold the operator's groups.
+
+        **Nothing partial is served.**  A file is one document, and the entries
+        read before the damage are not a document this build trusts; keeping
+        them would let a caller that skipped `load_error` answer from half a
+        file.
         """
         assert self.path is not None
-        self.quarantined = True
+        self.groups.clear()
+        self.tombstones.clear()
         corrupt = self.path.with_name(self.path.name + ".corrupt")
         try:
             # **One quarantine slot is not a licence to overwrite it.**  A
@@ -607,20 +620,28 @@ class GroupStore:
         logger.error("a2a_groups_quarantined path=%s: %s", self.path, self.load_error)
         return self
 
-    def _load_tombstones(self, raw: Any) -> None:
+    def _load_tombstones(self, raw: Any) -> str | None:
+        """Read the tombstones, or answer why the file is not one this build wrote.
+
+        Tombstones are machine-written too (`_payload`), so a wrong shape is
+        damage like an unreadable group entry: skipping it would resurrect a
+        group this member left, or lose the departure it is still owed.  The
+        answer is the quarantine's reason rather than a silent `None`.
+        """
         if raw is None:
-            return
+            return None
         if not isinstance(raw, list):
-            logger.warning("a2a_groups_tombstones_invalid path=%s — ignored", self.path)
-            return
+            return "the tombstones entry is not a list"
         for entry in raw:
             if not isinstance(entry, Mapping):
-                continue
+                return "a tombstone is not a mapping"
             name = entry.get("name")
             gid = entry.get("gid")
-            if isinstance(name, str) and isinstance(gid, str) and name and gid:
-                self.tombstones.append((name, gid))
+            if not (isinstance(name, str) and isinstance(gid, str) and name and gid):
+                return "a tombstone does not name a group and its gid"
+            self.tombstones.append((name, gid))
         del self.tombstones[:-MAX_TOMBSTONES]
+        return None
 
     def save(self) -> None:
         """Write the whole store, atomically.  A store with no path is memory."""

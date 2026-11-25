@@ -24,6 +24,7 @@ from slife2.libs.turn.context import (
     parse_with_reason,
     rebuild_report,
 )
+from slife2.libs.turn.messages import UnreadableMessage
 from slife2.libs.turn.tools import (
     CONTEXT_REBUILD,
     CONTEXT_REBUILD_TEXT,
@@ -261,16 +262,17 @@ def test_each_duplicate_id_gets_the_result_that_follows_it() -> None:
     assert consistent(messages) == messages
 
 
-def test_a_damaged_call_entry_is_skipped_rather_than_raised() -> None:
-    """A call that is not a mapping is not a call this can repair.
+def test_a_damaged_call_entry_is_refused_rather_than_skipped() -> None:
+    """A call that is not a mapping is damage, not a call to pass over.
 
-    The store refuses the message body that carries one, but a live list is
-    built by this build; skipping keeps this function total even if a future
-    writer forgets.
+    The store refuses the message body that carries one, and a live list is
+    built by this build; skipping kept the unanswered call in a history the
+    provider then rejected, further from the cause.  The failure names it.
     """
     messages = [{"role": "assistant", "content": "hi", "tool_calls": ["oops"]}]
 
-    assert consistent(messages) == messages
+    with pytest.raises(UnreadableMessage, match="not an object"):
+        consistent(messages)
 
 
 # --- the live selector's reply ----------------------------------------------

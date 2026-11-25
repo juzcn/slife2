@@ -75,6 +75,9 @@ async def test_the_probe_sends_one_task_and_returns_the_terminal_text(
     assert FakeRequester.call["agent"] == "tb-1"
     assert FakeRequester.call["correlation_id"] == result.task_id
     assert FakeRequester.call["mqtt"].host == "broker.test"
+    # The label is the probe's own, not a caller's option: nobody ever passed
+    # one, and the target's marker is what reads it.
+    assert FakeRequester.call["requester_id"] == "slife2-probe"
     request = json.loads(str(FakeRequester.call["payload"]))
     assert request["params"]["metadata"]["variables"] == {
         "message_type": "task_request"

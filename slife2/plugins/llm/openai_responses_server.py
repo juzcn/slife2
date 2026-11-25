@@ -638,10 +638,11 @@ def _plain(value: Any) -> Any:
     """
     dump = getattr(value, "model_dump", None)
     if callable(dump):
-        try:
-            return dump(exclude_none=True, exclude_unset=True)
-        except TypeError:  # a non-Pydantic double with a same-named method
-            return dump()
+        # **One dump shape.**  The SDK's Pydantic models accept these
+        # keywords; an object whose `model_dump` does not is not one of them,
+        # and switching to a bare `dump()` would silently change the replay
+        # payload this exists to preserve.
+        return dump(exclude_none=True, exclude_unset=True)
     if isinstance(value, list):
         return [_plain(item) for item in value]
     if isinstance(value, dict):

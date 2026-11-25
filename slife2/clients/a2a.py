@@ -54,7 +54,6 @@ async def probe(
     prompt: str,
     *,
     timeout: float | None = None,
-    requester: str = REQUESTER,
 ) -> ProbeResult:
     """Ask *agent* one task, and answer with the reply its terminal status closes.
 
@@ -87,13 +86,13 @@ async def probe(
         text=prompt,
         request_id=task_id,
         task_id=task_id,
-        sender=requester,
+        sender=REQUESTER,
         variables={"message_type": "task_request"},
     )
     client = Requester(
         MqttConfig(host=settings.broker_host, port=settings.broker_port),
         TopicSpace(org=settings.org, unit=settings.unit),
-        requester_id=requester,
+        requester_id=REQUESTER,
         first_reply_timeout=first_reply,
         stream_idle_timeout=_T.timeouts.deliver.stream_idle,
         max_attempts=max(3, int(timeout / first_reply)),

@@ -654,7 +654,7 @@ def test_the_tui_connects_to_the_agent_server() -> None:
     """
     config = default_config()
     assert tui_url(config) == config.agent.server.url
-    assert tui_url(config) != config.url_for(config.default)
+    assert tui_url(config) != config.server(config.resolve()[1].api).url
 
 
 def test_the_tui_url_can_be_overridden() -> None:

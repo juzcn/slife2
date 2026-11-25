@@ -69,11 +69,12 @@ from slife2.plugins.llm.anthropic_server import (
 )
 from slife2.plugins.llm.anthropic_server import translate as anthropic_translate
 from slife2.plugins.llm.openai_responses_server import (
-    build_request as responses_build_request,
-)
-from slife2.plugins.llm.openai_responses_server import (
+    _plain,
     to_responses_input,
     to_responses_tools,
+)
+from slife2.plugins.llm.openai_responses_server import (
+    build_request as responses_build_request,
 )
 from slife2.plugins.llm.openai_responses_server import (
     translate as responses_translate,
@@ -2828,6 +2829,20 @@ def test_responses_replays_reasoning_items_before_the_answer() -> None:
 
     _, other = to_responses_input([assistant], model="another")
     assert all(entry.get("type") != "reasoning" for entry in other)
+
+
+def test_a_model_dump_that_cannot_take_the_replay_shape_fails() -> None:
+    """**One dump shape, not a fallback.**  The SDK's models accept
+    `exclude_none`/`exclude_unset`; an object whose `model_dump` does not is not
+    one of them.  The old `except TypeError: dump()` silently stopped excluding
+    the fields the replay exists to leave out."""
+
+    class Stubborn:
+        def model_dump(self) -> dict[str, Any]:
+            return {"wrong": True}
+
+    with pytest.raises(TypeError):
+        _plain(Stubborn())
 
 
 def test_responses_stateless_reasoning_asks_for_its_encrypted_content() -> None:

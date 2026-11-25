@@ -58,6 +58,7 @@ from typing import Any
 from slife2.helpers.clock import now
 from slife2.helpers.timeutil import BOUND_GRAMMAR, can_place
 from slife2.libs.harness.markers import wrap
+from slife2.libs.turn.messages import UnreadableMessage
 from slife2.libs.turn.prompt import render_instruction
 from slife2.libs.turn.tools import CONTEXT_REBUILD, INTERRUPTED, TURN_COMPACT
 
@@ -1253,6 +1254,13 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     ids are not this build's writing (an id is one response's, and nothing
     checks uniqueness across turns), but a rebuild is handed stored rows it did
     not write.
+
+    **A call that is not an object is damage, and it fails here.**  The store
+    refuses a row that carries one
+    (`slife2.libs.store.db._readable_message`), so a live list that does is a
+    writer this build did not make; skipping it left the call unanswered and the
+    provider then rejected the history further from the cause.
+    `UnreadableMessage` names it instead.
     """
     # Collected with positions in one pass first: a result always follows the
     # call it answers, so the call has to be compared against results that come
@@ -1271,7 +1279,10 @@ def consistent(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             continue
         for call in message.get("tool_calls") or []:
             if not isinstance(call, Mapping):
-                continue
+                raise UnreadableMessage(
+                    "an assistant message carries a tool_calls entry that is "
+                    "not an object; the history is damaged"
+                )
             call_id = str(call.get("id") or "")
             if not call_id:
                 continue

@@ -97,7 +97,9 @@ class FakeTransport:
                 for message in self.watch_items:
                     await handler(1, None, message)
             return SimpleNamespace(data={"closed": True})
-        return SimpleNamespace(data={"text": "ok", "model": "fake/model"})
+        return SimpleNamespace(
+            data={"text": "ok", "model": "fake/model", "injected": False}
+        )
 
 
 def install(monkeypatch, transport: FakeTransport | FakeWindowTransport) -> None:
@@ -315,6 +317,34 @@ async def test_an_answer_without_text_is_refused_rather_than_drawn_empty(
         await client.run_turn("hi", lambda event: None)
 
     assert "fake/model" in str(raised.value), "the answer is quoted, not summarised"
+    assert client.connected, "the server answered; the connection stays"
+
+
+@pytest.mark.asyncio
+async def test_an_answer_without_a_bool_injected_is_refused(monkeypatch) -> None:
+    """**The flag is part of the reply contract.**
+
+    The agent server's one reply literal always writes `injected`; a missing or
+    non-bool flag is an answer this build cannot read.  The old default read it
+    as False, which draws a folded reply as its own turn — the opposite of what
+    the flag exists to say.
+    """
+    transport = FakeTransport()
+    install(monkeypatch, transport)
+
+    async def no_flag(name, arguments, **kwargs):
+        if name == "send_message":
+            return SimpleNamespace(data={"text": "hi", "injected": "yes"})
+        return await FakeTransport.call_tool(transport, name, arguments, **kwargs)
+
+    monkeypatch.setattr(transport, "call_tool", no_flag)
+    client = MCPAgentClient("http://test/mcp", agent="jack")
+    await client.connect()
+
+    with pytest.raises(ConnectionError) as raised:
+        await client.run_turn("hi", lambda event: None)
+
+    assert "injected" in str(raised.value), "the answer is quoted"
     assert client.connected, "the server answered; the connection stays"
 
 

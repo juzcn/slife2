@@ -139,38 +139,16 @@ SERVER_NAME = REMOTE.server_name
 #: process that serves it.
 CONFIG_KEY = REMOTE.plugin_key
 
-#: The remote network's tools, named.  **`PEER_*` and not `A2A_*`**, because
-#: what a model is handed is the semantic side of `Net`: this process speaks A2A,
-#: and the model is told it is talking to peer agents (`slife2.libs.host.config.REMOTE`
-#: is where that split is argued).  **Sending, settling and continuing are three
-#: verbs**, not one send with a `message_type` that also means "settle": the
-#: profile's continuation has its own shape (the same task, the same context,
-#: a fresh correlation) and the settlement has its own outcome axis.  A model
-#: choosing by intent is the point.  `PEER_TASK_LIST` is not a fourth *operation*
-#: — it reads the tables the others leave behind, and it is here because "what
-#: is still open" is the one question none of them can answer.
-#:
-#: **These are the remote network's**, and the local instance registers its own
-#: from the same verbs (`net.tool`), which is why every registration site composes
-#: rather than naming a constant.  They are spelled out because the tests and a
-#: reader arriving here want the remote network's names in one place.
-PEER_SEND_MESSAGE = REMOTE.tool(SEND_MESSAGE)
-PEER_CANCEL_TASK = REMOTE.tool(CANCEL_TASK)
-PEER_TASK_RESPONSE = REMOTE.tool(TASK_RESPONSE)
-PEER_CONTINUE_TASK = REMOTE.tool(CONTINUE_TASK)
-PEER_LIST = REMOTE.tool(LIST)
-PEER_BROADCAST = REMOTE.tool(BROADCAST)
-PEER_TASK_LIST = REMOTE.tool(TASK_LIST)
-
-#: The remote network's group tools.  The local instance registers its own
-#: from the same verbs (`net.tool`), which is why these are spelled out for the
-#: tests and the tool documentation rather than being magic in a decorator.
-PEER_GROUP_SET = REMOTE.tool(GROUP_SET)
-PEER_GROUP_LIST = REMOTE.tool(GROUP_LIST)
-PEER_GROUP_MEMBER_LIST = REMOTE.tool(GROUP_MEMBER_LIST)
-PEER_GROUP_REMOVE = REMOTE.tool(GROUP_REMOVE)
-PEER_GROUP_LEAVE = REMOTE.tool(GROUP_LEAVE)
-PEER_GROUP_SEND_MESSAGE = REMOTE.tool(GROUP_SEND_MESSAGE)
+# **Every registration composes its name with `net.tool(verb)`**, the remote
+# instance and the local one alike (`slife2.libs.host.config.Net`), so a second
+# spelling here would be a list to keep in step with the registrations.
+# **Sending, settling and continuing are three verbs**, not one send with a
+# `message_type` that also means "settle": the profile's continuation has its
+# own shape (the same task, the same context, a fresh correlation) and the
+# settlement has its own outcome axis.  A model choosing by intent is the
+# point.  `task_list` is not a fourth *operation* — it reads the tables the
+# others leave behind, and it exists because "what is still open" is the one
+# question none of them can answer.  The group tools are derived the same way.
 
 # The two calls that are not the model's, imported from
 # `slife2.libs.plugin.vocabulary`: `join` puts an agent *on* the mesh and is
@@ -198,12 +176,11 @@ USED = "used"
 WINDOW = "window"
 MEMBER = "member"
 
-#: The channel an inbound message arrives on, and the first half of what it is
-#: keyed by: `peer_agent:jill`.  The window draws a bubble from the channel alone
-#: (`slife2.tui.widgets.channel_prefix`), so the peer has to be *in* it for a
-#: person to see who spoke — and what it draws is `PeerAgent(jill)> `, the same
-#: word the marker below opens with.
-CHANNEL = REMOTE.channel
+# The channel an inbound message arrives on is `Net.channel`'s — `peer_agent` —
+# and the first half of what it is keyed by: `peer_agent:jill`.  The window draws
+# a bubble from the channel alone (`slife2.tui.widgets.channel_prefix`), so the
+# peer has to be *in* it for a person to see who spoke — and what it draws is
+# `PeerAgent(jill)> `, the same word the marker below opens with.
 
 #: The marker's spelling is `Net.marker`'s (`config.REMOTE`), and the window
 #: strips it from the same table rather than through a constant here: the name

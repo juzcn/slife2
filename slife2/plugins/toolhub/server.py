@@ -311,14 +311,6 @@ TOOL_SEARCH = "tool_search"
 TOOL_LIST = "tool_list"
 FUNC_TOOL_LOAD = "func_tool_load"
 
-#: The tool that reads a playbook, which **`slife2-skills` serves and this
-#: process does not**.  Spelled here rather than imported from `slife2.plugins.skills.playbooks`,
-#: because a name crossing a process boundary is spelled on both sides and the
-#: hub has no other business with the module — `tests/libs/host/test_config.py`
-#: holds the two spellings together.  What the hub uses it for is the one thing that is
-#: still the hub's: not letting the model throw it away (see `Catalogue.autoload`).
-SKILL_USE = "skill_use"
-
 #: The three **source** names the families file their rows under: `skills` and
 #: `cli` are documents, `job` is callable code.  They are defined in
 #: `slife2.libs.plugin.protocol` and re-exported here, so this process can name
@@ -1208,12 +1200,6 @@ class Upstream:
         self.settings = settings
         #: Where this server's tools are *recorded*.
         self._catalogue = catalogue
-        #: **Ours, rather than somebody else's.**  Every upstream is a server
-        #: slife2 starts: one that cannot be reached is this system coming
-        #: apart, and `list_tools` refuses rather than quietly serving a shorter
-        #: list.  Somebody else's servers are declared by a family plugin, not
-        #: held here — which is why this is no longer a per-upstream switch.
-        self._declares = False
         #: **Whether this source declares catalogue rows**, which is a fact
         #: about the listing and not a second copy of it: the one tool name
         #: `LIST_SOURCES` either is or is not in what the server offered.  See

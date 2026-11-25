@@ -10,6 +10,7 @@ The model side is the real `MeshResponder`, resolved through `task_response`.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -20,7 +21,8 @@ import pytest
 from a2a_over_mqtt import make_properties
 
 from slife2.libs.host.config import A2ASettings
-from slife2.plugins.a2a.mesh import A2AMesh
+from slife2.plugins.a2a.mesh import A2AMesh, MeshResponder
+from slife2.plugins.a2a.responder import Responder
 
 pytestmark = pytest.mark.unit
 
@@ -172,6 +174,41 @@ async def _settle(mesh: A2AMesh, task_id: str, outcome: str, text: str = "") -> 
 
 def _new_task() -> str:
     return uuid.uuid4().hex
+
+
+def test_the_engine_is_a_plain_base_with_one_implementation() -> None:
+    """**The engine is not an ABC ceremony.**  `MeshResponder` is its only
+    subclass, and the abstract machinery bought an instantiation check no
+    caller ran; the base is a plain class whose `on_request` hook the one
+    implementation overrides.
+    """
+    assert not inspect.isabstract(Responder)
+    assert MeshResponder.__mro__[1] is Responder
+
+
+@pytest.mark.asyncio
+async def test_a_response_typed_frame_on_the_request_path_fails_the_round(
+    mesh: A2AMesh,
+) -> None:
+    """**A `task_response` cannot start a round, and must not pretend to finish one.**
+
+    `Responder._on_send_message` answers a response-typed frame before a record
+    or a round exists, so this path is closed there.  The old guard answered an
+    empty `completed` if a caller ever reached it — a terminal for a task nobody
+    answered.  The round fails instead.
+    """
+    request = SimpleNamespace(
+        task_id="task-response-on-the-request-topic",
+        sender="alice",
+        variables={"message_type": "task_response"},
+        text="",
+    )
+
+    async def stream(_text: str) -> None:
+        return None
+
+    with pytest.raises(RuntimeError, match="task_response frame reached"):
+        await mesh._responder.on_request(request, stream)
 
 
 @pytest.mark.asyncio

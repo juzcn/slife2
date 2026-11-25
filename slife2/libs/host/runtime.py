@@ -311,10 +311,11 @@ def _write_json_atomic(path: Path, obj: Any) -> bool:
 
 
 def read_record(url: str) -> ServerRecord | None:
-    """Read a record, or None when it is missing, unreadable or corrupt.
+    """Read a record, or None when there is no record at that address.
 
-    The reading rules are `_read_json_dataclass`'s; what belongs to a record is
-    its shape — every field `ServerRecord.now` writes.
+    A file that exists and cannot be read raises `DamagedRecord`; the reading
+    rules are `_read_json_dataclass`'s.  What belongs to a record is its shape —
+    every field `ServerRecord.now` writes.
     """
     return _read_json_dataclass(record_path(url), _record_from)
 
@@ -484,7 +485,11 @@ def _claim_headless(raw: Any) -> bool:
 
 
 def read_claim(name: str) -> AgentClaim | None:
-    """Read an agent's claim, or None when there is not a readable one."""
+    """Read an agent's claim, or None when no claim was made.
+
+    A claim file that exists and cannot be read raises `DamagedRecord` — the
+    reading rules are `_read_json_dataclass`'s.
+    """
     return _read_json_dataclass(
         agent_claim_path(name),
         lambda raw: AgentClaim(

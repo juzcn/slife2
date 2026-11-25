@@ -704,7 +704,7 @@ def serve_once() -> None:
     protocol_module.serve(
         RefusingMCP(),
         ServerSettings(port=24000),
-        SimpleNamespace(host=None, port=None),
+        SimpleNamespace(host=None, port=None, path=None),
         name="slife2-agent",
     )
 
@@ -780,7 +780,7 @@ def test_the_http_transport_lets_the_masking_formatter_own_the_logs() -> None:
         protocol_module.serve(
             CapturingMCP(),
             ServerSettings(port=24001),
-            SimpleNamespace(host=None, port=None),
+            SimpleNamespace(host=None, port=None, path=None),
             name="slife2-agent",
         )
 
@@ -824,7 +824,7 @@ def test_a_request_body_may_carry_an_attachment_the_config_allows(
         protocol_module.serve(
             CapturingMCP(),
             ServerSettings(port=24002),
-            SimpleNamespace(host=None, port=None),
+            SimpleNamespace(host=None, port=None, path=None),
             name="slife2-agent",
         )
 
@@ -1017,6 +1017,34 @@ def test_a_server_accepts_a_path_override() -> None:
     assert args.path == "/custom"
 
 
+def test_the_path_override_reaches_both_the_record_and_the_bind() -> None:
+    """**`serve` reads `args.path` directly, and binds it.**
+
+    The record is the address a launcher probes, so a path the parser read and
+    `serve` ignored would announce one URL and serve another.  `serve` used to
+    bind `server.path` while recording the override.
+    """
+    seen: dict[str, Any] = {}
+
+    class CapturingMCP:
+        def run(self, **options: Any) -> None:
+            seen.update(options)
+            # The record is written before the bind; read it from inside.
+            seen["record"] = read_record("http://127.0.0.1:24003/custom")
+
+    protocol_module.serve(
+        CapturingMCP(),
+        ServerSettings(port=24003),
+        SimpleNamespace(host=None, port=None, path="/custom"),
+        name="slife2-agent",
+    )
+
+    assert seen["path"] == "/custom", "the bind uses the override"
+    record = seen["record"]
+    assert record is not None, "the record is written before the bind"
+    assert record.url == "http://127.0.0.1:24003/custom"
+
+
 def test_serve_refuses_a_host_beyond_loopback() -> None:
     """**The bind is the last place the boundary can be held.**
 
@@ -1029,7 +1057,7 @@ def test_serve_refuses_a_host_beyond_loopback() -> None:
         protocol_module.serve(
             RefusingMCP(),
             ServerSettings(port=24000),
-            SimpleNamespace(host="0.0.0.0", port=None),
+            SimpleNamespace(host="0.0.0.0", port=None, path=None),
             name="slife2-agent",
         )
 

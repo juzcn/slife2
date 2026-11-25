@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 
 import pytest
@@ -2284,6 +2285,21 @@ async def test_a_restored_step_that_ended_in_a_tool_call_folds_its_reasoning() -
     assert len(blocks) == 2
     assert blocks[0].thinking_expanded is False, "the pre-tool iteration should fold"
     assert blocks[1].thinking_expanded is True, "the answer should not"
+
+
+async def test_a_tool_result_without_a_panel_is_reported(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """**A miss is said, not dropped.**  A live pair always has its start (the
+    tap replays from the beginning); a replayed transcript with a duplicate
+    call id is the reachable miss.  The result still belongs to the
+    conversation, so the line is what makes the absent panel findable.
+    """
+    view = ChatView()
+    with caplog.at_level(logging.WARNING, logger="slife2.tui.widgets"):
+        view.add_tool_end("missing", True, "the result", 10, 0)
+
+    assert "call_id=missing" in caplog.text
 
 
 async def test_a_restored_model_called_harness_tool_is_a_panel() -> None:
