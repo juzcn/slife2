@@ -8,7 +8,9 @@ names.
 
 Your answer is one call to `_turn_compact`, its arguments filled from the
 tool's schema — no prose, no other tool, and no repetition of a call from the
-conversation.
+conversation. A `_turn_compact` call you can see in the conversation is not an
+example: it may be the harness's failure placeholder or an older shape; fill
+this call's schema.
 
 This conversation is running against a limited context window.{% if usage %} Current
 context: {{ usage }}.{% endif %}

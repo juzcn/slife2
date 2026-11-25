@@ -38,6 +38,7 @@ from collections.abc import (
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx2
 from fastmcp import Context, FastMCP
 
 from slife2.libs.host.config import (
@@ -889,6 +890,56 @@ def build_backend_server(
     )
 
 
+def _failure_chain(exc: BaseException) -> list[BaseException]:
+    """`exc` and its causes, outermost first, with a cycle guard.
+
+    **The SDKs put the transport's own failure in `__cause__`.**  `APITimeoutError`
+    wraps a `ConnectTimeout` and `APIConnectionError` wraps a
+    `RemoteProtocolError`; the top-level class is the same for every member of
+    each family, so a line that named only it could not tell a DNS/TUN stall
+    ("the request never left") from a read timeout ("the request was sent").
+    """
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def failure_cause(exc: BaseException) -> tuple[str, str]:
+    """The deepest cause's name and text, or `("", "")` when there is none.
+
+    The name is what the log line carries (`cause=ConnectTimeout`); the detail
+    keeps the cause's own words for the caller, because `RemoteProtocolError:
+    Server disconnected without sending a response.` says what `Connection
+    error.` cannot.  The deepest node is the transport's: an SDK wrapper may sit
+    above `httpx2`, which may sit above `httpcore2`, and the last of them is the
+    one that knows whether a packet was sent.
+    """
+    chain = _failure_chain(exc)[1:]
+    if not chain:
+        return "", ""
+    leaf = chain[-1]
+    name = type(leaf).__name__
+    message = str(leaf)
+    return name, f"{name}: {message}" if message else name
+
+
+def _transport_failure(exc: BaseException) -> bool:
+    """Whether the failure is a transport failure rather than an HTTP answer.
+
+    A transport exception carries no status code of its own, and saying so is
+    the difference between "the provider refused the request" and "the provider
+    never answered": the two need different next steps from the person reading
+    the turn.  `HTTPStatusError` is deliberately not in this family — a 4xx/5xx
+    is the provider's answer, however unwelcome.
+    """
+    return any(isinstance(one, httpx2.RequestError) for one in _failure_chain(exc))
+
+
 def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
     """Build the FastMCP server exposing `stream_chat` over `streamer`.
 
@@ -976,20 +1027,39 @@ def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:
             # **A failed call carries the identity on the line**: FastMCP's own
             # report names the tool and carries a traceback, but not the
             # provider, the model, or whose conversation paid for the failure.
-            # **No `exc_info` here**: FastMCP prints the raw exception's
-            # traceback to stderr (this process's log file) as its own panel, and
-            # a second copy of the same stack is the noise this line exists to
-            # remove.
+            # **And the cause, which is the half a person acts on.**  The SDK's
+            # top-level sentence is `Connection error.` or `Request timed out.`
+            # for every member of its family; the exception's `__cause__` names
+            # `RemoteProtocolError` (the server closed before its headers) or
+            # `ConnectTimeout` (the request never left), and those need
+            # different next steps.
+            #
+            # **No `exc_info` here**: the composed `RuntimeError` below is not a
+            # `ToolError`, so `MaskingMiddleware` logs its traceback — with the
+            # SDK failure chained under it — and the one stack is enough.
+            cause_name, cause_text = failure_cause(exc)
             logger.warning(
-                "stream_chat_failed %s/%s for %s kind=%s: %s: %s",
+                "stream_chat_failed %s/%s for %s kind=%s: %s: %s cause=%s",
                 provider,
                 model,
                 who,
                 what,
                 type(exc).__name__,
                 exc,
+                cause_name or "(none)",
             )
-            raise
+            detail = f"{type(exc).__name__}: {exc}"
+            if cause_text:
+                detail += f" (cause: {cause_text})"
+            if _transport_failure(exc):
+                detail += "; the failure carries no HTTP status code"
+            # **A `RuntimeError`, not a re-raise**: the MCP boundary wraps a
+            # non-`ToolError` with its top-level words only, which is how the
+            # turn came to read `Connection error.` with the cause left behind.
+            # Composing the sentence here is what carries `RemoteProtocolError`
+            # (and the fact that no status exists) to the TUI and the turn log;
+            # `from exc` keeps the provider's own stack in the chained traceback.
+            raise RuntimeError(f"{provider}/{model} failed: {detail}") from exc
         # **One line per model call, with the cache breakdown on it.**  The
         # usage is the only place a provider's prefix cache shows itself — the
         # conversation pays for the miss either way — so the numbers a hit rate

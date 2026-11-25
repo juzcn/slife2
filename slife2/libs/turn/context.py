@@ -334,6 +334,30 @@ class Decision:
         return self.keep is None and self.recall is None
 
 
+#: The prefix of a failure selection: the harness's own sentence, not a model's
+#: answer.  `rebuild_selection` raises a string with this prefix as it stands,
+#: because the sentence already names the failure and the fallback; a model's
+#: own string is a malformed selection and is named as one.
+DECISION_FAILED = "the decision did not happen: "
+
+
+def failure_selection(reason: str) -> str:
+    """The failure the harness carries into `_context_rebuild`.
+
+    **A failed decision is still a tool call** (SDD §5.3), so the harness hands
+    the tool a string it refuses instead of an empty selection.  The string is a
+    sentence the agent reads: it names the failure **and** the fallback, because
+    "`keep` is not a selection" alone reads like a malformed model answer rather
+    than a provider failure whose context was kept — and the next decision model
+    would otherwise see a wrong-shaped `_context_rebuild` call in the
+    conversation.
+    """
+    return (
+        f"{DECISION_FAILED}{reason}; nothing was rebuilt, and the context in "
+        "hand is kept"
+    )
+
+
 def rebuild_selection(keep: Any, recall: Any = None) -> dict[str, Any]:
     """The internal selection described by `_context_rebuild`'s arguments.
 
@@ -349,15 +373,19 @@ def rebuild_selection(keep: Any, recall: Any = None) -> dict[str, Any]:
     rather than silently treated as no recall.
 
     **A string under `keep` is a failure the harness carried into the call.**
-    The decision model that did not answer has no selection, so its own words
-    are the refusal; the agent reads what went wrong rather than the mapper's
-    paraphrase of it.
+    `failure_selection` writes it, and it already says what happened and that
+    the context in hand was kept, so it is raised as it stands; the agent reads
+    the provider's own words rather than the mapper's paraphrase of them.  A
+    string without that prefix is a model's own malformed answer and is named
+    as one.
     """
     if keep is None:
         raise ValueError(
             'a rebuild needs `keep`: an object with `action` "ids", "clear" or "keep"'
         )
     if isinstance(keep, str):
+        if keep.startswith(DECISION_FAILED):
+            raise ValueError(keep)
         raise ValueError(f"`keep` is not a selection: {keep}")
     if not isinstance(keep, dict):
         raise ValueError("`keep` is one object holding the action")

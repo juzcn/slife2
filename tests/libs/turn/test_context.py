@@ -166,6 +166,23 @@ def test_the_paired_rebuild_arguments_map_to_the_internal_selection() -> None:
         rebuild_selection("the decision model did not answer: timeout", {})
 
 
+def test_a_failure_selection_is_raised_as_the_harnesss_own_sentence() -> None:
+    """A failed decision's sentence says what happened and what was kept.
+
+    The pair is still a tool call, but `keep` holds a failure sentence rather
+    than a selection.  Raising it as it stands keeps the provider's reason and
+    the fallback in the agent's error; a model's own malformed string is still
+    named as a malformed selection.
+    """
+    from slife2.libs.turn.context import failure_selection, rebuild_selection
+
+    failure = failure_selection("the decision model did not answer: timeout")
+    with pytest.raises(ValueError, match="nothing was rebuilt"):
+        rebuild_selection(failure, {})
+    with pytest.raises(ValueError, match="not a selection"):
+        rebuild_selection("a model's own string", {})
+
+
 def test_a_stringified_array_is_refused_with_the_type_it_should_be() -> None:
     """The malformation the live measurement produced.
 

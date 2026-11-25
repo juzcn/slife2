@@ -719,7 +719,11 @@ async def test_the_automatic_arguments_carry_a_failure_as_its_own_words() -> Non
     assert await runtime.rebuild_arguments(
         IDENTITY, a_view(), REF.reference, prompt_window=1024
     ) == {
-        "keep": "the decision model did not answer: TimeoutError: slow",
+        "keep": (
+            "the decision did not happen: the decision model did not answer: "
+            "TimeoutError: slow; nothing was rebuilt, and the context in hand "
+            "is kept"
+        ),
         "recall": {},
     }
 
@@ -741,8 +745,11 @@ async def test_a_decision_in_another_shape_is_a_failure_selection() -> None:
 
     assert set(selection) == {"keep", "recall"}
     assert selection["recall"] == {}
-    assert selection["keep"].startswith("the selection could not be read: ")
+    assert selection["keep"].startswith(
+        "the decision did not happen: the selection could not be read: "
+    )
     assert "a rebuild needs `keep`" in selection["keep"]
+    assert "nothing was rebuilt" in selection["keep"]
 
     runtime = wired(
         Store(
@@ -775,12 +782,89 @@ async def test_a_decision_that_cannot_be_called_is_a_failure_selection() -> None
     )
 
     assert await runtime.rebuild_arguments(IDENTITY, a_view(), REF.reference) == {
-        "keep": "the decision call failed: RuntimeError: the provider is down",
+        "keep": (
+            "the decision did not happen: the decision call failed: "
+            "RuntimeError: the provider is down; nothing was rebuilt, and the "
+            "context in hand is kept"
+        ),
         "recall": {},
     }
     assert await runtime.compact_arguments(
         IDENTITY, a_view(), ["6.0"], REF.reference
     ) == {"compact": "the selector call failed: RuntimeError: the provider is down"}
+
+
+async def test_the_decision_does_not_read_a_harness_failure_pair() -> None:
+    """The pair stays in the conversation, but not in the next decision's input.
+
+    A failed rebuild writes `_context_rebuild` with the failure sentence under
+    `keep`; the agent must read it, but the next decision model must not see it
+    as an example of the tool it is about to fill.  A valid past pair stays: it
+    is a real selection and a useful example.
+    """
+    failed_call = ToolCall(
+        id="_harness_context_rebuild_failed",
+        name="_context_rebuild",
+        arguments={
+            # The shape the failed turn stored: an older failure sentence has
+            # no `DECISION_FAILED` prefix, and the filter must drop it too.
+            "keep": "the decision model did not answer: ToolError: Request timed out",
+            "recall": {},
+        },
+    )
+    valid_call = ToolCall(
+        id="_harness_context_rebuild_valid",
+        name="_context_rebuild",
+        arguments={"keep": {"action": "keep"}, "recall": {}},
+    )
+    messages = [
+        Message(role="user", content="status?"),
+        Message(role="assistant", content=None, tool_calls=[failed_call]),
+        Message(
+            role="tool",
+            content="Error: the decision did not happen",
+            tool_call_id=failed_call.id,
+        ),
+        Message(role="assistant", content=None, tool_calls=[valid_call]),
+        Message(role="tool", content="kept 1/1", tool_call_id=valid_call.id),
+    ]
+    store = Store(
+        decide={
+            "arguments": '{"keep": {"action": "keep"}, "recall": {}}',
+            "decision": "",
+        }
+    )
+
+    await wired(store).decide_context(IDENTITY, messages, REF.reference)
+
+    sent = store.calls[0][1]["messages"]
+    assert [message["role"] for message in sent] == ["user", "assistant", "tool"]
+    assert sent[1]["tool_calls"][0]["id"] == valid_call.id
+    assert sent[2]["tool_call_id"] == valid_call.id
+
+
+async def test_the_selector_does_not_read_a_harness_failure_pair() -> None:
+    """The same rule for `_turn_compact`: the failed pair is not an example."""
+    failed_call = ToolCall(
+        id="_harness_turn_compact_failed",
+        name="_turn_compact",
+        arguments={"compact": "the selector did not answer: timeout"},
+    )
+    messages = [
+        Message(role="user", content="hi"),
+        Message(role="assistant", content=None, tool_calls=[failed_call]),
+        Message(
+            role="tool",
+            content="Error: the compaction selection could not be read",
+            tool_call_id=failed_call.id,
+        ),
+    ]
+    store = Store(select_live={"arguments": '{"compact": []}', "decision": ""})
+
+    await wired(store).select_live(IDENTITY, messages, ["cur.0"], REF.reference, 1024)
+
+    sent = store.calls[0][1]["messages"]
+    assert [message["role"] for message in sent] == ["user"]
 
 
 async def test_an_unreadable_answer_fails_the_turn_rather_than_becoming_arguments() -> (

@@ -1058,7 +1058,10 @@ automatic call and the model's own call answer to one shape. The contract:
    **A provider failure's reason is `failure_text`'s words** — the one spelling
    the turn's `turn_done` line and `[TURN-FAILED:…]` message use — and the
    harness carries that failure into the tool call, so the pair the agent reads
-   says what the provider said rather than a status word.
+   says what the provider said rather than a status word. The sentence is a
+   `failure_selection`: it also says that nothing was rebuilt and the context in
+   hand was kept, and the next decision's input leaves the pair out so a failed
+   decision is not the example it copies.
 6. **A failure keeps what is in hand.** A rebuild whose selection cannot be
    read keeps the context it had; a compaction whose selection cannot be read
    hides nothing; the turn continues either way, and the failure is in the tool
@@ -1213,13 +1216,15 @@ The automatic path is a forced `_context_rebuild` call under §5.3's contract:
 `decide` asks the model for the raw arguments, and the harness then calls
 `_context_rebuild` with them. The tool is the one check; a refusal is its error
 result, which the agent reads and can correct. The conversation is the input,
-exactly as the turn runs it, and the decision instruction is the system message
-appended to it. A model whose `compat.thinking: omit` says its endpoint refuses
-the thinking field is not overridden; a forced choice the endpoint still refuses
-is an LLM failure, carried into the tool call as a failure selection. A model
-left free in a tool-heavy conversation continues it instead of deciding, and a
-call naming any tool but the forced one is that same continuation: it is not a
-decision, and the instruction forbids it explicitly.
+exactly as the turn runs it — **minus the harness failure pair**, whose
+arguments are not a selection: the agent must read it, but the next decision
+model must not copy its shape (`_decision_messages`). The decision instruction
+is the system message appended to it. A model whose `compat.thinking: omit`
+says its endpoint refuses the thinking field is not overridden; a forced choice
+the endpoint still refuses is an LLM failure, carried into the tool call as a
+failure selection. A model left free in a tool-heavy conversation continues it
+instead of deciding, and a call naming any tool but the forced one is that same
+continuation: it is not a decision, and the instruction forbids it explicitly.
 
 Rules:
 
@@ -1228,8 +1233,10 @@ Rules:
   forced call is carried into the tool call as a failure selection, and the
   tool's error result names it — the agent reads it and can call the tool again
   with its own selection. The log carries the provider's failure text
-  (`failure_text`). A recall nobody asked for is not a recall that found
-  nothing.
+  (`failure_text`). **The pair is not an example.** The next decision's input
+  drops every harness pair whose arguments are not a selection, so a failure
+  cannot be copied by the decision it would mislead. A recall nobody asked for
+  is not a recall that found nothing.
 - **The reports are counts; the ids are the pair's arguments.** The rebuild
   answers `kept K/M, recalled R/O, token usage ~N (P%)`: kept of the turns in
   hand, recalled of the log outside it, and the estimate; `fitted` when the
@@ -1605,8 +1612,12 @@ shape reports zero tokens against a real DeepSeek endpoint.
 for the recall decision, and `compactor` for the live-view selector — the two
 calls that reach the model server outside the loop's backend. One line is
 logged per call with the breakdown and the call's `elapsed`, because a cache hit
-rate distinguishes a rebuild from an append. A call that raises logs `stream_chat_failed` with the
-provider, model, conversation and kind before the error propagates.
+rate distinguishes a rebuild from an append. A call that raises logs
+`stream_chat_failed` with the provider, model, conversation, kind and the
+transport cause (`cause=ConnectTimeout`, `cause=RemoteProtocolError`) before the
+error propagates; the cause is carried into the error the caller reads, because
+the SDK's top-level sentence is the same for every member of its family and a
+transport failure has no HTTP status of its own.
 
 ## 7. Tool system
 

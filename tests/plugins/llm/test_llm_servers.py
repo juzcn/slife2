@@ -1764,6 +1764,18 @@ def scripted(*events) -> Streamer:
     return stream
 
 
+def failing(exc: BaseException) -> Streamer:
+    """A streamer whose first pull raises, as the SDK does before any chunk."""
+
+    async def stream(
+        provider: str, messages: list[Message], tools: list[ToolSpec], model: str
+    ) -> AsyncGenerator[Chunk | Finish]:
+        raise exc
+        yield Finish("stop")  # pragma: no cover - makes this a generator
+
+    return stream
+
+
 async def call_stream_chat(server, **arguments):
     """Call `stream_chat` in memory, returning (result, decoded chunks)."""
     seen: list[Chunk] = []
@@ -1897,6 +1909,78 @@ async def test_a_stream_that_ends_without_a_finish_is_not_a_whole_answer() -> No
         await call_stream_chat(
             server, messages=[{"role": "user", "content": "2+2"}], tools=[], model="m"
         )
+
+
+def _post_request():
+    import httpx2
+
+    return httpx2.Request("POST", "http://example.invalid/v1/chat/completions")
+
+
+@pytest.mark.asyncio
+async def test_a_connection_failure_carries_its_transport_cause(caplog) -> None:
+    """`Connection error.` alone names none of the failures it covers.
+
+    The SDK's top-level words are one sentence for a dead socket, a DNS stall
+    and a server that closed before its headers; the cause is the half a person
+    acts on.  It reaches the log line and the error the turn reads, and a
+    transport failure says that no HTTP status exists.
+    """
+    import httpx2
+    from fastmcp.exceptions import ToolError
+    from openai import APIConnectionError
+
+    cause = httpx2.RemoteProtocolError(
+        "Server disconnected without sending a response."
+    )
+    error = APIConnectionError(request=_post_request())
+    error.__cause__ = cause
+    server = build_llm_server(name="t", streamer=failing(error))
+
+    with caplog.at_level(logging.WARNING, logger="slife2.plugins.llm.server_common"):
+        with pytest.raises(ToolError) as raised:
+            await call_stream_chat(
+                server,
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                model="m",
+            )
+
+    text = str(raised.value)
+    assert "cause: RemoteProtocolError" in text
+    assert "the failure carries no HTTP status code" in text
+    assert any(
+        "cause=RemoteProtocolError" in record.getMessage() for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_connect_timeout_names_what_never_left_the_machine(caplog) -> None:
+    """A `ConnectTimeout` is not a read timeout: nothing was sent."""
+    import httpx2
+    from fastmcp.exceptions import ToolError
+    from openai import APITimeoutError
+
+    cause = httpx2.ConnectTimeout("timed out")
+    error = APITimeoutError(request=_post_request())
+    error.__cause__ = cause
+    server = build_llm_server(name="t", streamer=failing(error))
+
+    with caplog.at_level(logging.WARNING, logger="slife2.plugins.llm.server_common"):
+        with pytest.raises(ToolError) as raised:
+            await call_stream_chat(
+                server,
+                messages=[{"role": "user", "content": "hi"}],
+                tools=[],
+                model="m",
+            )
+
+    text = str(raised.value)
+    assert "cause: ConnectTimeout" in text
+    assert "the failure carries no HTTP status code" in text
+    assert any(
+        "cause=ConnectTimeout" in record.getMessage() for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

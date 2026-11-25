@@ -74,7 +74,12 @@ from slife2.libs.turn.events import (
 from slife2.libs.turn.loop import AgentLoop, AutoCall, harness_call
 from slife2.libs.turn.messages import Message, ToolCall
 from slife2.libs.turn.tokens import estimate_turn_tokens
-from slife2.libs.turn.tools import CONTEXT_REBUILD, TURN_COMPACT, ToolRegistry
+from slife2.libs.turn.tools import (
+    CONTEXT_REBUILD,
+    TURN_COMPACT,
+    ToolRegistry,
+    is_harness_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +260,67 @@ def _context_message(message: Message) -> dict[str, Any]:
     if message.mid:
         payload["_mid"] = message.mid
     return payload
+
+
+def _readable_selection(call: ToolCall) -> bool:
+    """Whether a harness call's arguments are the current selection shape.
+
+    **Only the schema decides what an example is.**  A valid past
+    `_context_rebuild` / `_turn_compact` pair is a real selection the model
+    made and may be kept; a failure pair carries a string under the selection
+    field and is not one.  The check is the tool's own (`rebuild_selection` for
+    the rebuild, the list shape for the compaction), so the filter and the tool
+    agree about what "readable" means.
+    """
+    if call.name == CONTEXT_REBUILD:
+        try:
+            decisions.rebuild_selection(
+                call.arguments.get("keep"), call.arguments.get("recall")
+            )
+        except ValueError:
+            return False
+        return True
+    if call.name == TURN_COMPACT:
+        return isinstance(call.arguments.get("compact"), list)
+    return True
+
+
+def _decision_messages(messages: list[Message]) -> list[Message]:
+    """The live context a decision model reads, without harness failure pairs.
+
+    **A failed decision's pair is not an example.**  The harness writes
+    `_context_rebuild` / `_turn_compact` with a failure sentence under the
+    selection field, and the tool answers with its refusal.  The agent must
+    read that pair, so it stays in the conversation — but the next decision
+    model is about to fill the same tool, and a model that copies the pair's
+    shape reproduces the failure.  The filter is for the decision call only:
+    the turn's own list, the record and its `[MESSAGE:…]` ids are untouched.
+    A valid past pair is kept; it is a real selection and a useful example.
+
+    A tool result whose call was dropped goes with it; leaving it behind would
+    show the decision model a result with no call, which is not a conversation
+    any provider accepts.
+    """
+    failed: set[str] = set()
+    kept: list[Message] = []
+    for message in messages:
+        if message.role == "assistant" and message.tool_calls:
+            bad = {
+                call.id
+                for call in message.tool_calls
+                if is_harness_call(call.id)
+                and call.name in (CONTEXT_REBUILD, TURN_COMPACT)
+                and not _readable_selection(call)
+            }
+            if bad:
+                # The assistant message goes whole: dropping only the failed
+                # call would leave a call whose result no longer follows it.
+                failed.update(bad)
+                continue
+        if message.role == "tool" and message.tool_call_id in failed:
+            continue
+        kept.append(message)
+    return kept
 
 
 def _turn_id_list(payload: dict[str, Any]) -> list[int]:
@@ -657,6 +723,10 @@ class TurnRuntime:
         `context_tokens` and `prompt_window` are the figure the instruction
         prints — the same one the status bar shows.  An answer this build cannot
         read is the context store's refusal (`unreadable`), not a decision.
+
+        **A harness failure pair is not handed on.**  The conversation keeps the
+        pair the failed rebuild wrote; the decision model must not see it as an
+        example of the tool it is about to fill (`_decision_messages`).
         """
         payload = tool_payload(
             await (await self.memory()).call_tool(
@@ -664,7 +734,10 @@ class TurnRuntime:
                 {
                     "agent": identity[0],
                     "subagent": identity[1],
-                    "messages": [_context_message(message) for message in messages],
+                    "messages": [
+                        _context_message(message)
+                        for message in _decision_messages(messages)
+                    ],
                     "model": model,
                     "context_tokens": context_tokens,
                     "prompt_window": prompt_window,
@@ -698,7 +771,11 @@ class TurnRuntime:
         loop writes carries the selection from the start (SDD §5.3).  A
         provider failure is carried into the arguments as the failure's own
         words (`failure_text`), so the tool refuses them and the agent reads a
-        tool error naming what went wrong rather than an empty call.
+        tool error naming what went wrong rather than an empty call.  The
+        sentence is `failure_selection`: it also says the context in hand was
+        kept, so the pair cannot be read as a malformed model answer — and the
+        next decision's input filters it out (`_decision_messages`) rather than
+        offering it as an example.
 
         **The pair the loop writes carries the tool's own argument names.**  A
         decision answer in another shape — a historical `context`/`mode` call the
@@ -730,12 +807,16 @@ class TurnRuntime:
                 "context_rebuild_skipped reason=%s", decisions.failure_text(exc)
             )
             return {
-                "keep": "the decision call failed: " + decisions.failure_text(exc),
+                "keep": decisions.failure_selection(
+                    "the decision call failed: " + decisions.failure_text(exc)
+                ),
                 "recall": {},
             }
         if decided.decision:
             return {
-                "keep": "the decision model did not answer: " + decided.decision,
+                "keep": decisions.failure_selection(
+                    "the decision model did not answer: " + decided.decision
+                ),
                 "recall": {},
             }
         selection = selection_from_arguments(decided.arguments, "keep")
@@ -744,7 +825,9 @@ class TurnRuntime:
         except ValueError as exc:
             logger.info("context_rebuild_unreadable reason=%s", exc)
             return {
-                "keep": "the selection could not be read: " + str(exc),
+                "keep": decisions.failure_selection(
+                    "the selection could not be read: " + str(exc)
+                ),
                 "recall": {},
             }
         return {"keep": selection.get("keep"), "recall": selection.get("recall")}
@@ -879,6 +962,11 @@ class TurnRuntime:
         renumber the rest, and the same id addresses the same message across the
         turn.  `context_tokens` and `prompt_window` are the figure the status
         bar shows, carried so the selector's instruction can print the same one.
+
+        **A harness failure pair is not handed on**, for `decide_context`'s
+        reason: the view still holds the failed `_turn_compact` pair, and a
+        selector that copied its string shape would write the same failure.  The
+        view the tool itself applies a selection to is untouched.
         """
         payload = tool_payload(
             await (await self.memory()).call_tool(
@@ -886,7 +974,9 @@ class TurnRuntime:
                 {
                     "agent": identity[0],
                     "subagent": identity[1],
-                    "messages": [message.to_wire() for message in messages],
+                    "messages": [
+                        message.to_wire() for message in _decision_messages(messages)
+                    ],
                     "selectable": list(selectable),
                     "model": model,
                     "context_tokens": context_tokens,
