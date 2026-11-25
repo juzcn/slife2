@@ -2917,10 +2917,11 @@ and its catalogue; the tool set is the configuration's. A name is not a property
 of a directory: `--agent jack --data-dir D` names the agent and says where its
 files go, and which directory a name used previously is not remembered.
 
-The default location is the checkout when running from one — the nearest ancestor
-whose `pyproject.toml` names this project, so a command run from a subdirectory
-still writes beside the checkout — otherwise `~/.slife2`. A marker that cannot be
-read is refused rather than read as an installation.
+The default location is the working directory when its `pyproject.toml` names
+this project — that directory is the development environment, and its data lives
+beside it. Every other working directory is production and uses `~/.slife2`; a
+subdirectory of a checkout is production too. A marker that cannot be read is
+refused rather than read as an installation.
 
 ### 11.4 Runtime directory
 
@@ -3457,7 +3458,6 @@ fallbacks above.
 
 | Situation | Reading | Where it is said |
 |---|---|---|
-| No ancestor names this checkout | Use `~/.slife2` | A missing database or config |
 | A record file is missing | Read as absent | `status` reports not running; the ordinary first start |
 | Text SQLite cannot encode | Normalise surrogates | U+FFFD in the record |
 | A bookkeeping file is already gone | `missing_ok` | An idempotent delete is not a fallback |

@@ -57,27 +57,25 @@ def test_a_checkout_keeps_its_data_beside_itself(
     assert data_dir() == tmp_path
 
 
-def test_a_subdirectory_of_a_checkout_finds_the_checkout_root(
+def test_a_subdirectory_of_a_checkout_is_production(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """**A checkout is entered from a subdirectory too.**  Reading only the
-    working directory sent `slife2/libs/...`'s data to `~/.slife2` with nothing
-    said; the marker is looked for in every ancestor, and the data directory is
-    the root, not the subdirectory."""
+    """**The working directory decides, and a parent's marker is not yours.**
+
+    Only the directory slife2 is run from can be the development environment;
+    a subdirectory of a checkout is production, and its home is `~/.slife2`.
+    """
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "slife2"\n', encoding="utf-8"
     )
     nested = tmp_path / "slife2" / "libs" / "turn"
     nested.mkdir(parents=True)
-    # A nearer manifest for another project does not hide the checkout.
-    (tmp_path / "slife2" / "pyproject.toml").write_text(
-        '[project]\nname = "a-nested-project"\n', encoding="utf-8"
-    )
     monkeypatch.chdir(nested)
     monkeypatch.delenv(DATA_ENV_VAR, raising=False)
+    monkeypatch.setattr("pathlib.Path.home", classmethod(lambda cls: tmp_path / "home"))
 
-    assert checkout_root() is not None
-    assert data_dir() == tmp_path
+    assert checkout_root() is None
+    assert data_dir() == tmp_path / "home" / ".slife2"
 
 
 def test_an_installation_keeps_its_data_under_home(

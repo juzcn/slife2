@@ -66,12 +66,13 @@ puts one around the work it does for a call.  The daemon's own config and its
 own bookkeeping stay in `data_dir()`: `slife2.yaml` is read from the home the
 process was started in, and a record is written where the machine keeps them.
 
-**Where the home is depends on what you are running.**  A checkout keeps it
-beside itself, so the checked-in `slife2.yaml` is the one in use and the
-databases are directories you can open; an installation keeps it at `~/.slife2`,
-per-user and independent of wherever it was started from.  See `data_dir`.  The
-machine's runtime is `~/.slife2/runtime` either way, because a checkout and an
-installation on one machine share one set of daemons.
+**Where the home is depends on what you are running.**  The working directory
+that is this checkout is the development environment and keeps its data beside
+itself, so the checked-in `slife2.yaml` is the one in use and the databases are
+directories you can open; every other working directory is production and keeps
+its home at `~/.slife2`, per-user and independent of wherever it was started
+from.  See `data_dir`.  The machine's runtime is `~/.slife2/runtime` either way,
+because a checkout and an installation on one machine share one set of daemons.
 
 **The homes are listed, and that list is how a shared daemon finds them.**  No
 server holds a registry of agents: the schedule plugin finds a home's ledgers by
@@ -181,15 +182,13 @@ _PROJECT_NAME = 'name = "slife2"'
 
 
 def checkout_root(directory: Path | None = None) -> Path | None:
-    """The checkout *directory* is in, if any — the nearest ancestor whose
-    `pyproject.toml` names this project.
+    """The *directory* itself when it is this checkout, else `None`.
 
-    **Parents are searched**, because a checkout is entered from its root in
-    the common case but not in every one: a command run from
-    `slife2/libs/turn/` is the same checkout, and reading only the working
-    directory sent its data to `~/.slife2` with nothing said (SDD Appendix C).
-    A nearer `pyproject.toml` that names another project does not stop the
-    walk; the marker is what identifies *this* checkout.
+    **The working directory decides.**  It is the development environment when
+    its `pyproject.toml` names this project; every other directory is
+    production, a subdirectory of a checkout included.  A person runs what they
+    pointed at, and a parent's marker is not a fact about the directory they
+    chose.
 
     Deliberately a *specific* signal — a `pyproject.toml` that names this
     project — rather than "there is a `.git` here" or "there is a `slife2.yaml`
@@ -198,52 +197,42 @@ def checkout_root(directory: Path | None = None) -> Path | None:
     about this decides where a database is written.
 
     **A marker that cannot be read is not a marker that is not there.**  Only
-    "no such file" continues the walk; a permissions error, or a directory
-    sitting where the marker should be, raises, because reading either as "not
-    a checkout" would send a checkout's whole data directory to `~/.slife2`
+    "no such file" answers `None`; a permissions error, or a directory sitting
+    where the marker should be, raises, because reading either as "not a
+    checkout" would send a development run's whole data directory to `~/.slife2`
     with nothing said.
     """
     start = (directory or Path.cwd()).resolve()
-    for candidate in (start, *start.parents):
-        marker = candidate / _CHECKOUT_MARKER
-        try:
-            text = marker.read_text(encoding="utf-8", errors="replace")
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        if _PROJECT_NAME in text:
-            return candidate
-    return None
+    marker = start / _CHECKOUT_MARKER
+    try:
+        text = marker.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return None
+    return start if _PROJECT_NAME in text else None
 
 
 def data_dir() -> Path:
     """The one directory slife2 keeps its files in.
 
-    **A checkout keeps everything at its root; an installation keeps it under
-    the home directory.**  Working on slife2 means the config, the runtime state
-    and the databases are the ones in front of you — the checked-in
-    `slife2.yaml` is read, `agents/` is a directory you can open, and deleting
-    the checkout deletes the lot.  The root is the nearest ancestor whose
-    `pyproject.toml` names this project, so a command run from a subdirectory
-    still writes beside the checkout.  An installation has no such root, so it
-    uses `~/.slife2`, which is per-user and survives whatever directory it
-    happens to be started from.
+    **The working directory decides what you are running.**  It is the
+    development environment when its `pyproject.toml` names this project, and
+    then everything lives at its root — the checked-in `slife2.yaml` is the one
+    read, `agents/` is a directory you can open, and deleting the checkout
+    deletes the lot.  Every other working directory is production and keeps its
+    home at `~/.slife2`, per-user and independent of wherever it was started
+    from.  That is the design rather than a fallback: a subdirectory of a
+    checkout is a production directory, and a marker that cannot be read raises
+    rather than being read as one.
 
     `SLIFE2_DATA_DIR` overrides both, and `--data-dir` sets that.
-
-    **The `~/.slife2` root is a registered fallback**: it is what an installation
-    with no checkout gets, so a checkout that is not *recognised* writes its
-    databases to the home directory instead of beside itself.  *Gives up:* the
-    checkout's own directory; *does not cover:* an override, which wins, and a
-    marker that cannot be read, which raises rather than being read as an
-    installation; *failure goes:* nowhere visible until a file is missing where
-    it was expected.
     """
     override = os.environ.get(DATA_ENV_VAR)
     path = (
         Path(override)
         if override
-        # The walk is not paid for when an override names the directory, and a
-        # marker that cannot be read does not refuse a home the caller named.
+        # The working directory is not asked about when an override names the
+        # home, and a marker that cannot be read does not refuse a home the
+        # caller named.
         else (checkout_root() or Path.home() / ".slife2")
     )
     return _made(path, "the data directory", DATA_ENV_VAR, flag="`--data-dir`")

@@ -450,9 +450,10 @@ refuses an image drops it and says so; that turn's row is note-only.
 
 ### Location
 
-The configuration file is `slife2.yaml` inside the data directory. A data
-directory is the checkout when running from one, otherwise `~/.slife2`. Use
-`--data-dir DIR` or `SLIFE2_DATA_DIR` to override it.
+The configuration file is `slife2.yaml` inside the data directory. The data
+directory is the working directory when it is this checkout — its
+`pyproject.toml` names the project — otherwise `~/.slife2`. Use `--data-dir DIR`
+or `SLIFE2_DATA_DIR` to override it.
 
 The file is required, and it must name at least one provider under `providers:`
 and one embedding provider under `embeddings:`. A missing file stops the start
