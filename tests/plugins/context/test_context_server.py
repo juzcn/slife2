@@ -1001,9 +1001,7 @@ async def test_a_damaged_body_is_reported_and_never_read_as_empty() -> None:
         restored = await client.call_tool(
             "restore", {"agent": "jack", "messages": [SYSTEM]}
         )
-        listed = await client.call_tool(
-            "turn_list", {}, meta=conversation_meta("jack")
-        )
+        listed = await client.call_tool("turn_list", {}, meta=conversation_meta("jack"))
         with pytest.raises(ToolError, match="cannot be read"):
             await client.call_tool(
                 "turn_read", {"turn_id": 1}, meta=conversation_meta("jack")

@@ -1076,9 +1076,7 @@ def build_server(
         return [record.to_wire() for record in records], missing
 
     def _damaged(rows: list[dict[str, Any]]) -> list[int]:
-        return [
-            int(row["turn_id"]) for row in rows if bool(row.get("unreadable"))
-        ]
+        return [int(row["turn_id"]) for row in rows if bool(row.get("unreadable"))]
 
     def _strict_records(store: TurnStore, turn_ids: list[int]) -> list[Any]:
         """Those rows, with a missing or damaged one as the tool's error."""
@@ -1693,9 +1691,7 @@ def build_server(
             )
             raise ToolError(
                 "the selected turns cannot be read: "
-                + (
-                    f"turn(s) {missing} have no row; " if missing else ""
-                )
+                + (f"turn(s) {missing} have no row; " if missing else "")
                 + (
                     f"the stored body of turn(s) {_damaged(rows)} cannot be read; "
                     if _damaged(rows)

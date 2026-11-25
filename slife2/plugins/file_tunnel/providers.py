@@ -1068,11 +1068,7 @@ class _CliTunnelProvider(_TunnelProviderBase):
         if self._binary_named:
             return "named"
         found = shutil.which(self._binary)
-        return (
-            "path"
-            if found and Path(found) == Path(self._binary_path)
-            else "guessed"
-        )
+        return "path" if found and Path(found) == Path(self._binary_path) else "guessed"
 
     # ── Subclass hooks ─────────────────────────────────────────────
 

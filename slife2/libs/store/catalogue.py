@@ -1905,9 +1905,7 @@ class ToolStore:
         answer around, but a sentence cannot.
         """
         with self._connect() as connection:
-            if vector_table_gone(
-                connection, vec_table="tool_vec", meta_table="meta"
-            ):
+            if vector_table_gone(connection, vec_table="tool_vec", meta_table="meta"):
                 raise RuntimeError(
                     f"{self.path}: the catalogue records a vector index but its "
                     "table is gone; restart to rebuild the index"

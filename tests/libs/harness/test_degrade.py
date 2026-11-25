@@ -35,15 +35,26 @@ async def test_a_degrade_is_drawn_once_and_logged(monkeypatch, caplog) -> None:
     caplog.set_level(logging.WARNING, logger=degrade.logger.name)
 
     first = await degrade.report(
-        None, "jack", "schedule_ledger", "scheduled tasks are not firing", "the ledger is broken"
+        None,
+        "jack",
+        "schedule_ledger",
+        "scheduled tasks are not firing",
+        "the ledger is broken",
     )
     second = await degrade.report(
-        None, "jack", "schedule_ledger", "scheduled tasks are not firing", "the ledger is broken"
+        None,
+        "jack",
+        "schedule_ledger",
+        "scheduled tasks are not firing",
+        "the ledger is broken",
     )
 
     assert first is True and second is False
     assert drawn == [
-        ("jack", notes.degraded("scheduled tasks are not firing", "the ledger is broken"))
+        (
+            "jack",
+            notes.degraded("scheduled tasks are not firing", "the ledger is broken"),
+        )
     ]
     assert caplog.text.count("degrade code=schedule_ledger") == 1, (
         "one line and one log per persistent condition, not one per call"
@@ -57,7 +68,9 @@ async def test_a_window_that_is_gone_does_not_raise(monkeypatch) -> None:
 
     monkeypatch.setattr(degrade, "note_to_window", gone)
     assert (
-        await degrade.report(None, "jack", "tokenizer", "counts are approximate", "broken")
+        await degrade.report(
+            None, "jack", "tokenizer", "counts are approximate", "broken"
+        )
         is False
     )
 

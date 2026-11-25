@@ -1063,9 +1063,7 @@ class Wechat:
                 f"stream is re-read from its old place, so those messages are "
                 f"answered again"
             )
-            logger.warning(
-                "wechat %s: %s", session.agent, session.cursor_error
-            )
+            logger.warning("wechat %s: %s", session.agent, session.cursor_error)
             if session.cursor_failures >= CURSOR_FAILURES:
                 # **A file that has refused every retry is damage.**  The
                 # cursor is the stream's place; continuing would keep answering
@@ -1073,8 +1071,7 @@ class Wechat:
                 # and the status names the path to fix.
                 session.cursor_terminal = True
                 logger.error(
-                    "wechat %s: polling stopped after %d cursor-write failures; "
-                    "fix %s",
+                    "wechat %s: polling stopped after %d cursor-write failures; fix %s",
                     session.agent,
                     session.cursor_failures,
                     session_path(session.agent),

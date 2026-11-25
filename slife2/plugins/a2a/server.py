@@ -2356,9 +2356,7 @@ def build_server(
             # directory behind it is not a member.  The maker's own name stays:
             # a subagent's roster lists it as a peer.
             wanted = {safe_name(agent)} | {safe_name(one) for one in members}
-            found = {
-                name: value for name, value in found.items() if name in wanted
-            }
+            found = {name: value for name, value in found.items() if name in wanted}
             # `offline` is the card vocabulary's word and the honest one here:
             # nothing is listening for this member at this moment.  It says
             # nothing about whether a message would reach it — that is the one

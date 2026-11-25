@@ -515,8 +515,7 @@ def write_claim(claim: AgentClaim) -> None:
     path = agent_claim_path(claim.name)
     if not _write_json_atomic(path, claim):
         raise OSError(
-            f"could not claim agent {claim.name!r} at {path}; fix the path and "
-            f"restart"
+            f"could not claim agent {claim.name!r} at {path}; fix the path and restart"
         )
 
 

@@ -691,7 +691,9 @@ class TurnRuntime:
         missing = payload.get("missing") or []
         unreadable_rows = payload.get("unreadable") or []
         if not isinstance(missing, list) or not isinstance(unreadable_rows, list):
-            raise unreadable("the context store", "report the restore's damage", payload)
+            raise unreadable(
+                "the context store", "report the restore's damage", payload
+            )
         if missing or unreadable_rows:
             raise RuntimeError(
                 "the stored conversation cannot be restored: "

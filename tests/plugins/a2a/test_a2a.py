@@ -5081,7 +5081,6 @@ async def test_group_tools_on_the_peer_network(
             "a publish count is the transport's, not the model's"
         )
 
-
         assert published[0][0] == sorted([PEER, "bob"])
         assert published[0][1]["kind"] == group_store.KIND_SET
         assert published[0][1]["group"] == GROUP

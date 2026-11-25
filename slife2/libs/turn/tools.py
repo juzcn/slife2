@@ -863,9 +863,7 @@ class ToolRegistry:
                 f"Find it with tool_search, then load it with func_tool_load."
             )
             if hint_error:
-                detail += (
-                    f" (The catalogue could not be asked about it: {hint_error})"
-                )
+                detail += f" (The catalogue could not be asked about it: {hint_error})"
         if call.error is not None:
             return f"Error: {call.error}\n{detail}", False
         return f"Error: {detail}", False
