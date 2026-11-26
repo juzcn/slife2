@@ -45,7 +45,7 @@ def a_home(path: Path) -> None:
 
 
 def test_version_is_exposed() -> None:
-    assert slife2.__version__ == "0.5.0"
+    assert slife2.__version__ == "0.6.0"
 
 
 def test_package_import_does_not_pull_in_textual() -> None:
@@ -140,7 +140,7 @@ def test_version_prints_the_version(capsys) -> None:
     with pytest.raises(SystemExit) as exit_info:
         main(["--version"])
     assert exit_info.value.code == 0
-    assert "slife2 0.5.0" in capsys.readouterr().out
+    assert "slife2 0.6.0" in capsys.readouterr().out
 
 
 #: A config the loader accepts whose `default:` names a provider that is not

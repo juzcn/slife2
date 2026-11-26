@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Document** | Software Design Description (SDD) |
-| **Version** | 0.5.0 |
-| **Date** | 2026-11-14 |
+| **Version** | 0.6.0 |
+| **Date** | 2026-11-26 |
 | **Status** | Normative |
 | **Audience** | Developers, operators, and reviewers of slife2 |
 
@@ -43,7 +43,7 @@ order, private helpers, literal values — belong in the code and its comments.
 
 ### 1.1 Purpose
 
-This document defines the software design of slife2 version 0.5.0, for a person
+This document defines the software design of slife2 version 0.6.0, for a person
 who will change the code or operate the system. It states the architecture and
 process model, the contract every plugin implements, the behavior of the turn
 loop, model backends, tool system and memory, the interfaces between the
