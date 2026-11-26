@@ -253,9 +253,7 @@ def test_openai_finish_reason_becomes_a_finish_event() -> None:
 
 def test_openai_normalises_the_deprecated_function_call_finish() -> None:
     """The legacy ending is the same one the other wires report."""
-    event = _oa(
-        choices=[{"index": 0, "delta": {}, "finish_reason": "function_call"}]
-    )
+    event = _oa(choices=[{"index": 0, "delta": {}, "finish_reason": "function_call"}])
     assert openai_translate(event) == [Finish(stop_reason="tool_calls")]
 
 
@@ -1853,9 +1851,7 @@ async def test_a_split_surrogate_pair_reaches_the_result_whole() -> None:
     one hop that carries it."""
     server = build_llm_server(
         name="t",
-        streamer=scripted(
-            Chunk(text="\ud83d"), Chunk(text="\ude00"), Finish("stop")
-        ),
+        streamer=scripted(Chunk(text="\ud83d"), Chunk(text="\ude00"), Finish("stop")),
     )
     result, _chunks = await call_stream_chat(
         server, messages=[{"role": "user", "content": "hi"}], tools=[], model="m"

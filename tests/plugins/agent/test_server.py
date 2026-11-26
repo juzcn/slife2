@@ -1422,9 +1422,7 @@ async def test_a_model_asking_for_input_is_told_an_image_message_waits(
         ScriptedTurn(
             result=StreamChatResult(
                 text="checking",
-                tool_calls=(
-                    ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}),
-                ),
+                tool_calls=(ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}),),
                 stop_reason="tool_calls",
                 usage=Usage(),
             ),
