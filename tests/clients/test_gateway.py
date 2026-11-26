@@ -811,8 +811,7 @@ def test_the_gateway_names_no_time_value_that_does_not_exist() -> None:
     assert "CALL_TIMEOUT_SECONDS" not in source
 
 
-@pytest.mark.asyncio
-async def test_the_connect_budget_is_not_a_deadline_on_a_call(monkeypatch) -> None:
+def test_the_connect_budget_is_not_a_deadline_on_a_call(monkeypatch) -> None:
     """**A connect budget is not a client's patience**, and it was read as one.
 
     `Client(timeout=…)` is not this module's to set: FastMCP turns it into the
@@ -824,30 +823,19 @@ async def test_the_connect_budget_is_not_a_deadline_on_a_call(monkeypatch) -> No
     still running at the far end, and the module's own prose ("no clock lives
     here") was what it contradicted.
 
-    Asserted the way it was found: shrink the registry value — the documented way
-    to tune it, and the reason consumers read it at call time — and then make a
-    call that outlives it.  A client-wide deadline coming back would fail this
-    with a timeout naming a number nobody asked for.
+    Asserted at construction, where the two bounds are decided: the handshake
+    keeps `init_timeout` from the registry, and the session is handed no
+    `read_timeout_seconds` — the field FastMCP derives from `timeout=`.  The
+    first form of this test shrank `connect_tools` and then connected, so the
+    handshake read the same shrunken value; under `-n auto` a loaded machine
+    could expire the connect before the call ever ran.
     """
-    slow = FastMCP("slow")
-
-    @slow.tool
-    def render(seconds: float = 0.0) -> str:
-        """Take longer than the budget below, the way a real render does."""
-        import time
-
-        time.sleep(seconds)
-        return "rendered"
-
     monkeypatch.setattr(_T.timeouts.ready, "connect_tools", 0.2)
 
-    client = gateway.make_client(slow, lambda _message: None)
-    async with client:
-        result = await client.call_tool(
-            "render", {"seconds": 0.6}, raise_on_error=False
-        )
+    client = gateway.make_client(server(), lambda _message: None)
 
-    assert "rendered" in gateway.flatten(result.content)
+    assert client._init_timeout == 0.2
+    assert client._session_kwargs["read_timeout_seconds"] is None
 
 
 def test_the_client_speaks_the_handshake_era() -> None:
