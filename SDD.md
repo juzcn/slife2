@@ -2250,8 +2250,11 @@ the login live only in this process; `wechat_check_status` says
 The cursor is the stream's place: a failed write is retried on the next move and
 answers `cursor_saved: false` with the path until one lands; three consecutive
 failures stop the poll (`polling: false`), because continuing would answer the
-replay window again after every restart. Fix the path or disk; a restart before
-the login file lands needs a new scan.
+replay window again after every restart. **The failure belongs to the login that
+met it**: a new scan and a logout clear the cursor's failure count and its
+terminal flag, because a fresh stream cannot be stopped by the previous login's
+damage — and `wechat_login` cannot repair it, since the token is already live.
+Fix the path or disk; a restart before the login file lands needs a new scan.
 
 While a login waits, the session holds the code itself: `wechat_check_status`
 hands out the drawn QR and what it encodes. A code that expires is replaced in

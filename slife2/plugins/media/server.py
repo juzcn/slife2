@@ -214,8 +214,10 @@ async def _read_text(ctx: Context, value: str) -> str:
     path = _input_path(ctx, value)
     try:
         return await asyncio.to_thread(path.read_text, encoding="utf-8")
-    except OSError as exc:
-        raise ToolError(f"could not read {value!r}: {exc}") from exc
+    except (OSError, UnicodeError) as exc:
+        # A `UnicodeDecodeError` is not an `OSError`, and a text file saved in
+        # the machine's own codepage is the ordinary case this refusal is for.
+        raise ToolError(f"could not read {value!r} as UTF-8 text: {exc}") from exc
 
 
 async def _place(written: str, target: Path) -> None:

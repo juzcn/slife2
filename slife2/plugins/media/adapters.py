@@ -750,8 +750,11 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         url = output.get("video_url")
         if not url:
             results = output.get("results") or []
-            if isinstance(results, list) and results:
-                url = (results[0] or {}).get("url")
+            # The first entry is a mapping when the provider follows its own
+            # schema; a list of strings is an answer this build cannot read,
+            # and the refusal below quotes it rather than raising `AttributeError`.
+            if isinstance(results, list) and results and isinstance(results[0], dict):
+                url = results[0].get("url")
         if not url:
             raise MediaAdapterError(
                 f"no video in the finished job: {str(output)[:300]}"
@@ -847,7 +850,10 @@ class DashScopeAIGCAdapter(_HttpClientMixin):
         output = await self._generate(model, content, params)
         if text := output.get("text"):
             return str(text)
-        if text := (output.get("sentence") or {}).get("text"):
+        sentence = output.get("sentence")
+        # A `sentence` that is not a mapping is an answer this build cannot
+        # read; the refusal below quotes the whole output.
+        if isinstance(sentence, dict) and (text := sentence.get("text")):
             return str(text)
         found = [
             str(item["text"]) for item in self._content(output) if item.get("text")

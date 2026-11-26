@@ -249,6 +249,24 @@ async def test_vectors_come_back_in_input_order_however_the_list_is_ordered() ->
 
 
 @pytest.mark.asyncio
+async def test_a_duplicate_index_is_refused() -> None:
+    """Two vectors claiming one input leave another text unattributed."""
+
+    class _Duplicate(_FakeOpenAI):
+        async def _create(self, *, model: str, input: list[str]) -> Any:
+            self.requests.append((model, list(input)))
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=0, embedding=[1.0]),
+                    SimpleNamespace(index=0, embedding=[2.0]),
+                ]
+            )
+
+    with pytest.raises(RuntimeError, match=r"indexed \[0, 0\]"):
+        await _client("mystery", _Duplicate()).embed(["one", "two"])
+
+
+@pytest.mark.asyncio
 async def test_a_key_that_did_not_resolve_is_named() -> None:
     """Better than the 401 a placeholder bearer token produces, which says
     nothing about which `${VAR}` is missing."""
@@ -468,13 +486,20 @@ async def test_embed_answers_with_the_vectors_over_the_wire() -> None:
 
 
 def _unreachable() -> Any:
-    """The SDK's connect failure: nothing was sent, so nothing was billed."""
+    """The SDK's connect failure: nothing was sent, so nothing was billed.
+
+    The SDK chains the transport's own error as the cause, and that is what
+    tells a connect failure from a read failure — both are
+    `APIConnectionError` at the top level.
+    """
     import httpx2
     from openai import APIConnectionError
 
-    return APIConnectionError(
+    failure = APIConnectionError(
         request=httpx2.Request("POST", "http://example.invalid/v1/embeddings")
     )
+    failure.__cause__ = httpx2.ConnectError("connection refused")
+    return failure
 
 
 @pytest.mark.asyncio
@@ -525,6 +550,35 @@ async def test_a_connection_that_keeps_failing_is_not_retried_for_ever() -> None
             await client.call_tool("embed", {"texts": ["a"]})
 
     assert attempts == [["a"], ["a"]], "exactly the one retry, and no more"
+
+
+@pytest.mark.asyncio
+async def test_a_read_failure_is_not_retried() -> None:
+    """**The request was sent, so it may have been billed.**  Every transport
+    error is an `APIConnectionError`; only the connect failure is repeated."""
+    import httpx2
+    from fastmcp.exceptions import ToolError
+    from openai import APIConnectionError
+
+    fake = _FakeOpenAI(dimension=2)
+    attempts: list[list[str]] = []
+
+    async def cut_off(*, model: str, input: list[str]) -> Any:
+        attempts.append(list(input))
+        failure = APIConnectionError(
+            request=httpx2.Request("POST", "http://example.invalid/v1/embeddings")
+        )
+        failure.__cause__ = httpx2.ReadError("connection dropped mid-response")
+        raise failure
+
+    fake.embeddings.create = cut_off
+    server = build_server(default_config(), client=_client("mystery", fake))
+
+    async with Client(server) as client:
+        with pytest.raises(ToolError, match="Connection error"):
+            await client.call_tool("embed", {"texts": ["a"]})
+
+    assert attempts == [["a"]], "a read failure is a request that was sent"
 
 
 @pytest.mark.asyncio

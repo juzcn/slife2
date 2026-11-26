@@ -1537,6 +1537,15 @@ def build_server(
         # dialling the old address would fail while the clock's fires succeeded
         # (or the reverse after a partial restart).
         live_config = live()
+        # **A run left inside the start call is resolved before this one is
+        # decided.**  `dispatching` is the marker a stopped process leaves
+        # when the peer call was reached and its answer was not recorded; the
+        # sweep asks the agent-task plugin about it by name, and a manual run
+        # that skipped that step would reopen or settle a run whose task may
+        # exist.  The call is local unless a marked run is in the ledger.
+        await _resolve_dispatching(
+            live_config, store, tasks_client=tasks_client, locks=locks
+        )
         # **One decision at a time for this task** (`RunLocks`).  Everything
         # below is the run's state, and the same three steps are reached by a
         # maker, its subagent, the poll's fire and the model's own call.
@@ -1616,6 +1625,12 @@ def build_server(
         agent = agent_of(ctx)
         store = store_for(agent)
         name = name.strip()
+        # `schedule_run_now`'s first step, for its reason: a run left inside
+        # the start call is resolved against the agent-task plugin instead of
+        # being filed `skipped` over a task that may exist.
+        await _resolve_dispatching(
+            live(), store, tasks_client=tasks_client, locks=locks
+        )
         # Under the task's lock: a skip that lands between a dispatch's record
         # and its attach would close a run whose background task is starting;
         # `attach` refuses the write, and the work would run with the ledger

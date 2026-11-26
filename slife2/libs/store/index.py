@@ -68,6 +68,7 @@ import sqlite_vec
 
 import slife2.helpers.timeouts as _T
 from slife2.helpers.clock import at
+from slife2.helpers.text import encodable
 from slife2.helpers.timeutil import (
     BOUND_GRAMMAR,
     InvalidTimeBound,
@@ -393,37 +394,12 @@ def _rowid(cursor: sqlite3.Cursor, *, what: str) -> int:
 def storable(text: str) -> str:
     """Text SQLite will encode.
 
-    Surrogates cannot be encoded to UTF-8, so binding one raises
-    `UnicodeEncodeError` — which is a failed write, and a failed write now fails
-    the turn outright rather than losing it quietly (see
-    `slife2.libs.plugin.protocol.open_server`). Neither is something an emoji in somebody's
-    answer should be able to bring about, which is why the surrogate is dealt
-    with here rather than the failure being handled there.
-
-    Surrogates are reachable without anybody typing one, because a provider's
-    token stream is JSON and CPython's `json` does not combine `\\uXXXX` pairs:
-    `json.loads('"\\\\ud83d\\\\ude00"')` returns **two** characters, and both are
-    surrogates.  That is how an emoji arrives.  So there are two cases and they
-    want opposite treatment:
-
-    * a **pair** is a real character — an emoji — split by the escape and wanting
-      to be put back together;
-    * a **lone** surrogate is not a character at all.  It is an artefact of a
-      split mid-character, it cannot be displayed, and U+FFFD is what every
-      other decoder in the stack substitutes.
-
-    The UTF-16 round trip does exactly that and nothing else: `surrogatepass`
-    gets the surrogates *out* of the string as bytes, and UTF-16's decoder is
-    the one Python codec that recombines a valid pair and reports an unpaired
-    one as a replacement.  Encoding to UTF-8 with `errors="replace"` is the
-    tempting one-liner and is wrong — it turns the emoji into `??` and a lone
-    surrogate into a question mark nobody can tell from a typed one.
-
-    Safe on a JSON document as well as on plain text: a surrogate can only come
-    out of `json.dumps` from inside a string literal, and U+FFFD is not one of
-    JSON's metacharacters.
+    The rule is `slife2.helpers.text.encodable`'s — a split surrogate pair is
+    recombined, a lone one becomes U+FFFD — so a provider's JSON stream cannot
+    fail a write or an MCP result.  The name is the store's because every
+    caller here reads it as "fit for this column".
     """
-    return text.encode("utf-16", "surrogatepass").decode("utf-16", "replace")
+    return encodable(text)
 
 
 def where_clause(clauses: list[str]) -> str:

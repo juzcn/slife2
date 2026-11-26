@@ -53,6 +53,7 @@ from slife2.libs.plugin.protocol import (
     open_server,
 )
 from slife2.libs.plugin.vocabulary import FORGET
+from slife2.libs.store.db import safe_agent_name
 
 from .core import SUBAGENT_CREATE, SUBAGENT_REMOVE, AgentCore, opening_messages
 
@@ -132,6 +133,37 @@ def register_tools(
 
     maker_of = conversation_reader("agent to make a subagent for", "a subagent")
     remover_of = conversation_reader("agent to remove a subagent of", "a subagent")
+
+    def checked_name(name: str) -> str:
+        """The name a subagent tool was given, or the refusal it earns.
+
+        **A name with no ASCII letter or digit cannot be a directory.**  The
+        name becomes `agents/<maker>/subagents/<name>`, and `safe_agent_name`
+        replaces everything outside `[A-Za-z0-9._-]` with `_` and then strips
+        `._-`; a name made only of those characters reduces to nothing and the
+        path builder raises a bare `ValueError`.  A model typing a Chinese or
+        punctuation-only name is owed the constraint, not a traceback.
+        """
+        wanted = name.strip()
+        if not wanted:
+            raise ToolError("a subagent needs a name")
+        try:
+            safe_agent_name(wanted)
+        except ValueError as exc:
+            raise ToolError(
+                f"{wanted!r} cannot name a subagent: its name becomes a "
+                f"directory, so it needs at least one ASCII letter or digit."
+            ) from exc
+        return wanted
+
+    def on_disk(held: list[Path], directory: Path) -> Path:
+        """The directory a case-variant name reaches, spelled as it is on disk.
+
+        A filesystem that folds case makes `Jill` and `jill` one directory, so
+        the caller's spelling is not the name the record and the conversation
+        key are written under.  A new name is returned as given.
+        """
+        return next((one for one in held if one == directory), directory)
 
     @mcp.tool
     async def subagents(agent: str) -> dict[str, Any]:
@@ -236,7 +268,12 @@ def register_tools(
                 "to — so a subagent of yours would have nothing listening for "
                 "it. Ask your own maker for what you need."
             )
-        directory = subagent_path(maker, name)
+        directory = subagent_path(maker, checked_name(name))
+        held = subagent_dirs(maker)
+        # **The on-disk spelling is the name.**  `Jill` and `jill` are one
+        # directory where the filesystem folds case, so the caller's spelling
+        # must not become a second record for a subagent that already exists.
+        directory = on_disk(held, directory)
         key = conversation_key(maker, directory.name)
         # **A name being removed is not a name to make.**  The check is before
         # the first filesystem read and there is no await between it and the
@@ -244,7 +281,6 @@ def register_tools(
         # this call either makes it first (and the removal then deletes it) or
         # is refused and leaves the delete alone.
         core.conversations.refuse_removal(key, subject=repr(directory.name))
-        held = subagent_dirs(maker)
         created = directory not in held
         if created and directory.exists():
             raise ToolError(
@@ -365,8 +401,16 @@ def register_tools(
                 f"a subagent cannot remove a subagent: {describe(who)} owns no "
                 f"subagents — its maker does. Ask your own maker to remove it."
             )
-        directory = subagent_path(maker, name)
-        if directory not in subagent_dirs(maker):
+        wanted = name.strip()
+        held = subagent_dirs(maker)
+        try:
+            directory = on_disk(held, subagent_path(maker, wanted))
+        except ValueError:
+            # A name that cannot be a directory cannot name a subagent, so it
+            # is one this agent does not have — the same answer as any other
+            # name that is not there.
+            return {"name": wanted, "removed": False}
+        if directory not in held:
             if directory.exists():
                 raise ToolError(
                     f"{directory.name!r} is not a subagent of {maker}'s — it is "

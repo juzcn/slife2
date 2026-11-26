@@ -393,6 +393,21 @@ async def test_a_text_file_is_read_for_speech() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_text_file_in_another_encoding_is_a_refusal() -> None:
+    """A `UnicodeDecodeError` is not an `OSError`; it used to escape the tool as
+    a raw codec traceback instead of a sentence the model can act on."""
+    script = agent_dir("jack") / "script.txt"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_bytes("中文".encode("gb18030"))
+
+    async with Client(server_for(Writing())) as client:
+        answer = await refused(client, "text_to_speech", input="script.txt")
+
+    assert "UTF-8" in answer
+    assert "codec" in answer
+
+
+@pytest.mark.asyncio
 async def test_speech_needs_text_or_a_text_file() -> None:
     async with Client(server_for(FakeAdapter())) as client:
         answer = await refused(client, "text_to_speech")

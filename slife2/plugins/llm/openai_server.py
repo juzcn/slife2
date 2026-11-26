@@ -309,7 +309,13 @@ def translate(event: Any) -> list[ProviderEvent]:
 
     finish = getattr(choice, "finish_reason", None)
     if finish:
-        events.append(Finish(stop_reason=str(finish)))
+        reason = str(finish)
+        if reason == "function_call":
+            # **The deprecated spelling of "the model called a tool".**  The
+            # Anthropic and Responses adapters both report `tool_calls`, and a
+            # caller comparing backends must not be told a different story.
+            reason = "tool_calls"
+        events.append(Finish(stop_reason=reason))
 
     return events
 

@@ -925,6 +925,11 @@ async def report_entry(
     one = family.held(name)
     if one is None:
         return {"name": name, "state": state_word(raw, None)}
+    if raw.get("enabled") is False:
+        # The file's switch, for `describe_entry`'s reason: `get` hands back
+        # this entry's `config` beside `state`, and the two must not disagree
+        # because the process has not restarted since the edit.
+        return {"name": name, "enabled": False, "state": "off"}
     return entry_report(one, name, words=words)
 
 
@@ -1095,7 +1100,10 @@ def describe_entry(
     the same key `entry_report` writes.
     """
     row: dict[str, Any] = {"name": name, "state": state_word(raw, one)}
-    if one is not None and one.settings.enabled:
+    # **The file's switch, not the held entry's.**  The listing is built from
+    # the file, so a hand-written `enabled: false` must not be answered with a
+    # live count beside `state: off`; the held settings can be a restart behind.
+    if raw.get("enabled") is not False and one is not None:
         if one.usable:
             row[f"{words.unit}s"] = len(one.rows or [])
         elif one.error:
@@ -1333,6 +1341,17 @@ class Documents:
             updated = dict(self.entries)
             updated[name] = make()
             self.entries = updated
+
+    def remember(self, name: str, value: Any) -> None:
+        """Put one entry into the mirror, after the file has been changed.
+
+        **Copy-on-write**, for `forgotten`'s reason: `list_sources` iterates the
+        held dict on a worker thread while a tool writes on the loop, and an
+        insertion into the dict that thread is reading raises "dictionary
+        changed size during iteration".  A reader keeps whichever complete dict
+        it captured; the mirror moves to a new one.
+        """
+        self.entries = {**self.entries, name: value}
 
     def forgotten(self, name: str) -> None:
         """Drop one entry from the mirror, after the file has been changed.

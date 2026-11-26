@@ -1330,7 +1330,10 @@ def build_server(
             until=until,
             limit=limit,
             offset=offset,
-            category=category.strip(),
+            # The same normalisation the save applies: a filesystem strips a
+            # trailing dot or space from a path component, so `images.` files a
+            # document under `images/` and must list there too.
+            category=category.strip().rstrip(". "),
         )
 
     # ── Reports ──────────────────────────────────────────────────────────
@@ -2180,11 +2183,17 @@ def _grep_hits(
                 pieces.append(piece)
                 positions.extend([index] * len(piece))
             folded = "".join(pieces)
+        # **One original address, one hit.**  A casefold expansion (`ß` -> `ss`)
+        # puts two folded matches on one original character; two rows at one
+        # address would over-count `matched`, and a `next` equal to the shown
+        # match would page to itself for ever.
+        previous: int | None = None
         found = folded.find(wanted)
         while found >= 0:
             at = offset + (found if positions is None else positions[found])
-            if at >= after:
+            if at >= after and at != previous:
                 yield number, at, line, offset
+            previous = at
             found = folded.find(wanted, found + len(wanted))
 
 
@@ -2247,14 +2256,20 @@ def _grep_finalize(
             continue
         if len(shown) == 1:
             match = shown[0]
-            if not match.get("cut"):
+            # **The only match is fitted again when this page carries an
+            # address.**  `_grep_answer` fitted a long line before `next`
+            # existed; clearing the match instead would answer with no matches
+            # and `next` pointing at the match itself, so the same page would
+            # come back for ever.  A window already cut is its own line for the
+            # second fit — it can only shrink, and `text_char` is its start.
+            if match.get("cut"):
+                line, line_start = match["text"], match["text_char"]
+            else:
                 match["cut"] = True
-                match["text"], match["text_char"] = _fit_match_text(
-                    page, match["text"], wanted, budget, match["start"]
-                )
-                continue
-            first_unshown = match["char"]
-            shown.clear()
+                line, line_start = match["text"], match["start"]
+            match["text"], match["text_char"] = _fit_match_text(
+                page, line, wanted, budget, line_start
+            )
             continue
         raise ToolError(
             f"a {budget}-byte window cannot hold this answer — raise "

@@ -183,6 +183,7 @@ from collections.abc import (
     AsyncGenerator,
     Awaitable,
     Callable,
+    Collection,
     Mapping,
     Sequence,
 )
@@ -1980,7 +1981,9 @@ def local_tools(
             # was asked to show.
             unloaded_only=arguments.get("unloaded_only") is True,
         )
-        return _results(found, stale_sources() if stale_sources else None)
+        return _results(
+            found, stale_sources() if stale_sources else None, live_sources()
+        )
 
     async def page(arguments: dict[str, Any]) -> dict[str, Any]:
         category = str(arguments.get("category") or "").strip()
@@ -2005,7 +2008,9 @@ def local_tools(
             limit=_whole(arguments, "limit"),
             offset=_whole(arguments, "offset"),
         )
-        return _page_answer(found, stale_sources() if stale_sources else None)
+        return _page_answer(
+            found, stale_sources() if stale_sources else None, live_sources()
+        )
 
     async def load(arguments: dict[str, Any]) -> dict[str, Any]:
         names = _names_of(arguments)
@@ -2314,7 +2319,9 @@ def _whole(arguments: Mapping[str, Any], key: str) -> int:
         raise ToolError(f"`{key}` is a whole number; {given!r} is not one") from None
 
 
-def _record(row: Mapping[str, Any]) -> dict[str, Any]:
+def _record(
+    row: Mapping[str, Any], live: Collection[str] | None = None
+) -> dict[str, Any]:
     """One search row, with the same fields every time.
 
     **The same fields, because the reader is a model**: a list whose entries
@@ -2357,14 +2364,20 @@ def _record(row: Mapping[str, Any]) -> dict[str, Any]:
         "category": row.get("category"),
         "source": row.get("source_id"),
         "status": row.get("status"),
-        "loaded": row.get("load_status") == "loaded",
+        # **A load flag on a source that is not answering is not a tool the
+        # model has.**  `list_tools` gates on the live sources, so the row
+        # still says `loaded` in the catalogue; the model's answer must not.
+        "loaded": row.get("load_status") == "loaded"
+        and (live is None or str(row.get("source_id") or "") in live),
         "matched": found_by,
         "meaning": similarity if isinstance(similarity, float) else None,
         "description": str(row.get("description") or ""),
     }
 
 
-def _listing(row: Mapping[str, Any]) -> dict[str, Any]:
+def _listing(
+    row: Mapping[str, Any], live: Collection[str] | None = None
+) -> dict[str, Any]:
     """One catalogue row, with the fields a search result is read by.
 
     **The same names as `_record`** — `name`, `category`, `source`, `status`,
@@ -2386,13 +2399,16 @@ def _listing(row: Mapping[str, Any]) -> dict[str, Any]:
         "category": str(row.get("category") or ""),
         "source": str(row.get("source_id") or ""),
         "status": str(row.get("status") or ""),
-        "loaded": row.get("load_status") == "loaded",
+        "loaded": row.get("load_status") == "loaded"
+        and (live is None or str(row.get("source_id") or "") in live),
         "description": str(row.get("description") or ""),
     }
 
 
 def _results(
-    found: Mapping[str, Any], stale: Mapping[str, str] | None = None
+    found: Mapping[str, Any],
+    stale: Mapping[str, str] | None = None,
+    live: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """A tool search's rows, as the object a model reads.
 
@@ -2422,7 +2438,7 @@ def _results(
         )
     meaning = found.get("meaning")
     answer = search_answer(
-        [_record(row) for row in rows],
+        [_record(row, live) for row in rows],
         scores=[row.get("similarity") for row in rows],
         worded=any(row.get("matched_in") for row in rows),
         limit=SEARCH_LIMIT,
@@ -2440,7 +2456,9 @@ def _results(
 
 
 def _page_answer(
-    found: Mapping[str, Any], stale: Mapping[str, str] | None = None
+    found: Mapping[str, Any],
+    stale: Mapping[str, str] | None = None,
+    live: Collection[str] | None = None,
 ) -> dict[str, Any]:
     """A listing's page, as the object a model reads.
 
@@ -2480,7 +2498,7 @@ def _page_answer(
         raise ConnectionError(
             f"tool_list could not read the catalogue's page — {exc}"
         ) from None
-    answer = {"tools": [_listing(row) for row in rows], **page}
+    answer = {"tools": [_listing(row, live) for row in rows], **page}
     if stale:
         answer["sources_stale"] = [
             f"{name}: {reason}" for name, reason in sorted(stale.items())

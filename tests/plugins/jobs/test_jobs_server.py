@@ -280,7 +280,13 @@ async def test_job_names_are_python_identifiers_and_not_the_plugins_own(
 ) -> None:
     config_on_disk(isolated_runtime)
     async with Client(build_server(load())) as client:
-        for name in ("job_list", "with-dash", "_private", "../outside"):
+        for name in (
+            "job_list",
+            "job__list",
+            "with-dash",
+            "_private",
+            "../outside",
+        ):
             with pytest.raises(ToolError):
                 await client.call_tool("job_set", {"name": name, "code": SLUGIFY})
 

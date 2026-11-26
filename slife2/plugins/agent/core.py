@@ -2541,20 +2541,42 @@ class AgentCore:
         The harness calls this at a turn's next iteration boundary and writes the
         call and its result into the conversation, so a message that arrives
         mid-turn reaches the turn it arrived in. It hands over the first message
-        waiting for this conversation.
+        waiting for this conversation. A message carrying images is not handed
+        over — a tool result carries text — and the answer says one is waiting.
         """
         conversation_id = request_conversation(ctx)
         if not conversation_id:
             return NOTHING_WAITING
+        turn = turn_of(request_meta(ctx))
         # **`or`, because `""` is not an answer here.**  `take_waiting` returns
         # the empty string for the one thing it refuses — a head that carries
         # images, which cannot ride a tool result — and *this* is a tool result:
         # a blank one reads as a failure rather than as "nothing was handed
         # over", which is the whole reason `NOTHING_WAITING` is a sentence.
-        return (
-            self.take_waiting(conversation_id, turn_of(request_meta(ctx)))
-            or NOTHING_WAITING
-        )
+        taken = self.take_waiting(conversation_id, turn)
+        if taken:
+            return taken
+        if self.waiting_images(conversation_id, turn):
+            return (
+                "A message with an image is waiting. It cannot be delivered "
+                "inside this turn — a tool result carries text — so it will run "
+                "as its own turn when this one ends."
+            )
+        return NOTHING_WAITING
+
+    def waiting_images(self, conversation_id: ConversationId, turn: str = "") -> bool:
+        """Whether the message this call could take is held back by its images.
+
+        The same head `take_waiting` peeks at, without popping it, so the
+        answer to a model's own call is "one is waiting" rather than the false
+        "nothing has arrived".
+        """
+        loop = self.conversations.get(conversation_key(*conversation_id))
+        if loop is None or not loop.inbox:
+            return False
+        if turn and turn != loop.turn_token:
+            return False
+        return bool(loop.inbox[0].images)
 
     async def context_rebuild(
         self,

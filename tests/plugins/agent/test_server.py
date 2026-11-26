@@ -1412,6 +1412,50 @@ async def test_a_call_from_another_turn_cannot_use_this_turns_live_loop(
 
 
 @pytest.mark.asyncio
+async def test_a_model_asking_for_input_is_told_an_image_message_waits(
+    context, hub, cabinet
+) -> None:
+    """**`NOTHING_WAITING` would be false.**  A message with images cannot ride
+    a tool result, so `take_waiting` refuses it — and the model's own call is
+    owed that reason rather than "nothing has arrived"."""
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(
+                    ToolCall(id="c1", name=CHECK_NEW_INPUT, arguments={}),
+                ),
+                stop_reason="tool_calls",
+                usage=Usage(),
+            ),
+            chunks=[Chunk(text="checking")],
+            delay=0.1,  # timeouts: the value this test is built around, not a budget
+        ),
+        text_turn("done"),
+        text_turn("the picture"),
+    )
+    hub_client, server = wired(backend, context, cabinet_client=cabinet)
+
+    async with hub_client:
+        first = asyncio.create_task(send(server, "one"))
+        await wait_for_streams(backend)
+        second = asyncio.create_task(
+            send(server, "look", images=["data:image/png;base64,AAAA"])
+        )
+        await asyncio.sleep(0.05)
+        one, two = await asyncio.gather(first, second)
+
+    tools = [
+        str(message.content)
+        for message in backend.calls[1][0]
+        if message.role == "tool"
+    ]
+    assert any("A message with an image is waiting" in text for text in tools)
+    assert one.data["text"]
+    assert two.data["injected"] is False, "the image message kept its own turn"
+
+
+@pytest.mark.asyncio
 async def test_a_cut_in_says_where_it_came_from_and_which_submission_it_drew(
     context,
 ) -> None:
@@ -4224,6 +4268,25 @@ def subagent_of(agent: str, name: str) -> Path:
     helper that asked `agent_dir` where it lives would agree with any layout.
     """
     return agents_dir() / agent / "subagents" / name
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_cannot_be_a_directory_is_refused(context, hub) -> None:
+    """**A name with no ASCII letter or digit cannot become a directory.**
+
+    `safe_agent_name` strips everything it replaces, so `研究` reduces to
+    nothing and the path builder raised a bare `ValueError`.  Create refuses
+    with the constraint; remove answers the missing name as it does any other.
+    """
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=FakeBackend()
+    )
+
+    with pytest.raises(ToolError, match="ASCII letter or digit"):
+        await create_subagent(server, "研究")
+
+    answer = await remove_subagent(server, "研究")
+    assert answer.data == {"name": "研究", "removed": False}
 
 
 @pytest.mark.asyncio

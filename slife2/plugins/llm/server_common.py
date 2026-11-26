@@ -41,6 +41,7 @@ from typing import Any
 import httpx2
 from fastmcp import Context, FastMCP
 
+from slife2.helpers.text import encodable
 from slife2.libs.host.config import (
     Config,
     ProviderSettings,
@@ -273,14 +274,44 @@ def call_options(
 def forced_tool(tools: list[ToolSpec], tool_choice: str) -> None:
     """Refuse a forced choice that names a tool the call does not send.
 
-    A forced choice with nothing to choose is a caller's bug this build refuses
+    A forced choice the call cannot honour is a caller's bug this build refuses
     rather than sends; every wire adapter calls this before writing
     `tool_choice`.
     """
-    if tool_choice and not tools:
+    if not tool_choice:
+        return
+    names = [tool.name for tool in tools]
+    if not names:
         raise ValueError(
             f"tool_choice {tool_choice!r} names a tool but the call sends no tools"
         )
+    if tool_choice not in names:
+        raise ValueError(
+            f"tool_choice {tool_choice!r} names a tool the call does not send "
+            f"(tools: {names})"
+        )
+
+
+def wire_safe(value: Any) -> Any:
+    """Every string in *value* as UTF-8 can carry it.
+
+    A provider's JSON can split one character across two escapes, and CPython
+    leaves the two surrogates uncombined; a lone one then cannot be encoded and
+    FastMCP's result serializer raises, losing the whole answer the result hop
+    exists to carry.  `encodable` is the one rule for that, applied to every
+    string in the result — text, thinking, reasoning blocks and a damaged
+    call's raw arguments alike.
+    """
+    if isinstance(value, str):
+        return encodable(value)
+    if isinstance(value, list):
+        return [wire_safe(one) for one in value]
+    if isinstance(value, dict):
+        return {
+            encodable(key) if isinstance(key, str) else key: wire_safe(one)
+            for key, one in value.items()
+        }
+    return value
 
 
 async def stream_chat_impl(
@@ -358,8 +389,10 @@ async def stream_chat_impl(
             "the answer was cut short and is not returned as a whole one"
         )
     # The result is the tool output; the progress stream is display only.  The
-    # result is masked here and again by `MaskingMiddleware`.
-    return masked_obj(builder.build(model).to_wire())
+    # result is masked here and again by `MaskingMiddleware`, and every string
+    # in it is made encodable — a split surrogate pair must not fail the one
+    # hop that carries the answer.
+    return wire_safe(masked_obj(builder.build(model).to_wire()))
 
 
 def read_int(source: Any, attribute: str) -> int:
@@ -938,6 +971,17 @@ def _transport_failure(exc: BaseException) -> bool:
     is the provider's answer, however unwelcome.
     """
     return any(isinstance(one, httpx2.RequestError) for one in _failure_chain(exc))
+
+
+def connection_never_opened(exc: BaseException) -> bool:
+    """Whether the request never reached the provider.
+
+    **The one failure a repeat cannot double-charge.**  A `ConnectError` means
+    nothing was sent, so trying again is free and idempotent; a read failure
+    means the request was sent and a second one may be paid for twice, which is
+    why the SDK clients are built with `max_retries=0` (`sdk_client_factory`).
+    """
+    return any(isinstance(one, httpx2.ConnectError) for one in _failure_chain(exc))
 
 
 def build_llm_server(*, name: str, streamer: Streamer) -> FastMCP:

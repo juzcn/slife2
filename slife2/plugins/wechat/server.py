@@ -1031,6 +1031,18 @@ class Wechat:
                 exc,
             )
 
+    def _forget_cursor_state(self, session: Session) -> None:
+        """Carry no cursor failure into a login that is not the one that failed.
+
+        The three fields describe one stream's place under one login.  Left
+        behind by a logout or a new scan, a terminal failure would stop the
+        fresh poll at its first check — and `wechat_login` cannot clear it,
+        because the token is already live and the login answers `connected`.
+        """
+        session.cursor_failures = 0
+        session.cursor_error = ""
+        session.cursor_terminal = False
+
     def _persist(self, session: Session) -> None:
         """Write the ack cursor, when it has moved.
 
@@ -1408,6 +1420,11 @@ class Wechat:
         saved = session.client.get_session_dict()
         session.saved_at = float(saved["saved_at"])
         session.persisted = ""
+        # **A new login starts with a cursor that has not failed.**  The three
+        # fields describe this stream's place; carried across a scan, a terminal
+        # failure from the login before would stop the new poll on its first
+        # check, and no later call could start it again.
+        self._forget_cursor_state(session)
         session.heard_from = False
         # The note a failed restore left is stale the moment a login works.
         session.restore_note = ""
@@ -1711,6 +1728,7 @@ class Wechat:
         session.persisted = ""
         session.saved_at = 0.0
         session.restore_note = ""
+        self._forget_cursor_state(session)
         forgotten = clear_session(session.agent)
         # The one departure nobody has to discover: the model asked for it.  Said
         # from here rather than from the loop's exit, because `logout` cancels

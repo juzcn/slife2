@@ -919,6 +919,30 @@ async def test_a_cursor_file_that_refuses_every_retry_stops_the_poll(
 
 
 @pytest.mark.asyncio
+async def test_a_new_login_does_not_inherit_a_cursor_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**The failure belongs to the login that met it.**  Left behind, a terminal
+    cursor would stop the next poll at its first check — and `wechat_login`
+    could not clear it, because the token is already live."""
+    signed_in("jack")
+    made = rig(monkeypatch)
+    await made.plugin.start()
+    try:
+        session = made.plugin.session("jack")
+        await until(lambda: session.client.is_logged_in)
+        session.cursor_terminal = True
+        session.cursor_failures = wechat.CURSOR_FAILURES
+        session.cursor_error = "the ack cursor could not be written"
+        await made.plugin.logout(session)
+        assert session.cursor_terminal is False
+        assert session.cursor_failures == 0
+        assert session.cursor_error == ""
+    finally:
+        await made.close()
+
+
+@pytest.mark.asyncio
 async def test_a_failed_poll_is_a_warning_naming_the_session(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

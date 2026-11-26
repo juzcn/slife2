@@ -672,26 +672,28 @@ def _arguments_that_never_streamed(
     for index, item in enumerate(getattr(response, "output", None) or []):
         if getattr(item, "type", "") != "function_call" or index in seen:
             continue
-        arguments = getattr(item, "arguments", "") or ""
-        if arguments:
-            events.append(
-                Chunk(
-                    tool_call_deltas=(
-                        ToolCallDelta(
-                            index=index,
-                            # **The whole call, not only its arguments.**  An
-                            # endpoint that assembles the call sends no
-                            # `output_item.added`, so this is the only place
-                            # the accumulator can learn the call's id and name;
-                            # without them the model's legitimate call arrives
-                            # as `name=""` and is answered "unknown tool".
-                            id=getattr(item, "call_id", None),
-                            name=getattr(item, "name", None),
-                            arguments_delta=str(arguments),
-                        ),
-                    )
+        # **An empty argument string is a zero-argument call, not no call.**
+        # The item is a `function_call`; skipping it because its arguments are
+        # empty lost the call entirely — including an endpoint that assembles
+        # a no-argument call and sends it whole.
+        events.append(
+            Chunk(
+                tool_call_deltas=(
+                    ToolCallDelta(
+                        index=index,
+                        # **The whole call, not only its arguments.**  An
+                        # endpoint that assembles the call sends no
+                        # `output_item.added`, so this is the only place
+                        # the accumulator can learn the call's id and name;
+                        # without them the model's legitimate call arrives
+                        # as `name=""` and is answered "unknown tool".
+                        id=getattr(item, "call_id", None),
+                        name=getattr(item, "name", None),
+                        arguments_delta=str(getattr(item, "arguments", "") or ""),
+                    ),
                 )
             )
+        )
     return events
 
 

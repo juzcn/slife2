@@ -91,7 +91,7 @@ from slife2.libs.host.config import (
     for_the_call,
     load_cached,
 )
-from slife2.libs.host.paths import agents_dir, turn_dbs
+from slife2.libs.host.paths import agents_dir, home_key, in_home, known_homes, turn_dbs
 from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
@@ -517,7 +517,28 @@ def build_server(
     worth having: what a test of a rebuild wants to vary is what the model
     answered, and a fake model server would make it vary the wire instead.
     """
-    embedding = EmbedderConnection(config, embedder=embedder)
+    #: The embedder, opened on first use.
+    #:
+    #: **One per home**, because the endpoint comes from `servers:` and is the
+    #: machine's, while the model and its width come from the embeddings
+    #: plugin's `describe` — which answers for the home the call came from.
+    #: One connection for the process would fix the first home's model on every
+    #: other, and an index built at one width cannot be searched at another.
+    #: The hub states the same rule for its catalogue (`embedding_for`).
+    embeddings: dict[str, EmbedderConnection] = {}
+
+    def embedding_for() -> EmbedderConnection:
+        """The embedder of the home this call is for, opened on first use."""
+        found = embeddings.get(home_key())
+        if found is None:
+            found = EmbedderConnection(current(), embedder=embedder)
+            embeddings[home_key()] = found
+        return found
+
+    async def embedding_of_call() -> Embedder:
+        """The embedder of the home this call is for, ready to use."""
+        return await embedding_for().get()
+
     injected = ask
 
     def current() -> Config:
@@ -566,7 +587,7 @@ def build_server(
         lock = syncing.setdefault(store.path, asyncio.Lock())
         async with lock:
             if store.path not in synced:
-                await indexed(store, await embedding.get())
+                await indexed(store, await embedding_of_call())
 
     async def store_of(agent: str, subagent: str) -> TurnStore:
         """One conversation's store, with its indexes brought up to date."""
@@ -600,25 +621,37 @@ def build_server(
         The pass belongs here because the turns do: a file belongs to the plugin
         that owns its schema, and a startup pass is part of owning one.
         """
-        model = await embedding.get()
         # Every per-agent store, the agent's own and its subagents'.  Named by
         # `slife2.libs.host.paths` rather than globbed here: a `*/*.db` in this directory
         # is not a description of a conversation store — `schedule.db` lives
         # beside each `turns.db` and matched it — so this pass would open the
         # scheduler's ledger as a `TurnStore` and write the turn schema into it.
-        for path in turn_dbs():
-            try:
-                await indexed(await off_loop(TurnStore, path), model)
-            except StaleSchema:
-                # The store has named the file and the column, which is the
-                # report this pass exists to make.  **The pass continues**, and
-                # that is not a lenient reading of "nothing is served until this
-                # has finished": a scan of every known home is not one
-                # conversation, and a file from an older build — possibly in a
-                # home nobody is using — must not take every readable
-                # conversation down with it.  Calls that do use the file still
-                # fail, with the same sentence, at `store_of`.
+        #
+        # **Each home's stores are synced with that home's model**, so the pass
+        # puts the ambient home in place before it asks — a second home's
+        # `embeddings:` model is not the first's, and an index built at one
+        # width cannot be searched at another.
+        everything = turn_dbs()
+        for root in known_homes():
+            mine = [path for path in everything if path.is_relative_to(root)]
+            if not mine:
                 continue
+            with in_home(root):
+                model = await embedding_of_call()
+                for path in mine:
+                    try:
+                        await indexed(await off_loop(TurnStore, path), model)
+                    except StaleSchema:
+                        # The store has named the file and the column, which is
+                        # the report this pass exists to make.  **The pass
+                        # continues**, and that is not a lenient reading of
+                        # "nothing is served until this has finished": a scan of
+                        # every known home is not one conversation, and a file
+                        # from an older build — possibly in a home nobody is
+                        # using — must not take every readable conversation down
+                        # with it.  Calls that do use the file still fail, with
+                        # the same sentence, at `store_of`.
+                        continue
         try:
             yield {}
         finally:
@@ -629,7 +662,8 @@ def build_server(
             # transport — a client left in place is one the next session is
             # handed already shut, and every `rebuild` of it would fail at its
             # first ask.
-            await embedding.close()
+            for connection in embeddings.values():
+                await connection.close()
             for client in list(model_clients.values()):
                 await close_server(client)
             model_clients.clear()
@@ -702,7 +736,7 @@ def build_server(
         store = await store_of(agent, subagent)
         turn_id = await store.save_turn(
             messages=messages,
-            embedder=await embedding.get(),
+            embedder=await embedding_of_call(),
             token_count=token_count,
             context_tokens=context_tokens,
             usage=Usage.from_wire(usage) if usage is not None else None,
@@ -922,13 +956,16 @@ def build_server(
                 "turn_search needs something to look for — `keywords`, "
                 "`sentences`, or `turn_list` to browse the history without one."
             )
+        # **The window is the caller's input, so it is judged before the
+        # history is** — `turn_list`'s rule.  Reaching the store first would
+        # make a bad `since` wait behind an index sync and report that failure
+        # instead of this refusal.
+        time_window(since, until)
         store = await read_store_of(agent, subagent)
         if store is None:
             # A conversation that was never written has no history to search,
             # and the answer is the empty page rather than a store invented to
-            # have searched it — the window is still judged first, for
-            # `turn_list`'s reason.
-            time_window(since, until)
+            # have searched it.
             return search_answer([], scores=[], worded=False, limit=page_limit(limit))
         # The store's keyword leg reads one string, and its terms are ANDed
         # either way; those same words are the meaning query when no sentence is
@@ -945,7 +982,7 @@ def build_server(
             await store.recall(
                 query=query,
                 sentences=asked,
-                embedder=await embedding.get(),
+                embedder=await embedding_of_call(),
                 since=since,
                 until=until,
                 limit=limit,
@@ -1861,7 +1898,8 @@ def build_server(
 
         # The meaning leg's questions are the decision's sentences; a period
         # recall has no question, and a keyword-only recall has only its query.
-        asker = await embedding.get() if (query or sentences) else None
+        connection = embedding_for()
+        asker = await connection.get() if (query or sentences) else None
 
         # The policy is the caller's home's, like the prompt budget: this
         # daemon serves every home, and `context:` is a section of the caller's
@@ -1973,7 +2011,7 @@ def build_server(
         ids = [int(record.turn_id) for record in rows]
         documents = [_rerank_text(record.messages) for record in rows]
         try:
-            scored = await embedding.rerank(ask, documents, top_n=len(documents))
+            scored = await embedding_for().rerank(ask, documents, top_n=len(documents))
         except Exception as exc:  # noqa: BLE001 — an optional stage's failure
             logger.info("recall_rerank_failed reason=%s", decisions.failure_text(exc))
             logger.debug("the rerank call raised", exc_info=True)

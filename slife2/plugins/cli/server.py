@@ -397,7 +397,7 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             config: The whole entry — the `config` object `cli_get` returned.
         """
         settings = await _prepare(name, config)
-        homes.current().entries[name] = settings
+        homes.current().remember(name, settings)
         logger.info("cli_set name=%s", name)
         answer: dict[str, Any] = {
             "name": name,

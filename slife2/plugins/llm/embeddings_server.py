@@ -50,7 +50,11 @@ from slife2.libs.host.config import (
     load_cached,
 )
 from slife2.libs.plugin.protocol import house_server, serve_plugin
-from slife2.plugins.llm.server_common import Leased, unresolved_key
+from slife2.plugins.llm.server_common import (
+    Leased,
+    connection_never_opened,
+    unresolved_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +319,12 @@ class EmbeddingClient:
             # is never repeated, and the hierarchy makes this branch necessary.
             raise
         except APIConnectionError as exc:
+            # **Only a connection that never opened is repeated.**  Every
+            # `httpx2.RequestError` is an `APIConnectionError` to the SDK, so
+            # the class alone also covers a read failure — request sent,
+            # response cut — and repeating that can double-bill.
+            if not connection_never_opened(exc):
+                raise
             logger.warning(
                 "%s: %s could not be reached (%s); trying once more",
                 self.provider.model,
@@ -322,9 +332,17 @@ class EmbeddingClient:
                 exc,
             )
             response = await self._embed_request(texts)
+        items = list(response.data)
+        indexes = sorted(item.index for item in items)
+        if indexes != list(range(len(items))):
+            raise RuntimeError(
+                f"{SERVER_NAME}: the embeddings endpoint answered {len(items)} "
+                f"vectors indexed {indexes} for {len(texts)} texts; an index "
+                f"must be a unique 0..{len(texts) - 1}, or a vector is "
+                f"attributed to the wrong text"
+            )
         return [
-            list(item.embedding)
-            for item in sorted(response.data, key=lambda item: item.index)
+            list(item.embedding) for item in sorted(items, key=lambda item: item.index)
         ]
 
     async def _embed_request(self, texts: list[str]) -> Any:

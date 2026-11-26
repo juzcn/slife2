@@ -120,6 +120,15 @@ def _validate_name(name: str) -> str | None:
         )
     if name.startswith("_"):
         return "a job name may not start with `_`; that form is a private helper"
+    if name.startswith(f"{CATEGORY}__"):
+        # The exposed tool adds that prefix, and `_bare` removes one: a job
+        # named `job__list` is stored under that name but looked up as `list`,
+        # so it is unreachable — and a job actually called `list` would answer
+        # for it.
+        return (
+            f"a job name may not start with `{CATEGORY}__` — the tool name adds "
+            f"that prefix, so the job would be unreachable"
+        )
     if name in _RESERVED:
         return f"{name!r} is a tool this plugin owns; choose another job name"
     return None
@@ -474,6 +483,17 @@ def build_server(
         # on the loop every conversation shares (`off_loop`).
         registry = await off_loop(_home)
         final = registry.root / f"{name}.py"
+        # **One file, one job, however the name is cased.**  On a filesystem
+        # that folds case, `Foo.py` and `foo.py` are one file; registering both
+        # would leave the first name running code the file no longer holds.
+        for installed in registry.values():
+            if installed.name != name and os.path.normcase(
+                str(installed.path)
+            ) == os.path.normcase(str(final)):
+                raise ToolError(
+                    f"{name!r} would be the same file as the installed job "
+                    f"{installed.name!r} on this filesystem — choose another name."
+                )
         #: The bytes to put back if the new code will not load.  **Bytes, not
         #: text**: a file saved in the machine's codepage is not decodable as
         #: UTF-8, and `job_read`'s advice is to rewrite it here — so a codec

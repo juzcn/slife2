@@ -2812,6 +2812,56 @@ async def test_a_long_line_pages_by_character_after_a_match() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_match_longer_than_the_window_still_pages_on() -> None:
+    """**No page may answer with no matches and a `next` that names itself.**
+
+    A match whose text fills the budget was fitted before `next` existed; the
+    page then dropped it and pointed back at its own address, so passing
+    `next` returned the identical page for ever.
+    """
+    pattern = "A" * 35000
+    body = pattern + "x" * 10 + pattern
+    await save_dump("call_oversized", body)
+
+    async with Client(cabinet()) as client:
+        first = await payload(
+            client, "dump_grep", call="call_oversized", pattern=pattern
+        )
+        second = await payload(
+            client,
+            "dump_grep",
+            call="call_oversized",
+            pattern=pattern,
+            char=first["next"],
+        )
+
+    assert first["matched"] == 2
+    assert first["matches"], "the first match is shown, not dropped"
+    assert first["matches"][0]["char"] == 0
+    assert first["next"] == len(pattern) + 10
+    assert [match["char"] for match in second["matches"]] == [len(pattern) + 10]
+
+
+@pytest.mark.asyncio
+async def test_a_casefold_expansion_is_one_match_at_one_address() -> None:
+    """`ß` casefolds to `ss`: two folded hits, one character, one match.
+
+    Counting both made `next` equal the shown match's own address, so paging
+    never advanced; the text also has no `s` character to find twice.
+    """
+    await save_dump("call_casefold_one", "ß")
+
+    async with Client(cabinet()) as client:
+        found = await payload(
+            client, "dump_grep", call="call_casefold_one", pattern="s", limit=1
+        )
+
+    assert found["matched"] == 1
+    assert [match["char"] for match in found["matches"]] == [0]
+    assert "next" not in found
+
+
+@pytest.mark.asyncio
 async def test_a_long_matched_line_keeps_its_addresses_and_is_marked_cut() -> None:
     """A match's line can be longer than the whole window.
 

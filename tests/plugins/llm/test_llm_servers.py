@@ -251,6 +251,14 @@ def test_openai_finish_reason_becomes_a_finish_event() -> None:
     assert openai_translate(event) == [Finish(stop_reason="tool_calls")]
 
 
+def test_openai_normalises_the_deprecated_function_call_finish() -> None:
+    """The legacy ending is the same one the other wires report."""
+    event = _oa(
+        choices=[{"index": 0, "delta": {}, "finish_reason": "function_call"}]
+    )
+    assert openai_translate(event) == [Finish(stop_reason="tool_calls")]
+
+
 def test_openai_content_and_finish_in_one_chunk_yield_two_events() -> None:
     """Why `translate` returns a list: the last content chunk carries the stop."""
     event = _oa(
@@ -1014,6 +1022,33 @@ def test_responses_fills_in_arguments_that_never_streamed() -> None:
     # its own deltas would be the same arguments twice.
     assert responses_translate(event, streamed={0}) == [
         Finish(stop_reason="tool_calls")
+    ]
+
+
+def test_responses_keeps_a_complete_call_with_no_arguments() -> None:
+    """An empty argument string is a **zero-argument call**, not no call.
+
+    The back-fill skipped the item when its arguments were empty, and the id
+    and name live only in that item — so the call vanished and the turn
+    recorded a plain answer.
+    """
+    event = _completed(
+        output=[
+            {
+                "type": "function_call",
+                "call_id": "c1",
+                "name": "now",
+                "arguments": "",
+            }
+        ]
+    )
+    assert responses_translate(event) == [
+        Chunk(
+            tool_call_deltas=(
+                ToolCallDelta(index=0, id="c1", name="now", arguments_delta=""),
+            )
+        ),
+        Finish(stop_reason="tool_calls"),
     ]
 
 
@@ -1811,6 +1846,24 @@ async def test_stream_chat_returns_the_assembled_text() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_split_surrogate_pair_reaches_the_result_whole() -> None:
+    """**The progress channel escapes; the result is UTF-8.**  A provider that
+    splits one emoji across two chunks left two lone surrogates, and FastMCP's
+    result serializer raised `UnicodeEncodeError` — losing the answer on the
+    one hop that carries it."""
+    server = build_llm_server(
+        name="t",
+        streamer=scripted(
+            Chunk(text="\ud83d"), Chunk(text="\ude00"), Finish("stop")
+        ),
+    )
+    result, _chunks = await call_stream_chat(
+        server, messages=[{"role": "user", "content": "hi"}], tools=[], model="m"
+    )
+    assert result.data["text"] == "\U0001f600"
+
+
+@pytest.mark.asyncio
 async def test_the_decision_options_reach_the_streamer() -> None:
     """The two per-call options cross the MCP hop, and only when set.
 
@@ -2302,6 +2355,10 @@ def test_the_decision_options_are_per_call() -> None:
     with pytest.raises(ValueError, match="sends no tools"):
         openai_build_request(
             [], [], ModelSettings(model="m"), tool_choice="_context_rebuild"
+        )
+    with pytest.raises(ValueError, match="does not send"):
+        openai_build_request(
+            [], [tool], ModelSettings(model="m"), tool_choice="another_tool"
         )
 
 

@@ -536,8 +536,11 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             ) from exc
         mirror = homes.current()
         if written:
-            mirror.entries[key] = SkillSettings(
-                env=dict(env), enabled=written.get("enabled") is not False
+            mirror.remember(
+                key,
+                SkillSettings(
+                    env=dict(env), enabled=written.get("enabled") is not False
+                ),
             )
         else:
             mirror.forgotten(key)
