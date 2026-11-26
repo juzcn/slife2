@@ -1269,7 +1269,8 @@ Rules:
   that names no turn in hand is not a clear**: the explicit clear is
   `keep.action: "clear"` (or, for the internal parser, an empty list;
   `keep.action: "ids"` requires a non-empty `turn_ids`), and a selection with
-  no known turn to keep leaves the context in hand.
+  no known turn to keep is the tool's error — the context in hand stays as it
+  is.
 - **A question has two spellings.** `sentences` are read by meaning, one question
   per entry; `query` is the words the keyword leg requires and the meaning
   fallback. The keyword leg is fused into each sentence's list, and a later
@@ -1323,8 +1324,10 @@ Rules:
   stored. A turn's ids are written into the live list when its id arrives
   (`address_turn`), with the same spelling a rebuild derives from the row, and
   the rebuild hop carries them plus `channel` so a no-op echo hands the list
-  back addressable. The selector and the model read the same annotation, and a
-  compaction's ids are the ones `_turn_compact` accepts.
+  back addressable. The selector's view annotates the assistant message of a
+  tool exchange too; the model's own view does not, so the schema tells it that
+  message's id is the one immediately before the first result's. A compaction's
+  ids are the ones `_turn_compact` accepts.
 - **The turn running carries a prompt, not a footnote.** `[TURN-PROMPT:{…}]`
   (`turn_prompt_note`) is added before the turn and removed before it is saved
   (`without_lead`), so it never reaches the row or the index; a list rebuilt
@@ -1347,25 +1350,30 @@ read by the same parser as the selector's answer and checked against the view
 before it is applied; a call with no `compact` is refused, and the harness's
 automatic call asks `select_live` for the selection first — a forced
 `_turn_compact` call under §5.3's contract over the same view. **The ids are on
-the messages**: the view annotates each addressable message
-`[MESSAGE:{"id": …}]`, the selector reads the annotation rather than a
-numbered copy, and the pair the harness writes carries the ids it chose. **The
-annotation goes on the messages the model did not write** — the person's and the
-tool's; an assistant message's content is what the model said, and a marker
-written there is a sentence it never wrote that it copies into the next answer
-(a live session showed the `cur.N` chain growing once per call). A
-tool-call-only assistant message has no text and carries no id of its own. The
+the messages**: every addressable message carries a live id, written into the
+content as `[MESSAGE:{"id": …}]` where a note belongs, and the selector reads
+the annotation rather than a numbered copy. **The annotation goes on the
+messages the model did not write** — the person's and the tool's; an assistant
+message's content is what the model said, and a marker written there is a
+sentence it never wrote that it copies into the next answer (a live session
+showed the `cur.N` chain growing once per call). **A tool exchange's assistant
+message therefore carries no annotation in the model's own view, though it keeps
+its id for the exchange rule.** The schema states the one inference this costs —
+its id is the message immediately before the first result's — and the selector's
+view annotates it too, so the selector names it without inferring anything. The
 selection is shown the last measured call and the conversation's window, through
 the same `context_usage` the status bar uses, so the model and the person read
 one figure. **Nothing is removed**: the live list, the turn's row, `covered` and
 the store's live-context list are the conversation, and the next turn starts
 from the full list. The system message and the turn's opening message are the
-fixed two; the annotated messages, historical or current, are the model's to
-drop. The legality of a tool exchange is the *schema's* rule — a call and its
-results go together — and the harness **keeps a half-named exchange in the
-view and applies the rest of the selection** (`split_exchanges`), so one
-unnamed member does not discard the ids the model did name; the selector's
-view annotates the assistant message too, so the model can name both. **A
+fixed two; the annotated messages — and, for a tool exchange, its assistant
+message — historical or current, are the model's to drop. The legality of a
+tool exchange is the *schema's* rule — a call and its results go together — and
+the harness **keeps a half-named exchange in the view and applies the rest of
+the selection** (`split_exchanges`), so one unnamed member does not discard the
+ids the model did name; the selector's view annotates the assistant message, and
+the model's own call names the id the schema places for it, so either caller can
+name both. **A
 selection naming an id the view does not offer is refused whole** — the fixed
 two, or no id at all — rather than filtered, because applying the part that
 resolves would be a decision the model did not make. An id an earlier
@@ -2239,10 +2247,11 @@ the window is told, and the model is given the bridge's own words.
 ever.** The session file is the next start's record: a save that fails leaves
 the login live only in this process; `wechat_check_status` says
 `login_saved: false` and names the path, and the next cursor write tries again.
-The cursor is the stream's place: a failed write is retried on the next move,
-but three consecutive failures stop the poll (`cursor_saved: false`), because
-continuing would answer the replay window again after every restart. Fix the
-path or disk; a restart before the login file lands needs a new scan.
+The cursor is the stream's place: a failed write is retried on the next move and
+answers `cursor_saved: false` with the path until one lands; three consecutive
+failures stop the poll (`polling: false`), because continuing would answer the
+replay window again after every restart. Fix the path or disk; a restart before
+the login file lands needs a new scan.
 
 While a login waits, the session holds the code itself: `wechat_check_status`
 hands out the drawn QR and what it encodes. A code that expires is replaced in
