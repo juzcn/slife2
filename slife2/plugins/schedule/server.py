@@ -1518,10 +1518,10 @@ def build_server(
         failed to start, it re-opens *that* run — the same run, the same due time
         — which is how a gap is answered.
 
-        The answer is the run's row, with the background task's id on it. A
-        `pending` row means the work is in flight; `failed` means it could not
-        be started or followed, or its answer could not be delivered, and the
-        error says why.
+        The answer is the run's row, with the background task's id on it; a
+        `pending` row means the work is in flight. A run that cannot be started
+        or followed, or whose answer cannot be delivered, is a tool error naming
+        why — its ledger row is `failed`, and `schedule_runs` reads it back.
 
         Args:
             name: The scheduled task, by name.
@@ -1604,9 +1604,9 @@ def build_server(
 
         **And a run that is *being* done is not one of those.** `pending` with an
         `agent_task_id` means the work is happening now, and its answer is on its
-        way to you however this call goes — so skipping it is refused, and the
-        row you get back is the one that is still in flight. A run closes itself
-        when the task doing it ends; `schedule_runs` says which run is which.
+        way to you however this call goes — so skipping it is refused, naming
+        the task that is running it. A run closes itself when that task ends;
+        `schedule_runs` says which run is which.
 
         Args:
             name: The scheduled task, by name.

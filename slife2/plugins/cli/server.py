@@ -438,8 +438,9 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
 
         Args:
             name: The key it is recorded under.
-            enabled: True records it as usable; False keeps it out of search,
-                the same switch as on a server.
+            enabled: True records it as usable; False marks it disabled — the
+                row still shows in a search, saying the command exists and is
+                switched off.
 
         Returns:
             `name`, `enabled`, and `state` — `on` or `off` — which is the same

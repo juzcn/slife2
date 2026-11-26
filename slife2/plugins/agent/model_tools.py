@@ -237,8 +237,9 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
 
         The answer is the canonical entry — `config.provider` and
         `config.model`, every writable field present — so `model_set` takes the
-        same object back. `default` says whether `providers.default` names this
-        model.
+        same object back. `default` says whether this is the model the system
+        runs on: the file's `providers.default`, or the first model when the
+        file names none.
 
         `config.provider.api_key` is the `${VAR}` reference, never the
         resolved key; empty means the file has a literal key that is not shown. A hand-written typo in the entry is refused here rather than
@@ -467,8 +468,8 @@ def register_tools(mcp: FastMCP, core: AgentCore) -> None:
             ref: The model, as `provider/model`.
 
         Returns:
-            `default` — the reference the system now runs on — `previous`, what
-            the default said before, and `moved`, how many conversations that
+            `default` — the reference the system now runs on — `previous`, the
+            reference it ran on before, and `moved`, how many conversations that
             were already running this server moved onto it from their next turn.
         """
         provider, model = _model_ref(ref)

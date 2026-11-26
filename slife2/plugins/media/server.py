@@ -290,8 +290,8 @@ def build_server(
             size: `WIDTH*HEIGHT`, e.g. `1024*1024`. Empty uses the model's own
                 default.
             image: A picture to work from — a local path, an `http(s)` URL or a
-                `data:` URI. A relative path is relative to your working
-                directory. For models that take a reference image.
+                `data:` URI. A relative path is relative to this conversation's
+                work directory. For models that take a reference image.
             output: A file path for the image. A relative path is relative to
                 this conversation's work directory. Empty writes a generated name into your
                 media directory.

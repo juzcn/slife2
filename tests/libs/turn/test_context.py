@@ -306,7 +306,9 @@ def test_the_live_decision_keeps_its_rules_in_the_schema() -> None:
 
     # **The rules are the schema's**, where both callers read them.
     assert "historical or current" in schema
-    assert "never infer one" in schema
+    assert "immediately before the first result" in schema, (
+        "the assistant message's id is the one inference the view asks for"
+    )
     assert "drops nothing" in schema, "the no-change value is the field's"
     assert "an empty object is not a decision" in schema
     assert "Drop only what is completely irrelevant" in schema
@@ -323,7 +325,7 @@ def test_the_live_decision_keeps_its_rules_in_the_schema() -> None:
     # fields belongs to the schema, which the self-calling model sees.
     for prompt in (text, intent):
         assert "A tool exchange" not in prompt
-        assert "never infer one" not in prompt
+        assert "immediately before the first result" not in prompt
         assert "Drop only what is completely irrelevant" not in prompt
         assert "JSON array" not in prompt
 

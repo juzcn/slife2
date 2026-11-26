@@ -162,8 +162,9 @@ INSTRUCTIONS = (
     "copies a local file or fetches an `http(s)` URL into the cabinet; "
     "`file_read` and `file_grep` read and search it in the same "
     "line-or-character units, `file_remove` deletes it, and `file_list` pages "
-    "it. `cabinet_search` ranks all four kinds by words and by meaning, and "
-    "`cabinet_summarize` describes one so it can be found. Every answer about "
+    "it. `cabinet_search` ranks notes, days and reports by words and by "
+    "meaning; saved files are ranked by their words. `cabinet_summarize` "
+    "describes one so it can be found. Every answer about "
     "a document carries `path`, the file relative to your working directory, "
     "so you can hand it to a tool of your own (`pandoc`, `rg`, …). A tool "
     "output the harness kept whole is read with `dump_read` by the call id in "
@@ -1002,7 +1003,7 @@ def build_server(
         return facts(row)
 
     @mcp.tool(name="diary_read", meta=FOR_THE_MODEL)
-    async def diary_read(ctx: Context, date: str) -> dict[str, Any]:
+    async def diary_read(ctx: Context, date: str = "") -> dict[str, Any]:
         """Read one day's diary entry.
 
         Args:
@@ -1056,7 +1057,7 @@ def build_server(
         return facts(row)
 
     @mcp.tool(name="diary_remove", meta=FOR_THE_MODEL)
-    async def diary_remove(ctx: Context, date: str) -> dict[str, Any]:
+    async def diary_remove(ctx: Context, date: str = "") -> dict[str, Any]:
         """Delete one day's diary entry.
 
         A day is one document, so this removes everything written for it.
@@ -1125,7 +1126,8 @@ def build_server(
             paths: Local paths or `http(s)` URLs. A relative path is relative
                 to your working directory. Name the files in a directory rather
                 than the directory itself.
-            title: A name for it. Empty uses the filename.
+            title: A name for it. Empty uses the filename without its
+                extension.
             tags: Comma-separated words to file it under.
             summary: What the file is, in your words — words a search can
                 find it by.
@@ -1134,12 +1136,13 @@ def build_server(
 
         Returns:
             `saved` — one row per file stored, with the fields a listing shows
-            (including `path`, the file an agent's own tools can open), so the
-            `key` is the path each file was stored under. A file already there
-            under that name is stored beside it rather than over it, which is
-            why the key is worth reading. `failed` — one entry per source that
-            was not stored, with the `source` as you gave it and the `error`
-            that refused it; nothing was stored for that source.
+            except `excerpt` (including `path`, the file an agent's own tools
+            can open), so the `key` is the path each file was stored under. A
+            file already there under that name is stored beside it rather than
+            over it, which is why the key is worth reading. `failed` — one
+            entry per source that was not stored, with the `source` you named
+            (trimmed) and the `error` that refused it; nothing was stored for
+            that source.
         """
         opened = await cabinet(ctx)
         entries = [path.strip() for path in paths if path.strip()]
@@ -1204,9 +1207,10 @@ def build_server(
 
         A line-organized file is read by line number; a file with no useful
         lines — minified JSON, one long record — is read by character offset. A
-        PDF, an image or an archive has no text: its bytes are shown as an
-        escaped rendering, so you can see what it is. Text in another encoding
-        reaches you decoded.
+        PDF, an image or an archive has no text: expect its bytes as an escaped
+        rendering rather than prose. Text in another encoding
+        reaches you decoded when the encoding can be told from the file's first
+        bytes; bytes that cannot be decoded are shown escaped.
 
         Args:
             path: The saved file's path inside the cabinet.
@@ -1875,8 +1879,10 @@ def build_server(
             (the highest meaning score on the page, `null` when nothing was
             scored by meaning), `confidence` (`sure`, `weak` or `none`; `null`
             when `browsed`), `browsed` (true when neither input was given and
-            the page is simply newest first) and `limit` (the page size this
-            answer was cut to).
+            the page is simply newest first), `limit` (the page size this
+            answer was cut to) and, when this is not a browse, `meaning` (`ok`
+            when the meaning leg answered, `not_indexed` when this cabinet has
+            no meaning index).
         """
         opened = await cabinet(ctx)
         try:

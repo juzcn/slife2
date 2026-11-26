@@ -1768,11 +1768,14 @@ TOOL_SEARCH_DESCRIPTION = (
     "Find a tool by what it does, across the whole catalogue — including MCP, "
     "REST API, CLI and SKILL tools. By default it includes tools already in "
     "your list; `unloaded_only` narrows it to the rest. The answer is the one "
-    "search answer: `results` (the tools, best first), `best` (the highest "
+    "search answer: `results` (the tools in the order they are meant to be "
+    "read — the caller's words first, then by meaning), `best` (the highest "
     "meaning score on the page, `null` when nothing was scored by meaning), "
     "`confidence` (`sure`, `weak` or `none`), `browsed` (always false here; "
-    "`tool_list` is the browse) and `limit` (the page size this answer was cut "
-    "to)."
+    "`tool_list` is the browse), `limit` (the page size this answer was cut "
+    "to), `meaning` (`ok` when the meaning leg answered, `not_indexed` when "
+    "this catalogue has no meaning index) and, when a source could not answer, "
+    "`sources_stale` — the sources whose rows are old, with why."
 )
 
 #: The listing's inputs, and **all four are optional**: unlike a search, every
@@ -1826,7 +1829,9 @@ TOOL_LIST_DESCRIPTION = (
     "tool by what it does; this pages what exists, for when you do not have the "
     "words to search with. Rows carry the same fields a search result does but "
     "no score — a listing ranks nothing. The answer is one page: `total` is how "
-    "many the filters match, and `limit`/`offset` are how to read the rest."
+    "many the filters match, `limit`/`offset` are how to read the rest, and "
+    "`sources_stale` names a source whose rows are old and why, when one could "
+    "not answer."
 )
 
 FUNC_TOOL_LOAD_PARAMETERS: dict[str, Any] = {
@@ -3343,9 +3348,12 @@ def build_server(
                 `Request 'tools/call' timed out`.  A late source costs freshness
                 and not the turn: the refresh this answer starts runs on, and the
                 source is in the next list.  **The connections are waited for
-                either way**: the refusal below reads `usable`, and an attempt
-                still running — a plugin that has just come up — must not be
-                read as a plugin that is gone.
+                when `wait` is set**: the dials still in flight are drained and a
+                failed plugin is asked once more, so one that has just come up is
+                not read as gone.  A turn's ask settles for a bounded moment
+                only; a plugin still connecting after it is reported as one that
+                is not answering, which fails the turn rather than shortening its
+                tool list.
 
         Returns:
             `tools`: one entry per tool the model may call, with `name` as the
@@ -3771,9 +3779,11 @@ def build_server(
 
         Returns:
             `unloaded` — the names that moved, which is the answer this exists
-            for — plus `refused` (named but not unloadable), `unknown` (no row
-            has that name) and `not_loaded` (named but already out of the
-            list), and `text`, the same thing said in a sentence.
+            for — plus `refused` (named but not unloadable), `no_load_state` (a
+            playbook or an installed command, which has no list entry to take
+            away), `unknown` (no row has that name) and `not_loaded` (named but
+            already out of the list), and `text`, the same thing said in a
+            sentence.
         """
         found = await unload_tools(
             catalogue,
@@ -3809,9 +3819,10 @@ def build_server(
             `description` it was configured with, the `error` if there is one,
             and `required` — whether slife2 starts it, which is what decides if
             its absence fails a turn or merely shortens the tool list.  A
-            source nobody has counted reports `"not counted"` for both counts
+            source that has not answered reports `"not counted"` for both counts
             rather than `0`, because `0` would be a number this process does not
-            have (`NOT_COUNTED`).  A plugin that offers fewer tools than it has
+            have (`NOT_COUNTED`); a ready source that offered no tools reports
+            `0`.  A plugin that offers fewer tools than it has
             is the normal case, not a fault: the rest are its own code's, and
             this count is the one the model sees.
         """

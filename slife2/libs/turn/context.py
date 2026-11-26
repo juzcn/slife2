@@ -91,8 +91,13 @@ LIVE_REPLY: dict[str, Any] = {
             "description": (
                 "The live message ids to drop: the ids the "
                 '`[MESSAGE:{"id": …}]` annotations show, historical or current. '
-                "Name only ids an annotation shows — never infer one, because "
-                "an id the view does not show is refused. A JSON array of "
+                "Name only ids this view offers: the annotated ones, and — for "
+                "a tool exchange — the assistant message's id, which carries no "
+                "annotation of its own. That id is the one immediately before "
+                "the first result's in the same numbering (`cur.N` for the "
+                "running turn, `<turn_id>.N` for an earlier one); it is the "
+                "only id to write without an annotation, and any other id the "
+                "view does not offer is refused. A JSON array of "
                 "strings, never a string containing one; `[]` drops nothing, "
                 "and an empty object is not a decision. "
                 "Drop only what is completely irrelevant — a search or report "
@@ -166,8 +171,9 @@ RECALL_REPLY: dict[str, Any] = {
                         "the turn running has no turn id and is never named. A "
                         "follow-up keeps the turn in hand it continues, even "
                         "when the input brings a new word. An id no longer in "
-                        "hand is ignored; a list naming none of the turns in "
-                        "hand keeps the context as it is."
+                        "hand is ignored when another named id is in hand; a "
+                        "list naming none of the turns in hand is refused — "
+                        'answer `action: "clear"` to keep none of them.'
                     ),
                 },
             },
@@ -214,6 +220,7 @@ RECALL_REPLY: dict[str, Any] = {
                     "type": "string",
                 },
                 "anchor": {
+                    "type": "string",
                     "description": (
                         "Which end of a period to recall from; omit for the "
                         "newest end. A period recall may truncate as the context "

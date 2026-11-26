@@ -449,7 +449,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
             env: What the playbook's scripts are given. A `${VAR}` resolves
                 through the environment and the credential store when the
                 playbook is used; one neither answers stays the reference it was
-                written as, and `skill_use` reports it missing.
+                written as, and `skill_use` reports it missing when the
+                playbook's header declares that name.
 
         Returns:
             `name`, `state` (`on`, or `off` when the entry was already switched
@@ -638,8 +639,8 @@ def register_tools(mcp: FastMCP, homes: Homes[Documents]) -> None:
     async def skill_set_enabled(name: str, enabled: bool) -> dict[str, Any]:
         """Switch a skill on or off, keeping it installed.
 
-        Off keeps the files, stops it being findable, and `skill_use` refuses
-        it.
+        Off keeps the files, marks its row disabled in a search, and `skill_use`
+        refuses it.
 
         Args:
             name: The skill.

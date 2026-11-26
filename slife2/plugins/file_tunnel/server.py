@@ -673,7 +673,9 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         Returns:
             `url` — the public link to hand to whoever needs the file — its
             `token`, which is what `unexpose_local_image` takes — and `file`,
-            the name being served.
+            the name being served. `reachability` is present when the tunnel's
+            liveness probe could not answer: it says the URL is handed out
+            without proof that it is served.
         """
         if not path.strip():
             raise ToolError("no file was named — pass the path of the file to publish.")
@@ -718,8 +720,8 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         await _ensure(tunnel, share.port)
         if not tunnel.is_active:
             raise ToolError(
-                "the tunnel is not up, so there is no public URL to "
-                "hand out. `tunnel_status` says what the tunnel is doing."
+                "the tunnel is not up, so there is no public URL to hand out — "
+                "try again shortly."
             )
         # A published URL is not a working one: a transport that lost the edge
         # keeps its URL and answers every request to it with HTTP 530.  Handing
@@ -734,9 +736,9 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
         reachability = await asyncio.to_thread(tunnel.reachability)
         if reachability is False:
             raise ToolError(
-                "the tunnel has published a URL but nothing is "
-                "reaching it from outside right now — every fetch would answer "
-                "HTTP 530. `tunnel_status` has the detail; try again shortly."
+                "the tunnel has published a URL but nothing is reaching it from "
+                "outside right now — every fetch would answer HTTP 530. Try "
+                "again shortly."
             )
 
         owner = _owner(ctx)
@@ -762,8 +764,7 @@ def build_server(config: Config, *, provider: TunnelProvider | None = None) -> F
             # down) is kept; the caveat is the fact the caller is owed.
             answer["reachability"] = (
                 "the tunnel's liveness probe could not answer, so this URL is "
-                "handed out without proof that it is served — try it, and "
-                "`tunnel_status` has the detail"
+                "handed out without proof that it is served — try it"
             )
         return answer
 

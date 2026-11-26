@@ -1373,9 +1373,9 @@ def build_server(
         `description` is the task itself. It starts from this conversation's
         stored turns, so **the turn you are answering is not among them** — put
         in what the task needs from the last exchange, and let it read everything
-        older for itself. It runs with your prompt, your model and your tools,
-        and nobody can answer a question it raises: what it sends when it stops
-        is the whole of what comes back.
+        older for itself. It runs with your prompt, your tools and the model
+        your config names for you, and nobody can answer a question it raises:
+        what it sends when it stops is the whole of what comes back.
 
         A subagent's task runs as that subagent and its answer is delivered to
         the agent's conversation, because a subagent has no window of its own.
@@ -1525,9 +1525,10 @@ def build_server(
         """Stop an agent task, by name.
 
         Answers with the task's state *after* the call: `cancelled` when this is
-        what stopped it, `finished` or `failed` when it was already over — a
-        finished task still delivers, and a cancelled one never does. Nothing is
-        rolled back: a tool call that was running is wherever it got to.
+        what stopped it, `finished` or `failed` when it was already over, and
+        `unknown` for a name no task here has — a finished task still delivers,
+        and a cancelled one never does. Nothing is rolled back: a tool call that
+        was running is wherever it got to.
 
         Args:
             name: The task's name, as `agent_task_start` was given it.

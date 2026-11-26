@@ -105,7 +105,10 @@ class RestApiConfig(BaseModel):
         "document names."
     )
     api_key: str = Field(
-        description="A `${VAR}` reference; empty for an API that needs no key."
+        description="A `${VAR}` reference; empty for a new API that needs no "
+        "key. On an existing entry, empty clears a reference but keeps a "
+        "literal key the file holds — `rest_api_get` shows such a key as empty, "
+        "and this tool cannot remove it."
     )
     args: list[str] | None = Field(description="Extra arguments for the proxy.")
     env: dict[str, str] | None = Field(
@@ -139,7 +142,10 @@ class CliConfig(BaseModel):
     source: dict[str, str] = Field(
         description="Where the entry came from — `url`, `type`, `version`."
     )
-    enabled: bool = Field(description="False records it and keeps it out of search.")
+    enabled: bool = Field(
+        description="False marks it disabled: it stays a search row, saying the "
+        "command exists and is switched off."
+    )
 
     @model_validator(mode="after")
     def _needs_command(self) -> CliConfig:

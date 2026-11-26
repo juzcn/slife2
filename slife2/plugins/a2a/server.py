@@ -2229,6 +2229,11 @@ def build_server(
         # somebody believes they took back.
         await place_for(sender, agent)
         status = await session.mesh.cancel_task(agent, task_id)
+        if status.startswith("Error: "):
+            # The mesh's refusals — a task that belongs to another peer — are
+            # sentences, and `status` is the field a model reads as the task's
+            # state.  Raised, as the sibling tools raise theirs.
+            raise ToolError(status.removeprefix("Error: "))
         return {"peer": agent, "task_id": task_id, "status": status}
 
     @mcp.tool(
@@ -2239,8 +2244,10 @@ def build_server(
     async def peer_agent_list(ctx: Context) -> dict[str, Any]:
         """List the agents on the A2A mesh — you first, then each peer by name.
 
-        Every card is `{"agent_name": …, "status": "online"|"offline"}`, and
-        `status` on the first one is your own mesh state. Offline peers are ones
+        Every card is `{"agent_name": …, "status": "online"|"offline"}` — a
+        peer whose card carried no status property also has
+        `"presence": "assumed"` — and `status` on the first one is your own mesh
+        state. Offline peers are ones
         whose card is still retained on the broker but which have said they are
         leaving, so they are listed rather than hidden.
 
@@ -2586,9 +2593,9 @@ def build_server(
         they are in a chat app: the group list is the names, and a large
         group's roster is not repeated for every group.
 
-        `error` is the local file's problem when it has one (a corrupt store
-        is set aside, not silently overwritten), or the network's switch when
-        its section is absent.  A read never dials.
+        `error` is the network's switch when its section is absent.  A local
+        file that cannot be read is refused instead — a corrupt store is set
+        aside, not silently overwritten.  A read never dials.
         """
         sender, mine = speaker(ctx)
         session = session_of(sender, mine)
@@ -2940,8 +2947,10 @@ _TOOL_TEXTS: dict[str, str] = {
     LIST: (
         "List {roster}.\n"
         "\n"
-        'Every card is `{{"agent_name": …, "status": "online"|"offline"}}`, and\n'
-        "`status` on the first one is your own state on this network.\n"
+        'Every card is `{{"agent_name": …, "status": "online"|"offline"}}` — a\n'
+        "peer whose card carried no status property also has\n"
+        '`"presence": "assumed"` — and `status` on the first one is your own\n'
+        "state on this network.\n"
         "\n"
         "{offline}\n"
         "\n"
@@ -2993,7 +3002,7 @@ _TOOL_TEXTS: dict[str, str] = {
         "members are a separate read: `{group_member_list}`. This is what this\n"
         "conversation has persisted locally, not a live check of who is connected.\n"
         "\n"
-        "`error` says when the local record could not be read."
+        "`error` says when the network's section is absent."
     ),
     GROUP_MEMBER_LIST: (
         "List the members of a group this conversation knows.\n"

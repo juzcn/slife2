@@ -200,7 +200,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         Args:
             name: The server's name — the key it is written under, and the
-                prefix every tool of it reaches you as (`{name}__{tool}`).
+                prefix every tool of it reaches you as (`{name}__{tool}`, with
+                characters outside letters, digits, `_` and `-` replaced by
+                `_`).
             config: The whole entry — the `config` object `mcp_get` returned.
         """
         settings = await _prepare(load(), name, mcp_entry(config))

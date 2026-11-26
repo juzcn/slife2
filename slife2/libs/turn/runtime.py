@@ -1144,7 +1144,8 @@ class TurnRuntime:
                     + ", ".join(repr(mid) for mid in unknown)
                     + ", which this turn's view does not offer — the system "
                     "prompt and the opening message are fixed, and every other "
-                    "id is the one its [MESSAGE:…] annotation shows"
+                    "id is one its [MESSAGE:…] annotation shows or a tool "
+                    "exchange's assistant message"
                 ),
             )
         # **The pair is filtered, not the selection.**  A half-named exchange is

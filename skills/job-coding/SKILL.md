@@ -45,8 +45,8 @@ model's judgement at each step, write a skill instead.
 
 | Tool | Purpose |
 |---|---|
-| `job_list` | What is installed: `name`, the `tool` (`job__<name>`), description, status, file. |
-| `job_read` | Read a job's code and path. This is what you edit. |
+| `job_list` | What is installed: `name`, the `tool` (`job__<name>`), description and status. |
+| `job_read` | Read a job's code. Its file is `jobs/<name>.py` under your working directory. |
 | `job_set` | Write a job — create or replace — and register its tool now. A broken write is refused and the previous version restored. |
 | `job_remove` | Delete the file and remove the tool. |
 | `job_run` | Run a job by name with one JSON arguments object; the test path before its tool is loaded. |
@@ -225,9 +225,9 @@ unused import, or an `int()` on a value that may be `None`. Run the project's
 own tools over the file you just wrote, fix what they find, and `job_set` again.
 Repeat until both are clean.
 
-Get the file's path from `job_read` (its `file`), and run these with your shell /
-terminal capability from the project checkout (where `pyproject.toml` is) or
-with the venv's executables:
+The file is `jobs/<name>.py` under your working directory. Run these with your
+shell / terminal capability from the project checkout (where `pyproject.toml`
+is) or with the venv's executables:
 
 ```bash
 # lint — the project's selection, independent of where the home sits

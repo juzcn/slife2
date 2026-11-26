@@ -1600,7 +1600,11 @@ class Wechat:
             # durable one.
             "login_saved": session.login_saved,
             "login_error": session.login_error,
-            "cursor_saved": not session.cursor_terminal,
+            # **The last write's outcome, not whether polling stopped.**  A
+            # first or second failed write leaves `cursor_terminal` false and
+            # `cursor_error` set; `true` there would contradict the error beside
+            # it.  `polling` is the field that says whether the loop stopped.
+            "cursor_saved": not session.cursor_error,
             "cursor_error": session.cursor_error,
         }
 
@@ -1788,15 +1792,19 @@ def build_server(
             `connected` — whether a message can go out — `polling`, whether
             messages are being watched for, and `hours_left` of the login's day.
             `qr_state` is a login in progress: `waiting` for the code to be
-            scanned, `scanned` for one to be confirmed on the phone, `confirmed`
-            or `expired` or `error`, and then call `wechat_login` again. `qr` is
-            that code drawn, and `qr_url` what it encodes — both empty unless a
-            login is waiting or scanned; a code refreshed after an expiry is
-            here rather than in the original login answer. `error`
-            says what is wrong whenever anything is — empty means nothing is —
-            and `peer_wechat_id` and `context_token` are who a reply goes to, and
-            `heard_from` is whether they wrote to you — false means nobody has,
-            and that peer is the account this login belongs to.
+            scanned, `scanned` for one to be confirmed on the phone, `expired`
+            or `error`; call `wechat_login` again for a new code. `qr` is that
+            code drawn, and `qr_url` what it encodes — both empty unless a login
+            is waiting or scanned; a code refreshed after an expiry is here
+            rather than in the original login answer. `error` says what the
+            bridge reported wrong (the QR error, the reason a login was
+            forgotten, or the link's last error). `peer_wechat_id` and
+            `context_token` are who a reply goes to, and `heard_from` is whether
+            they wrote to you — false means nobody has, and that peer is the
+            account this login belongs to. `login_saved` and `login_error` say
+            whether the login file was written and why not; `cursor_saved` and
+            `cursor_error` say the same for the ack cursor — a failed cursor
+            write re-reads that part of the stream after a restart.
         """
         agent = plugin.caller(ctx)
         return await plugin.status(plugin.session(agent))

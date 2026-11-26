@@ -446,10 +446,11 @@ def build_server(
         it may import the handles from `slife2.job` when it needs tools, a model
         or an agent.
 
-        A write that does not load is refused and the previous version is put
-        back, so the installed job is never a broken file — a put-back that
-        itself fails says so, naming the broken file left on disk for `job_set`
-        to replace. Replacing a job is the same call — keep the function name
+        A write that does not load is refused and the previous file is put back
+        exactly as it was, so this call cannot make the installed job worse — a
+        job already broken stays broken, and this call says so. A put-back that
+        itself fails names the broken file left on disk for `job_set` to
+        replace. Replacing a job is the same call — keep the function name
         stable if you want the tool name and its arguments to stay the same.
 
         Args:

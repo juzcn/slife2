@@ -287,7 +287,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
         Every field is required; a field left out is a schema error, not a
         silent default. Read `rest_api_get`, change what you mean to change, and
         pass the whole `config` back. `api_key` is a `${VAR}` reference; empty
-        means no key.
+        means no key on a new API, clears a reference on an existing one, and
+        leaves a literal key the file holds in place (that key is shown as
+        empty, so this tool cannot remove it).
 
         Every endpoint in the OpenAPI document becomes an operation named
         `{name}__{operation}`, so one spec can be hundreds of them. The answer is
@@ -297,7 +299,9 @@ def register_management(mcp: FastMCP, homes: Homes[Family]) -> None:
 
         Args:
             name: The API's name — the key it is written under, and the prefix
-                every operation of it reaches you as (`{name}__{operation}`).
+                every operation of it reaches you as (`{name}__{operation}`,
+                with characters outside letters, digits, `_` and `-` replaced
+                by `_`).
             config: The whole entry — the `config` object `rest_api_get`
                 returned.
         """

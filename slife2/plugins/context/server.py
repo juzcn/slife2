@@ -907,12 +907,12 @@ def build_server(
 
         Returns:
             The one search answer: `results` — `turn_id`, `created_at`,
-            `user_message`, `assistant_message` and `similarity` per hit, best
-            first — `best` (the highest meaning score on the page, `null` when
-            no hit was scored by meaning), `confidence` (`sure`, `weak` or
-            `none`: how sure this page is), `browsed` (always false here;
-            `turn_list` is the browse) and `limit` (the page size this answer
-            was cut to).
+            `user_message`, `assistant_message` and `similarity` per hit, in
+            the order the search ranked them — `best` (the highest meaning
+            score on the page, `null` when no hit was scored by meaning),
+            `confidence` (`sure`, `weak` or `none`: how sure this page is),
+            `browsed` (always false here; `turn_list` is the browse) and
+            `limit` (the page size this answer was cut to).
         """
         agent, subagent = _caller(ctx)
         words = [word for word in (keywords or []) if terms(word)]
@@ -1519,12 +1519,14 @@ def build_server(
             hand), `rerank` —
             `""` when the cross-encoder ran or no question was asked, otherwise
             `"unavailable"`, `"failed"` or `"empty"`: the recall kept its fused
-            order and the caller shows that rather than swallowing it — and
-            `decision`, `""` when there was a decision, otherwise why there was
-            none (the provider's failure text or the parser's refusal): the
-            recall never ran, and `recalled: 0` would otherwise read as one
-            that found nothing.  `fitted` is how many of the selection's oldest
-            turns the prompt budget cut to make it sendable; it is the
+            order and the caller shows that rather than swallowing it —
+            `decision`, always `""`: the key is present so every answer has one
+            shape, and a decision that could not answer is a tool error rather
+            than a field; `reason`, the no-op exit's word — `asked` (the
+            context in hand was already the answer) or `recalled` (the same set
+            was reached through the recall), `""` when something moved; and
+            `fitted`, how many of the selection's oldest
+            turns the prompt budget cut to make it sendable — it is the
             harness's edit and the report names it.
         """
         store = await store_of(agent, subagent)
