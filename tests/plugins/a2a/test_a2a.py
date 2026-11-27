@@ -2498,7 +2498,7 @@ async def test_an_invented_message_type_is_refused() -> None:
         with pytest.raises(ToolError, match="Input should be 'message'"):
             await client.call_tool(
                 PEER_SEND_MESSAGE,
-                {"agent": PEER, "message": "hi", "message_type": "invented"},
+                {"agent_name": PEER, "message": "hi", "message_type": "invented"},
                 meta=conversation_meta(AGENT),
             )
 
@@ -2509,7 +2509,7 @@ async def test_a_task_response_without_a_task_id_is_refused() -> None:
         with pytest.raises(ToolError, match="task_id is required"):
             await client.call_tool(
                 PEER_TASK_RESPONSE,
-                {"agent": PEER, "outcome": "completed", "message": "done"},
+                {"agent_name": PEER, "outcome": "completed", "message": "done"},
                 meta=conversation_meta(AGENT),
             )
 
@@ -2542,7 +2542,7 @@ async def test_a_task_response_settles_the_task_in_the_same_call(
         answer = await client.call_tool(
             PEER_TASK_RESPONSE,
             {
-                "agent": PEER,
+                "agent_name": PEER,
                 "task_id": TASK,
                 "outcome": "completed",
                 "message": "the answer",
@@ -2573,7 +2573,7 @@ async def test_an_interrupted_response_needs_a_question(
         with pytest.raises(ToolError, match="message is required"):
             await client.call_tool(
                 PEER_TASK_RESPONSE,
-                {"agent": PEER, "task_id": TASK, "outcome": "input_required"},
+                {"agent_name": PEER, "task_id": TASK, "outcome": "input_required"},
                 meta=conversation_meta(AGENT),
             )
 
@@ -3833,7 +3833,7 @@ async def test_a_send_to_a_subagent_gives_it_its_place_before_publishing(
         async with Client(server) as client:
             answer = await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": "tester", "message": "please do this"},
+                {"agent_name": "tester", "message": "please do this"},
                 meta=conversation_meta(AGENT),
             )
 
@@ -3882,7 +3882,7 @@ async def test_a_local_send_to_a_name_that_is_not_a_member_is_refused_before_pub
             ):
                 await client.call_tool(
                     LOCAL.tool(SEND_MESSAGE),
-                    {"agent": "xiaoyou", "message": "hello"},
+                    {"agent_name": "xiaoyou", "message": "hello"},
                     meta=conversation_meta(AGENT),
                 )
 
@@ -3914,7 +3914,7 @@ async def test_a_remote_send_to_an_unlisted_name_is_accepted_but_says_unverified
     async with Client(build(on_the_mesh=True)) as client:
         answer = await client.call_tool(
             PEER_SEND_MESSAGE,
-            {"agent": "ghost-agent-xyz-not-exist", "message": "hello"},
+            {"agent_name": "ghost-agent-xyz-not-exist", "message": "hello"},
             meta=conversation_meta(AGENT),
         )
 
@@ -3956,7 +3956,7 @@ async def test_a_subagent_answers_as_itself_rather_than_as_its_maker(
         async with Client(server) as client:
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": AGENT, "message": "done", "message_type": "message"},
+                {"agent_name": AGENT, "message": "done", "message_type": "message"},
                 meta=conversation_meta(AGENT, "tester"),
             )
 
@@ -4158,7 +4158,7 @@ async def test_the_remote_network_places_nothing_and_lists_only_cards(
         async with Client(server) as client:
             await client.call_tool(
                 PEER_SEND_MESSAGE,
-                {"agent": PEER, "message": "hello"},
+                {"agent_name": PEER, "message": "hello"},
                 meta=conversation_meta(AGENT),
             )
             answer = await client.call_tool(
@@ -4220,7 +4220,7 @@ async def test_a_machine_with_no_subagent_network_is_told_its_own_section() -> N
         with pytest.raises(ToolError) as refused:
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": "tester", "message": "hello"},
+                {"agent_name": "tester", "message": "hello"},
                 meta=conversation_meta(AGENT),
             )
         answer = await client.call_tool(
@@ -4270,7 +4270,7 @@ async def test_the_task_list_is_the_send_tools_own_bookkeeping(
         async with Client(server) as client:
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": AGENT, "message": "hello"},
+                {"agent_name": AGENT, "message": "hello"},
                 meta=conversation_meta(AGENT),
             )
             answer = await client.call_tool(
@@ -4373,7 +4373,7 @@ async def test_forget_gives_up_a_members_place(
         async with Client(server) as client:
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": "tester", "message": "hello"},
+                {"agent_name": "tester", "message": "hello"},
                 meta=conversation_meta(AGENT),
             )
             first = await client.call_tool(
@@ -4392,7 +4392,7 @@ async def test_forget_gives_up_a_members_place(
             )
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": "tester", "message": "again"},
+                {"agent_name": "tester", "message": "again"},
                 meta=conversation_meta(AGENT),
             )
 
@@ -4447,7 +4447,7 @@ async def test_forgetting_a_member_withdraws_the_tasks_sent_to_it(
         async with Client(server) as client:
             await client.call_tool(
                 LOCAL.tool(SEND_MESSAGE),
-                {"agent": "tester", "message": "hello"},
+                {"agent_name": "tester", "message": "hello"},
                 meta=conversation_meta(AGENT),
             )
             before = await client.call_tool(

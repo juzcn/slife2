@@ -1981,7 +1981,7 @@ def build_server(
     )
     async def peer_agent_send_message(
         ctx: Context,
-        agent: str,
+        agent_name: str,
         message: str,
         message_type: Literal["message", "task_request"] = "task_request",
     ) -> dict[str, Any]:
@@ -2001,7 +2001,7 @@ def build_server(
         type here: the task id and the outcome are the arguments that matter,
         and a model choosing by intent beats a matrix of type and outcome.
 
-        `agent` is a peer's name, which `peer_agent_list` gives you. A peer may
+        `agent_name` is a peer's name, which `peer_agent_list` gives you. A peer may
         be another agent on this machine or one somewhere else; the mesh does not
         tell you which, and nothing you send depends on it.
 
@@ -2029,7 +2029,7 @@ def build_server(
         subagent was never reached.
 
         Args:
-            agent: The peer to send to, by name from `peer_agent_list`.
+            agent_name: The peer to send to, by name from `peer_agent_list`.
             message: What to say, or the task to do.
             message_type: `task_request` asks for work, `message` is a plain
                 conversation.
@@ -2048,12 +2048,12 @@ def build_server(
         # no section is left to `connected` for the refusal that names its own
         # switch; there is no roster to read on a network that is off.
         if net is LOCAL and mesh_settings().configured:
-            refuse_unknown_member(sender, agent)
+            refuse_unknown_member(sender, agent_name)
         session = await connected(sender, USED, mine)
         # Before the publish, and only for a message somebody has to receive in.
-        await place_for(sender, agent)
+        await place_for(sender, agent_name)
         sent = await session.mesh.send_message(
-            agent, message, message_type=message_type
+            agent_name, message, message_type=message_type
         )
         # **The id is acceptance, not delivery.**  The standard profile is
         # async-native: the first publish completed, and whether the peer saw it
@@ -2063,7 +2063,7 @@ def build_server(
         # reads a task id as a receipt.
         if message_type == "message":
             return {
-                "peer": agent,
+                "peer": agent_name,
                 "task_id": sent,
                 "message_type": message_type,
                 "status": "unverified",
@@ -2072,7 +2072,7 @@ def build_server(
                 "arrives here if it is never reached.",
             }
         return {
-            "peer": agent,
+            "peer": agent_name,
             "task_id": sent,
             "message_type": message_type,
             "status": "unverified",
@@ -2088,7 +2088,7 @@ def build_server(
     )
     async def peer_agent_task_response(
         ctx: Context,
-        agent: str,
+        agent_name: str,
         task_id: str = "",
         outcome: Literal[
             "completed", "failed", "rejected", "input_required", "auth_required"
@@ -2111,7 +2111,7 @@ def build_server(
         continues it.
 
         Args:
-            agent: The peer from the marker — it is the return value's `peer`.
+            agent_name: The peer from the marker — it is the return value's `peer`.
             task_id: The task's id, from the marker.
             outcome: completed, failed, rejected, input_required, auth_required.
             message: The result, the failure's reason, or the question.
@@ -2142,7 +2142,7 @@ def build_server(
         if answer != "ok":
             raise ToolError(answer.removeprefix("Error: "))
         return {
-            "peer": agent,
+            "peer": agent_name,
             "task_id": task_id,
             "outcome": outcome,
             "state": (
@@ -2157,7 +2157,7 @@ def build_server(
     )
     async def peer_agent_continue_task(
         ctx: Context,
-        agent: str,
+        agent_name: str,
         task_id: str,
         message: str,
     ) -> dict[str, Any]:
@@ -2174,7 +2174,7 @@ def build_server(
         exactly as a first-round result does.
 
         Args:
-            agent: The peer that paused the task, by name from the roster.
+            agent_name: The peer that paused the task, by name from the roster.
             task_id: The paused task's id, from the line that named it.
             message: The input the peer asked for.
         """
@@ -2187,14 +2187,14 @@ def build_server(
             raise ToolError("message is required — it is the input the peer asked for.")
         sender, mine = speaker(ctx)
         if net is LOCAL and mesh_settings().configured:
-            refuse_unknown_member(sender, agent)
+            refuse_unknown_member(sender, agent_name)
         session = await connected(sender, USED, mine)
-        await place_for(sender, agent)
-        answer = await session.mesh.continue_task(agent, task_id, message)
+        await place_for(sender, agent_name)
+        answer = await session.mesh.continue_task(agent_name, task_id, message)
         if answer != "ok":
             raise ToolError(answer.removeprefix("Error: "))
         return {
-            "peer": agent,
+            "peer": agent_name,
             "task_id": task_id,
             "status": "unverified",
             "note": "Accepted for delivery, not delivered — the peer resumes "
@@ -2208,7 +2208,7 @@ def build_server(
         meta=FOR_THE_MODEL,
     )
     async def peer_agent_cancel_task(
-        ctx: Context, agent: str, task_id: str
+        ctx: Context, agent_name: str, task_id: str
     ) -> dict[str, Any]:
         """Withdraw a task you sent to another agent.
 
@@ -2219,7 +2219,7 @@ def build_server(
         be withdrawn too.
 
         Args:
-            agent: The peer the task is with, by name.
+            agent_name: The peer the task is with, by name.
             task_id: The task's id, from the send's answer or its marker.
         """
         sender, mine = speaker(ctx)
@@ -2227,14 +2227,14 @@ def build_server(
         # As in `send_message`: a withdrawal published to a member with nowhere
         # to receive it goes to nobody, and the peer goes on working on a task
         # somebody believes they took back.
-        await place_for(sender, agent)
-        status = await session.mesh.cancel_task(agent, task_id)
+        await place_for(sender, agent_name)
+        status = await session.mesh.cancel_task(agent_name, task_id)
         if status.startswith("Error: "):
             # The mesh's refusals — a task that belongs to another peer — are
             # sentences, and `status` is the field a model reads as the task's
             # state.  Raised, as the sibling tools raise theirs.
             raise ToolError(status.removeprefix("Error: "))
-        return {"peer": agent, "task_id": task_id, "status": status}
+        return {"peer": agent_name, "task_id": task_id, "status": status}
 
     @mcp.tool(
         name=net.tool(LIST),
@@ -2918,8 +2918,8 @@ _TOOL_TEXTS: dict[str, str] = {
         "round or a type 'task_input' continuation. One round settles once; an\n"
         "interrupted task cannot be settled again until the peer continues it.\n"
         "\n"
-        "`agent` is the peer the marker names. The answer says whether the task\n"
-        "is now 'closed' or still 'open'."
+        "`agent_name` is the peer the marker names. The answer says whether the\n"
+        "task is now 'closed' or still 'open'."
     ),
     CONTINUE_TASK: (
         "Continue a task you sent to {them} that the peer paused for input.\n"

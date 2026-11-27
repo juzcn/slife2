@@ -198,7 +198,7 @@ async def test_a_peer_task_runs_a_turn_and_the_answer_returns_over_the_mesh(
                     name="peer_agent_task_response",
                     arguments=json.dumps(
                         {
-                            "agent": REMOTE_PEER,
+                            "agent_name": REMOTE_PEER,
                             "task_id": task_id,
                             "outcome": "completed",
                             "message": answer,
@@ -400,7 +400,7 @@ async def test_a_watched_subagent_runs_unattended_and_the_watch_sees_it(
                         name="subagent_send_message",
                         arguments=json.dumps(
                             {
-                                "agent": MAKER,
+                                "agent_name": MAKER,
                                 "message": SCOUT_REPORT,
                                 "message_type": "message",
                             }
@@ -413,7 +413,7 @@ async def test_a_watched_subagent_runs_unattended_and_the_watch_sees_it(
                 await network.call_tool(
                     "subagent_send_message",
                     {
-                        "agent": SCOUT,
+                        "agent_name": SCOUT,
                         "message": "look into it",
                         "message_type": "message",
                     },
