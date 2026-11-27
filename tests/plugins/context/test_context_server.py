@@ -25,8 +25,8 @@ from fastmcp.exceptions import ToolError
 
 import slife2.plugins.context.server as context_server
 from slife2.helpers.timeutil import BOUND_GRAMMAR
-from slife2.libs.host.config import default_config
-from slife2.libs.host.paths import agent_dir, subagent_path
+from slife2.libs.host.config import default_config, load_cached
+from slife2.libs.host.paths import agent_dir, register_home, subagent_path
 from slife2.libs.plugin.audience import conversation_meta
 from slife2.libs.store.db import EMBED_TEXT_VERSION, TurnStore
 from slife2.libs.store.index import MAX_PAGE
@@ -44,7 +44,7 @@ from slife2.libs.turn.tools import (
     TURN_COMPACT_TEXT,
 )
 from slife2.plugins.context.server import _ask_model, build_server
-from tests.fakes import StubEmbedder
+from tests.fakes import StubEmbedder, config_file
 
 pytestmark = pytest.mark.unit
 
@@ -2510,6 +2510,53 @@ async def test_startup_survives_a_conversation_from_an_old_schema() -> None:
 
     assert str(stale) in str(refused.value)
     assert "summary" in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_startup_survives_a_home_whose_config_this_build_cannot_read(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A home from another build must not take the daemon down at start-up.
+
+    The start-up pass scans **every known home** (`turn_dbs`) and loads each
+    home's `slife2.yaml` to get that home's embedding model.  A home this build
+    refuses — an older data directory, a config with a typo — must therefore be
+    reported and skipped, not turned into a refusal for every other home: the
+    home being started is the caller's, and a read of *its* history must not
+    depend on a file in a directory nobody is using.  The skipped home's own
+    calls still fail, with the same sentence, when they arrive.
+
+    This is the failure that was seen: a dev checkout, whose own config was
+    valid, would not start because a recorded production home's config had
+    drifted a release behind — and the sentence did not even say which file.
+    """
+    old = tmp_path / "old-home"
+    config_file(old, "default: not-a-section\n")
+    turns = old / "agents" / "jack" / "turns.db"
+    turns.parent.mkdir(parents=True)
+    turns.write_bytes(b"")
+    register_home(old)
+
+    with caplog.at_level(logging.WARNING, logger=CONTEXT_LOGGER):
+        async with Client(
+            build_server(default_config(), embedder=EMBEDDER, source=load_cached)
+        ) as client:
+            # A conversation whose home is current is served normally.
+            await client.call_tool(
+                "remember",
+                {"agent": "someone", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            with pytest.raises(ToolError) as refused:
+                await client.call_tool(
+                    "restore",
+                    {"agent": "jack", "messages": []},
+                    meta=conversation_meta("jack", home=str(old)),
+                )
+
+    assert any(str(old) in record.getMessage() for record in caplog.records), (
+        "the skipped home was not named in the log"
+    )
+    assert str(old / "slife2.yaml") in str(refused.value)
 
 
 def test_a_footnote_does_not_trim_the_message_it_is_added_to() -> None:

@@ -2966,6 +2966,12 @@ establishes it for the length of the call; `protocol.Peer` carries it on every
 hop. `paths.home()` resolves a file against the caller's home; a plugin's own
 configuration, records, and logs keep using `paths.data_dir()`.
 
+A start-up pass over every known home refuses at the home's granularity: a
+configuration this build cannot read, or a store from another schema, is named
+and skipped, and calls that use it fail with the same sentence when they arrive.
+One home — a data directory from an older build, possibly one nobody is using —
+must not refuse every other home's start-up.
+
 Everything a plugin derives per home is kept per home: a home's catalogue, the
 declarations the hub holds, and the model list it resolves.
 

@@ -2715,7 +2715,7 @@ def load(explicit: str | Path | None = None) -> Config:
     if not isinstance(raw, dict):
         raise ConfigError(f"{path}: expected a mapping at the top level")
 
-    return _build(raw, config_dir=path.parent)
+    return _build(raw, config_dir=path.parent, source=path)
 
 
 #: What each file looked like when it was last read: by path, `((mtime_ns, size),
@@ -2836,25 +2836,35 @@ _TOP_LEVEL_KEYS = (
 )
 
 
-def _build(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
+def _build(
+    raw: dict[str, Any], config_dir: Path | None = None, source: Path | None = None
+) -> Config:
     """Assemble a Config from a parsed mapping, defaulting what is absent.
 
     `config_dir` is where a relative `system_prompt` is looked for, so a
-    template can sit next to the config that names it.
+    template can sit next to the config that names it.  `source` is the file
+    the mapping was read from, so a refusal names **which** config it is —
+    a machine serves several homes, and `slife2.yaml` alone does not say whose.
 
     **A section's refusal is a `ConfigError`.**  The section readers raise
     `SectionError` (``slife2.libs.host.section``), and this is the one boundary
     every section passes through — one conversion rather than one per reader.
     """
     try:
-        return _assemble(raw, config_dir)
+        return _assemble(raw, config_dir, source)
     except SectionError as exc:
         raise ConfigError(str(exc)) from exc
 
 
-def _assemble(raw: dict[str, Any], config_dir: Path | None = None) -> Config:
+def _assemble(
+    raw: dict[str, Any],
+    config_dir: Path | None = None,
+    source: Path | None = None,
+) -> Config:
     base = default_config()
-    refuse_unknown(raw, DEFAULT_CONFIG_NAME, _TOP_LEVEL_KEYS)
+    refuse_unknown(
+        raw, str(source) if source is not None else DEFAULT_CONFIG_NAME, _TOP_LEVEL_KEYS
+    )
 
     servers = dict(base.servers)
     for name, spec in read_mapping(raw.get("servers"), "servers").items():

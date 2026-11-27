@@ -87,6 +87,7 @@ from slife2.libs.host.config import (
     API_SERVER_NAMES,
     CONTEXT_SERVER_NAME,
     Config,
+    ConfigError,
     ContextSettings,
     for_the_call,
     load_cached,
@@ -618,6 +619,14 @@ def build_server(
         expensive step: every turn in every file is embedded again, and that is
         the price of changing the model rather than a fault to be avoided.
 
+        **A home whose configuration this build refuses is named and skipped**,
+        not made a refusal for every other home.  The pass reads each home's
+        file to learn that home's embedding model, so an older data directory —
+        or a typo — would otherwise take down a daemon whose own home is
+        current; the skipped home's calls still fail, with the loader's
+        sentence, when they arrive.  This is the `StaleSchema` rule one level
+        up: refuse the artifact, not the machine.
+
         The pass belongs here because the turns do: a file belongs to the plugin
         that owns its schema, and a startup pass is part of owning one.
         """
@@ -636,22 +645,28 @@ def build_server(
             mine = [path for path in everything if path.is_relative_to(root)]
             if not mine:
                 continue
-            with in_home(root):
-                model = await embedding_of_call()
-                for path in mine:
-                    try:
-                        await indexed(await off_loop(TurnStore, path), model)
-                    except StaleSchema:
-                        # The store has named the file and the column, which is
-                        # the report this pass exists to make.  **The pass
-                        # continues**, and that is not a lenient reading of
-                        # "nothing is served until this has finished": a scan of
-                        # every known home is not one conversation, and a file
-                        # from an older build — possibly in a home nobody is
-                        # using — must not take every readable conversation down
-                        # with it.  Calls that do use the file still fail, with
-                        # the same sentence, at `store_of`.
-                        continue
+            try:
+                with in_home(root):
+                    model = await embedding_of_call()
+                    for path in mine:
+                        try:
+                            await indexed(await off_loop(TurnStore, path), model)
+                        except StaleSchema:
+                            # The store has named the file and the column, which
+                            # is the report this pass exists to make.  **The pass
+                            # continues**, and that is not a lenient reading of
+                            # "nothing is served until this has finished": a scan
+                            # of every known home is not one conversation, and a
+                            # file from an older build — possibly in a home nobody
+                            # is using — must not take every readable conversation
+                            # down with it.  Calls that do use the file still
+                            # fail, with the same sentence, at `store_of`.
+                            continue
+            except ConfigError as exc:
+                # The same rule for the home itself: its file could not be read,
+                # so it is named and skipped, and a call that actually uses it
+                # fails with this sentence at `for_the_call`.
+                logger.warning("start-up sync for %s skipped: %s", root, exc)
         try:
             yield {}
         finally:
