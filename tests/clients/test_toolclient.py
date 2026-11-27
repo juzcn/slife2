@@ -25,7 +25,6 @@ from slife2.clients.toolclient import (
     TOOL_LOAD,
     UpstreamTool,
     acquire_tool,
-    arguments_fit,
     load_tool,
     remote_catalogue,
     remote_tools,
@@ -639,10 +638,10 @@ async def test_a_definition_whose_parameters_are_not_a_mapping_is_damage() -> No
 
 
 @pytest.mark.asyncio
-async def test_acquire_loads_and_returns_a_tool_when_the_arguments_fit() -> None:
+async def test_acquire_loads_and_returns_the_catalogued_tool() -> None:
     hub = FakeHub(catalogue={"fake__late": a_row()})
 
-    tool = await acquire_tool(hub, "fake__late", {"text": "hi"})
+    tool = await acquire_tool(hub, "fake__late")
 
     assert tool is not None
     assert tool.spec.name == "fake__late"
@@ -655,21 +654,10 @@ async def test_acquire_loads_and_returns_a_tool_when_the_arguments_fit() -> None
 
 
 @pytest.mark.asyncio
-async def test_acquire_does_not_load_a_call_that_does_not_fit() -> None:
-    hub = FakeHub(catalogue={"fake__late": a_row()})
-
-    tool = await acquire_tool(hub, "fake__late", {"text": 5})
-
-    assert tool is None
-    assert hub.loaded == []
-    assert [name for name, _ in hub.calls] == [TOOL_EXISTS]
-
-
-@pytest.mark.asyncio
 async def test_acquire_does_not_dispatch_when_the_hub_refuses_the_load() -> None:
     hub = FakeHub(catalogue={"fake__late": a_row()}, refuse_load={"fake__late"})
 
-    tool = await acquire_tool(hub, "fake__late", {"text": "hi"})
+    tool = await acquire_tool(hub, "fake__late")
 
     assert tool is None
     assert hub.loaded == []
@@ -684,24 +672,10 @@ async def test_an_empty_schema_is_nothing_to_declare() -> None:
         catalogue={"fake__late": {"exists": True, "starting": False, "tool": entry}}
     )
 
-    tool = await acquire_tool(hub, "fake__late", {"anything": 1})
+    tool = await acquire_tool(hub, "fake__late")
 
     assert tool is not None
     assert hub.loaded == ["fake__late"]
-
-
-def test_arguments_fit_refuses_what_the_schema_does_not_describe() -> None:
-    schema = {
-        "type": "object",
-        "properties": {"text": {"type": "string"}},
-        "required": ["text"],
-        "additionalProperties": False,
-    }
-
-    assert arguments_fit("fake__late", schema, {"text": "hi"}) is True
-    assert arguments_fit("fake__late", schema, {}) is False
-    assert arguments_fit("fake__late", schema, {"text": "hi", "extra": 1}) is False
-    assert arguments_fit("fake__late", {}, {"anything": 1}) is True
 
 
 @pytest.mark.asyncio

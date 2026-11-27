@@ -3713,13 +3713,14 @@ def build_server(
         second fact, and it is only meaningful when `exists` is false.
 
         **A present row carries its advertised definition**, because the
-        harness's next question is whether the call fits the tool as it is
-        *now*.  The row is the authority and the model's history is not: a tool
-        whose schema changed since the model last saw it must send the model
-        back through `func_tool_load`, where it reads the current schema.  A
-        definition this process cannot build from the row (a stored schema that
-        does not parse) is omitted rather than raised: the existence answer is
-        still true, and the next real listing fails with the damage named.
+        harness's next move is to load it and run the call: the definition is
+        the spec it advertises for the rest of the turn and reads the tool's
+        own `timeout` declaration from.  The row is the authority — the model's
+        history is not — and a tool's own server is the judge of the arguments,
+        so the definition is a declaration and not a gate.  A definition this
+        process cannot build from the row (a stored schema that does not parse)
+        is omitted rather than raised: the existence answer is still true, and
+        the next real listing fails with the damage named.
 
         Returns:
             `exists` — whether the catalogue holds a row under this name, loaded
@@ -3745,11 +3746,11 @@ def build_server(
         """Load one tool into the model's list — the harness's call.
 
         **The load `func_tool_load` performs, without a model turn.**  The
-        registry calls it when a model asks for a catalogued tool that fits its
-        current schema: the tool enters the list the next request carries, and
-        the call itself runs in this turn.  The answer is the same verdict
-        `func_tool_load` gives — `loaded`, and `refused` with the sentence the
-        model would have read.
+        registry calls it when a model asks for a catalogued tool: the tool
+        enters the list the next request carries, and the call itself runs in
+        this turn, whatever its arguments — the tool's own server validates
+        them.  The answer is the same verdict `func_tool_load` gives —
+        `loaded`, and `refused` with the sentence the model would have read.
         """
         return await load_tools(catalogue, [name])
 

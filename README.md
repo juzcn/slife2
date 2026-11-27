@@ -618,11 +618,13 @@ The hub serves four set-level tools:
 - `func_tool_load` puts tools into the list shown to the model.
 - `_func_tool_unload` removes them; a name in `tool_load.autoload` is refused.
 
-A model can call a name from `tool_search` or `tool_list` without loading it:
-when the call fits the catalogue's current schema, the harness loads it and runs
-it in the same turn; otherwise the load hint carries the current schema. Loading
-keeps the tool in the list sent with every request. `tool_load.autoload` names
-the tools that start loaded; everything else is discovered on demand.
+A model can call any catalogued name without loading it: the harness loads it
+and runs the call in the same turn, so a name it knows from its history still
+works after the budget evicts it. The catalogue row is the authority that the
+tool exists; the tool's own server judges the arguments, and its refusal is the
+answer. Loading keeps the tool — and its current declaration — in the list sent
+with every request. `tool_load.autoload` names the tools that start loaded;
+everything else is discovered on demand.
 
 The loaded set survives a restart. It is bounded by `tool_load.threshold`
 (default 100); over the limit, the least recently used or loaded are unloaded,

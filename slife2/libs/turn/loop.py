@@ -829,10 +829,10 @@ class AgentLoop:
         # **A name outside the list is resolved before the timeout is bound**,
         # because whether the tool declares its own `timeout` is a fact about
         # its schema, and a tool this request did not carry has no schema here
-        # yet.  `acquire` is the caller's check that the call fits the catalogue
-        # row; when it refuses, the name is left to `execute`'s unknown path.
+        # yet.  `acquire` is the caller's hook that loads a catalogued name;
+        # when the hub will not, the name is left to `execute`'s unknown path.
         if self._tools.spec_of(call.name) is None:
-            await self._tools.acquire(call.name, arguments)
+            await self._tools.acquire(call.name)
         # The tool's own schema decides who enforces the deadline, so the number
         # is put where it will be read and what is left for this method is
         # whatever nobody else took (`slife2.libs.turn.tools.bind_timeout`).

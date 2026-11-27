@@ -3766,7 +3766,7 @@ async def test_events_arrive_as_progress_notifications(context, hub) -> None:
     # **A tool that is already in the list**, because this test also asserts
     # that the count is the hub's list: `skill_list` is loaded on demand, and a
     # call to it would change the list between the two counts (the harness
-    # loads a catalogued name the call fits).  `tool_search` is always loaded.
+    # loads every catalogued name a call uses).  `tool_search` is always loaded.
     backend = FakeBackend(
         ScriptedTurn(
             result=StreamChatResult(
@@ -3899,10 +3899,9 @@ async def test_a_catalogued_tool_is_loaded_and_run_without_a_load_turn(
 ) -> None:
     """**The harness invokes the load; the model does not spend a call on it.**
 
-    `skill_list` is a catalogue row outside the request's list.  The call fits
-    its current schema, so the turn loads it, runs it, and the next request
-    advertises it — no `func_tool_load` call of the model's own.  A call that
-    does not fit takes the unchanged hint instead.
+    `skill_list` is a catalogue row outside the request's list.  The turn loads
+    it, runs it, and the next request advertises it — no `func_tool_load` call
+    of the model's own.
     """
     backend = FakeBackend(
         ScriptedTurn(
@@ -3935,6 +3934,55 @@ async def test_a_catalogued_tool_is_loaded_and_run_without_a_load_turn(
     assert "skill_list" in {spec.name for spec in backend.calls[1][1]}
     listed = await hub.call_tool("list_tools", {})
     assert "skill_list" in {tool["name"] for tool in listed.data["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_a_catalogued_tool_runs_even_when_its_arguments_do_not_fit(
+    context, hub
+) -> None:
+    """**The catalogue row is not a schema gate; the tool's server is the judge.**
+
+    A model that knows a tool from its history may name it with arguments an
+    older build taught it — `peer_agent_send_message(agent_name=…)` where the
+    declaration says `agent`.  Refusing here told the model to load a tool it
+    had already named, and the load was the whole next step: it wasted the
+    round trip and answered nothing.  The harness loads the tool and dispatches
+    the call, so the tool's own refusal names the argument it got wrong, and
+    the next request carries the declaration the model should have used.
+    """
+    backend = FakeBackend(
+        ScriptedTurn(
+            result=StreamChatResult(
+                text="checking",
+                tool_calls=(
+                    ToolCall(id="c1", name="skill_list", arguments={"unexpected": "x"}),
+                ),
+                stop_reason="tool_calls",
+            ),
+            chunks=[Chunk(text="checking")],
+        ),
+        ScriptedTurn(
+            result=StreamChatResult(text="done.", stop_reason="stop"),
+            chunks=[Chunk(text="done.")],
+        ),
+    )
+    server = build_server(
+        config(), context_client=context, hub_client=hub, backend=backend
+    )
+    seen: list[TurnEvent] = []
+
+    async def on_progress(progress, total, message):
+        event = decode(message or "")
+        if event is not None:
+            seen.append(event)
+
+    await send_with_progress(server, "list the skills", on_progress)
+
+    finished = [event for event in seen if isinstance(event, ToolCallFinished)]
+    assert finished and finished[0].ok is False, "the tool ran and refused it"
+    assert "Unexpected keyword argument" in finished[0].result_preview
+    assert "load it with func_tool_load" not in finished[0].result_preview
+    assert "skill_list" in {spec.name for spec in backend.calls[1][1]}
 
 
 @pytest.mark.asyncio

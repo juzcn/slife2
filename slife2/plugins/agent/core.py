@@ -732,19 +732,16 @@ class AgentCore:
                 await tool_lookup(await self.runtime.hub(), name, conversation_id)
             ).answer
 
-        async def catalogue_acquire(
-            name: str, arguments: dict[str, Any]
-        ) -> Tool | None:
-            """The same name, made runnable when the call fits its current schema.
+        async def catalogue_acquire(name: str) -> Tool | None:
+            """The same name, made runnable when the catalogue holds it.
 
             `acquire_tool` loads it — the tool is in the next request's list —
-            and the call runs in this turn.  `None` hands the name back to the
-            three sentences, which is where a call that no longer fits the row,
-            or a name the hub will not load, belongs.
+            and the call runs in this turn, where the tool's own server is the
+            judge of its arguments.  `None` hands the name back to the three
+            sentences, which is where a name the hub will not load, or a row it
+            cannot serve, belongs.
             """
-            return await acquire_tool(
-                await self.runtime.hub(), name, arguments, conversation_id
-            )
+            return await acquire_tool(await self.runtime.hub(), name, conversation_id)
 
         found = await self.turn_tools(conversation_id)
         if observer is not None:

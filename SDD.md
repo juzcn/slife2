@@ -1525,17 +1525,20 @@ required in that list; a configuration that omits one fails the start.
 Everything else, a plugin's tools included, starts unloaded when first seen. One
 tool the model never calls is a prompt spent on every request.
 
-**A call for a name that is not loaded is checked against the catalogue and, when
-it fits the row's current schema, loaded and run in the same turn.** Loading is
-what keeps the tool in the list sent with every request. A call that does not
-fit — the schema changed since the model last saw it, or its arguments could not
-be read — is not run; it takes the load hint, which is how the model reads the
-current schema. A call that cannot be resolved that way reaches the registry's
-error path, which asks the hub (`tool_exists`): `present` (load it with
-`func_tool_load`), `missing` (no row; `tool_search` finds what does the job), or
-`starting` (the catalogue is still being written, so retry). The third exists
-because a first turn can land inside the merge pass; without it a transient
-absence read as a capability the machine lacks.
+**A call for a name that is not loaded is loaded and run in the same turn.** The
+catalogue row is the authority that the tool exists; the tool's own server
+validates the arguments, and its refusal is the model's answer. Loading is what
+keeps the tool — and the declaration now in force — in the list sent with every
+request, so a call refused for a stale argument shape can be retried with the
+current schema in front of the model. A name the catalogue cannot resolve that
+way reaches the registry's error path, which asks the hub (`tool_exists`):
+`present` (the row exists but was not made runnable — `func_tool_load` loads it
+or says why it will not), `missing` (no row; `tool_search` finds what does the
+job), or `starting` (the catalogue is still being written, so retry). The third
+exists because a first turn can land inside the merge pass; without it a
+transient absence read as a capability the machine lacks. A call whose arguments
+could not be read is not dispatched: its parse error is the answer, and the load
+hint comes beside it.
 
 **A restart restores what was left, not a fresh state.** The conversation's
 context and the loaded tool set both come back as they were; only a change to

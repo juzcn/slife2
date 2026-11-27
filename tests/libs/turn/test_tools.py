@@ -227,13 +227,13 @@ async def test_acquire_makes_a_catalogued_tool_runnable() -> None:
     same body every listed tool has.
     """
 
-    async def acquire(name: str, arguments: dict) -> Tool | None:
-        assert (name, arguments) == ("late", {"e": "1"})
+    async def acquire(name: str) -> Tool | None:
+        assert name == "late"
         return Tool(spec=spec("late"), run=_ok)
 
     found = ToolRegistry([], acquire=acquire)
 
-    assert await found.acquire("late", {"e": "1"}) is True
+    assert await found.acquire("late") is True
     assert "late" in {one.name for one in found.specs}
     assert found.spec_of("late") is not None
     assert await found.execute(ToolCall(id="c1", name="late")) == ("fine", True)
@@ -241,20 +241,20 @@ async def test_acquire_makes_a_catalogued_tool_runnable() -> None:
 
 @pytest.mark.asyncio
 async def test_acquire_is_not_asked_for_a_tool_already_in_the_list() -> None:
-    async def acquire(_name: str, _arguments: dict) -> Tool | None:
+    async def acquire(_name: str) -> Tool | None:
         raise AssertionError("a listed tool must not be acquired again")
 
     found = ToolRegistry([Tool(spec=spec("ok"), run=_ok)], acquire=acquire)
 
-    assert await found.acquire("ok", {}) is True
+    assert await found.acquire("ok") is True
 
 
 @pytest.mark.asyncio
 async def test_a_refused_acquire_leaves_the_three_case_sentence() -> None:
-    """A call that does not fit its row is answered, not run — and the hint is
+    """A name the hub will not load is answered, not run — and the hint is
     the unchanged one."""
 
-    async def acquire(_name: str, _arguments: dict) -> Tool | None:
+    async def acquire(_name: str) -> Tool | None:
         return None
 
     async def present(_name: str) -> CatalogueAnswer:
@@ -262,7 +262,7 @@ async def test_a_refused_acquire_leaves_the_three_case_sentence() -> None:
 
     found = ToolRegistry([], exists=present, acquire=acquire)
 
-    assert await found.acquire("peer_agent_send_message", {"e": "1"}) is False
+    assert await found.acquire("peer_agent_send_message") is False
     text, ok = await found.execute(
         ToolCall(id="c1", name="peer_agent_send_message", arguments={"e": "1"})
     )
@@ -276,7 +276,7 @@ async def test_a_refused_acquire_leaves_the_three_case_sentence() -> None:
 async def test_an_acquire_that_fails_is_a_hint_not_a_turn_failure() -> None:
     """The call has already failed; its explanation may not fail the turn."""
 
-    async def broken(_name: str, _arguments: dict) -> Tool | None:
+    async def broken(_name: str) -> Tool | None:
         raise RuntimeError("the hub is gone")
 
     async def present(_name: str) -> CatalogueAnswer:
@@ -284,7 +284,7 @@ async def test_an_acquire_that_fails_is_a_hint_not_a_turn_failure() -> None:
 
     found = ToolRegistry([], exists=present, acquire=broken)
 
-    assert await found.acquire("peer_agent_send_message", {}) is False
+    assert await found.acquire("peer_agent_send_message") is False
     text, ok = await found.execute(ToolCall(id="c1", name="peer_agent_send_message"))
     assert ok is False
     assert "in the catalogue" in text

@@ -611,26 +611,20 @@ def build_server(
             """What the catalogue says about a name outside this request's list."""
             return (await tool_lookup(await runtime.hub(), name, task.identity)).answer
 
-        async def catalogue_acquire(
-            name: str, arguments: dict[str, Any]
-        ) -> Tool | None:
-            """The same name, made runnable when the call fits its current schema."""
+        async def catalogue_acquire(name: str) -> Tool | None:
+            """The same name, made runnable when the catalogue holds it."""
             if name in LIVE_CONVERSATION_TOOLS:
                 # **A by-name call is this turn's, not the hub's.**  The
                 # registry would otherwise fetch the agent server's version,
                 # which acts on the conversation's other live turn — the exact
                 # action the local body exists to keep off it.  The hub is still
-                # asked for the declaration and the fit (and does the load), so
-                # the model's next request carries the same tool.
-                found = await acquire_tool(
-                    await runtime.hub(), name, arguments, task.identity
-                )
+                # asked for the declaration (and does the load), so the model's
+                # next request carries the same tool.
+                found = await acquire_tool(await runtime.hub(), name, task.identity)
                 if found is None:
                     return None
                 return Tool(spec=found.spec, run=live_bodies(task, turn)[name])
-            return await acquire_tool(
-                await runtime.hub(), name, arguments, task.identity
-            )
+            return await acquire_tool(await runtime.hub(), name, task.identity)
 
         return ToolRegistry(
             [local.get(tool.spec.name, tool) for tool in tools],

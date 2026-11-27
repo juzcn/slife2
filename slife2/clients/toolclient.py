@@ -37,9 +37,10 @@ A handful of harness calls — `list_tools`, `call_tool`, `tool_exists`,
   transcript can still show the call as failed — see `slife2.libs.turn.tools.ToolFailed`.
 * `tool_exists` → the three-value catalogue answer plus, when the row is
   present, its advertised definition.  `acquire_tool` is the one reader that
-  uses the definition: a call outside the request's list runs only if its
-  arguments fit the schema the row carries *now*, and the tool is loaded
-  (`tool_load`) on the same pass so the next request advertises it.
+  uses the definition: the tool it builds carries the row's spec, which the
+  loop advertises for the rest of the turn and binds a per-call `timeout`
+  against, and the tool is loaded (`tool_load`) on the same pass so the next
+  request carries it.
 * Anything that *is* broken about the hub — unreachable, or answering with a
   shape this build does not know — raises.  That is the same line every other
   hop in this system draws: a peer that is gone fails the turn, and a peer that
@@ -51,9 +52,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
-from jsonschema import validate
-from jsonschema.exceptions import ValidationError
 
 import slife2.helpers.timeouts as _T
 from slife2.libs.plugin.audience import conversation_meta
@@ -311,10 +309,11 @@ TOOL_LOAD = "tool_load"
 class CatalogueLookup:
     """What the catalogue says about a name, and the row it says it with.
 
-    **The three-value answer and the definition are one ask.**  The harness
-    needs the first to phrase a hint and the second to decide whether a call
-    outside the request's list can run as it stands; asking twice would let the
-    two answers describe different moments.
+    **The three-value answer and the definition are one ask.**  The first is
+    what phrases a hint when the name cannot be made runnable; the second is
+    the declaration the acquired tool carries as its spec and advertises from
+    the next request on.  Asking twice would let the two answers describe
+    different moments.
     """
 
     answer: CatalogueAnswer
@@ -426,54 +425,34 @@ async def load_tool(
 async def acquire_tool(
     client: Client,
     name: str,
-    arguments: dict[str, Any],
     conversation_id: tuple[str, str] | None = None,
 ) -> Tool | None:
-    """A catalogued tool this call may run, or `None` when it may not.
+    """A catalogued tool, loaded so this turn can run it; `None` if it cannot.
 
-    **The row's schema, not the conversation's memory, is the authority.**  A
-    name outside the request's list can be one the model called before, with
-    arguments copied from the history — but the tool may have changed since,
-    and a call that no longer fits its current schema must go back through the
-    load hint, where the model reads the schema that is true now.  Only an
-    empty stored schema (the catalogue's spelling of "nothing to declare") is
-    taken as "any arguments fit".
+    **A name the catalogue holds is a tool this turn can run, whatever its
+    arguments look like.**  The model named a tool it knows from its history;
+    the row is the authority that it exists, and the tool's own server is the
+    authority on the arguments.  Loading first is what puts the current
+    declaration in the next request, so a call the tool refuses is answered
+    with its own complaint and the model can retry in this turn with the
+    schema in front of it.  Second-guessing the arguments here only turned a
+    call the tool could answer into a dead-end load hint.
 
-    Loading is the second half and deliberately behind the check: a call that
-    does not fit must not change the model's list.  The returned `Tool` runs
-    through the same proxy every listed tool does, so the registry has no
-    second execution path.
+    The returned `Tool` runs through the same proxy every listed tool does, so
+    the registry has no second execution path.
+
+    `None` is a name that cannot be made runnable at all: not in the
+    catalogue, a row whose declaration the hub cannot serve, or a load the hub
+    refused (a server that is down, a disabled entry, a document).  Those are
+    `_unknown`'s three sentences, and `func_tool_load` is where a refusal is
+    read.
     """
     found = await tool_lookup(client, name, conversation_id)
     if found.answer != CATALOGUE_PRESENT or found.tool is None:
         return None
-    if not arguments_fit(name, found.tool.parameters, arguments):
-        return None
     if not await load_tool(client, name, conversation_id):
         return None
     return Tool(spec=found.tool.spec(), run=_proxy(client, name, conversation_id))
-
-
-def arguments_fit(
-    name: str, parameters: dict[str, Any], arguments: dict[str, Any]
-) -> bool:
-    """Whether these arguments fit a tool's declared schema.
-
-    **A schema this build cannot read or resolve is a no.**  The caller's next
-    step is the load hint, and the tool's own server still validates the call
-    once the model has seen the schema — failing closed here only costs the
-    model the shortcut, never a call it was told would work.
-    """
-    if not parameters:
-        return True
-    try:
-        validate(instance=arguments, schema=parameters)
-    except ValidationError:
-        return False
-    except Exception as exc:  # noqa: BLE001 - an unreadable schema is a no
-        logger.info("the stored schema for %r could not be checked: %s", name, exc)
-        return False
-    return True
 
 
 def trim_answer(found: dict[str, Any]) -> tuple[list[str], str]:
@@ -560,7 +539,6 @@ __all__ = [
     "ToolListing",
     "UpstreamTool",
     "acquire_tool",
-    "arguments_fit",
     "load_tool",
     "remote_catalogue",
     "remote_tools",

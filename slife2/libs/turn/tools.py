@@ -657,7 +657,7 @@ class ToolRegistry:
         tools: list[Tool] | None = None,
         *,
         exists: Callable[[str], Awaitable[CatalogueAnswer]] | None = None,
-        acquire: Callable[[str, dict[str, Any]], Awaitable[Tool | None]] | None = None,
+        acquire: Callable[[str], Awaitable[Tool | None]] | None = None,
     ) -> None:
         self._tools: dict[str, Tool] = {t.spec.name: t for t in tools or []}
         #: How to ask the catalogue about a name outside this request's list —
@@ -666,10 +666,10 @@ class ToolRegistry:
         #: covers every cause.
         self._exists = exists
         #: How to make a catalogued name callable when the model named one this
-        #: request does not carry.  The callback answers a `Tool` when the call
-        #: fits the row's current schema — it loads it first — and `None` when
-        #: it does not, which leaves the name to `_unknown`'s three answers.
-        #: `None` is a caller with no hub, like `exists`.
+        #: request does not carry.  The callback loads it and answers a `Tool`,
+        #: or `None` when the hub will not, which leaves the name to
+        #: `_unknown`'s three answers.  `None` is a caller with no hub, like
+        #: `exists`.
         self._acquire = acquire
         #: Built once, because `specs` is read at the top of every step of every
         #: turn: augmenting sixty schemas per request would be paying the
@@ -698,16 +698,15 @@ class ToolRegistry:
         tool = self._tools.get(name)
         return tool.spec if tool is not None else None
 
-    async def acquire(self, name: str, arguments: dict[str, Any]) -> bool:
+    async def acquire(self, name: str) -> bool:
         """Make a catalogued tool callable for this request, if the caller can.
 
         **A name outside the list is not necessarily an unknown tool.**  When
-        the hub holds a row for it and the call fits the row's *current* schema
-        — the caller's `acquire` callback is what checks — the tool is loaded
-        and added here, and the loop runs it through the ordinary path.  The
-        model gets its answer without spending a call on `func_tool_load`, and
-        the schema that justified the call is the schema the hub holds now, not
-        the one the conversation remembers.
+        the hub holds a row for it, the caller's `acquire` callback loads it
+        and it is added here, and the loop runs it through the ordinary path.
+        The model gets its answer without spending a call on `func_tool_load`,
+        and the row's current declaration — the one the tool's own server
+        enforces — is advertised from the next request on.
 
         A callback that returns `None` leaves the name alone: `execute` then
         answers it through `_unknown`, whose three sentences are unchanged.  A
@@ -718,7 +717,7 @@ class ToolRegistry:
         if name in self._tools or self._acquire is None:
             return name in self._tools
         try:
-            found = await self._acquire(name, arguments)
+            found = await self._acquire(name)
         except Exception as exc:  # noqa: BLE001 - a hint, not the call
             logger.info("could not acquire %r: %s", name, exc)
             return False
@@ -796,12 +795,13 @@ class ToolRegistry:
     async def _unknown(self, call: ToolCall) -> tuple[str, bool]:
         """The sentence for a call outside the request's list, and `ok=False`.
 
-        **Three causes, three next steps.**  A name the catalogue holds was
-        unloaded from this request — the budget's doing, and `func_tool_load`
-        puts it back — or it is one whose current schema this call does not fit.
-        A name the catalogue does not hold is a capability this machine lacks,
-        and searching for *it* is a dead end: `tool_search` finds a tool that
-        does the job instead.  And a name whose row is still being written — the
+        **Three causes, three next steps.**  A name the catalogue holds is one
+        `func_tool_load` can put back — the budget unloaded it, or the hub
+        refused this turn's load — and the load either lands or says why it
+        cannot.  A name the catalogue does not hold is a capability this
+        machine lacks, and searching for *it* is a dead end: `tool_search`
+        finds a tool that does the job instead.  And a name whose row is still
+        being written — the
         hub merges one source at a time, and a session's first turn can land
         inside that pass — is one to ask for again in a moment: telling the
         model it does not exist there sends it searching for a name it is about
@@ -809,10 +809,11 @@ class ToolRegistry:
         asks the hub (`exists`), and the hub's three answers are
         `CatalogueAnswer`'s.
 
-        **The present answer is what `acquire` could not take.**  A call that
-        fits its row runs without reaching here; this is what is left for a call
-        whose arguments could not be read or no longer fit the schema, and
-        loading is how the model reads the schema that is true now.
+        **The present answer is what `acquire` could not take.**  A catalogued
+        name the hub will load runs without reaching here; this is what is left
+        for a name the hub refused to load, a row whose declaration cannot be
+        served, or a call whose arguments could not be read — and loading is
+        how the model reads the refusal or the declaration that is true now.
 
         **The way back, not the whole list.**  The error is a feedback channel:
         naming the loaded set put up to a hundred names into a result the model

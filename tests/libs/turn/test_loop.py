@@ -498,18 +498,18 @@ async def test_parallel_tool_calls_all_run() -> None:
 async def test_a_catalogued_tool_is_acquired_and_run_in_the_same_turn() -> None:
     """**The harness invokes the load, so the model spends no call on it.**
 
-    The name is outside the request's list; `acquire` is the caller's check
-    against the catalogue row and returns the tool the load made available.
-    From there the call takes the ordinary path — announced, timed, fitted,
-    answered — and the tool is in the list the *next* request carries.
+    The name is outside the request's list; `acquire` is the caller's hook that
+    loads a catalogued name and returns the tool.  From there the call takes the
+    ordinary path — announced, timed, fitted, answered — and the tool is in the
+    list the *next* request carries.
     """
-    acquired: list[tuple[str, dict[str, Any]]] = []
+    acquired: list[str] = []
 
     async def weather(_arguments: dict[str, Any]) -> str:
         return "sunny"
 
-    async def acquire(name: str, arguments: dict[str, Any]) -> Tool | None:
-        acquired.append((name, arguments))
+    async def acquire(name: str) -> Tool | None:
+        acquired.append(name)
         return a_tool("weather", weather) if name == "weather" else None
 
     backend = FakeBackend(
@@ -521,15 +521,15 @@ async def test_a_catalogued_tool_is_acquired_and_run_in_the_same_turn() -> None:
 
     await AgentLoop(backend, found).run_turn(messages, "weather?", ListObserver())
 
-    assert acquired == [("weather", {"city": "北京"})]
+    assert acquired == ["weather"]
     assert [m.content for m in messages if m.role == "tool"] == ["sunny"]
     assert "weather" in {spec.name for spec in backend.calls[1][1]}
 
 
 async def test_a_refused_acquire_leaves_the_call_to_the_unknown_path() -> None:
-    """The three sentences are unchanged; a call that does not fit is one of them."""
+    """The three sentences are unchanged; a name the hub will not load is one."""
 
-    async def acquire(_name: str, _arguments: dict[str, Any]) -> Tool | None:
+    async def acquire(_name: str) -> Tool | None:
         return None
 
     async def present(_name: str) -> CatalogueAnswer:
