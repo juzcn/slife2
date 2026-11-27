@@ -973,6 +973,11 @@ async def test_the_other_categories_are_what_a_plugin_is_for(category: str) -> N
     """
     answer = one_source(category=category)
     async with Client(hub_for(connected=as_cli_server(answer))) as hub:
+        # The declaration is read through a search, and a search deliberately
+        # does not wait for a plugin that is still connecting — so an overloaded
+        # runner outlived the bound and searched a catalogue without the row
+        # this test is about.  Waiting is the test's, not the search's.
+        await wait_until_settled(hub)
         rows = await found(hub, "cli:thing")
 
     assert "cli:thing" in rows
@@ -2186,14 +2191,24 @@ async def test_the_loaded_set_outlives_the_process() -> None:
     async with Client(
         hub_for(connected=connected, entries=entries, load_fake_tools=False)
     ) as first:
-        # The list first, as the agent asks for it before every model call —
-        # which is also what makes a server's tools *known* to the catalogue.
+        # The agent asks for the list before every model call, which is also
+        # what makes a server's tools *known* to the catalogue.  The source is
+        # waited for first because a load is a catalogue write and a refusal
+        # still answers `ok` (a verdict, not a failure): a load that raced the
+        # connect would leave this test asserting a fact about a row nothing
+        # wrote.
+        await wait_until_ready(first, "fake")
         await first.call_tool("list_tools", {})
-        assert (await call(first, "func_tool_load", {"names": ["fake__echo"]}))["ok"]
+        loaded = await call(first, "func_tool_load", {"names": ["fake__echo"]})
+        assert json.loads(loaded["text"])["loaded"] == ["fake__echo"]
 
     async with Client(
         hub_for(connected=connected, entries=entries, load_fake_tools=False)
     ) as second:
+        # The second hub must also have the source *live* for `list_tools` to
+        # gate its row in, and a turn's list does not wait for one that is
+        # still connecting — the same race the load above waits out.
+        await wait_until_ready(second, "fake")
         listed = await second.call_tool("list_tools", {})
 
     assert "fake__echo" in names(listed.data)
