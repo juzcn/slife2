@@ -87,12 +87,11 @@ from slife2.libs.host.config import (
     API_SERVER_NAMES,
     CONTEXT_SERVER_NAME,
     Config,
-    ConfigError,
     ContextSettings,
     for_the_call,
     load_cached,
 )
-from slife2.libs.host.paths import agents_dir, home_key, in_home, known_homes, turn_dbs
+from slife2.libs.host.paths import agents_dir, home_key
 from slife2.libs.paging import page_window
 from slife2.libs.plugin.audience import FOR_THE_MODEL
 from slife2.libs.plugin.protocol import (
@@ -108,7 +107,6 @@ from slife2.libs.plugin.vocabulary import TURN_SUMMARIZE
 from slife2.libs.store.answer import search_answer
 from slife2.libs.store.db import (
     MissingTurns,
-    StaleSchema,
     TurnStore,
     UnreadableTurns,
     assistant_message,
@@ -610,73 +608,27 @@ def build_server(
 
     @asynccontextmanager
     async def lifespan(_server: FastMCP) -> AsyncGenerator[dict[str, Any]]:
-        """Bring every turn file up to date before answering anything at all.
+        """Start without touching any home's stores.
 
-        **Nothing is served until this has finished**, because the alternative is
-        a window in which a search answers from an index that is not the one it
-        claims to be — and the thing that hides, a turn stored with no vector,
-        cannot be seen from outside.  A changed embedding model makes this the
-        expensive step: every turn in every file is embedded again, and that is
-        the price of changing the model rather than a fault to be avoided.
+        **A store is brought up to date on first use**, by the call that is for
+        its home and with that home's embedding model (`sync_once`).  A daemon
+        that walked every known home at start-up would be doing work nobody
+        asked for, and one home from another build — a file or configuration
+        this build refuses — would take the daemon down before it served anyone.
+        The refusal belongs to the call that uses it.
 
-        **A home whose configuration this build refuses is named and skipped**,
-        not made a refusal for every other home.  The pass reads each home's
-        file to learn that home's embedding model, so an older data directory —
-        or a typo — would otherwise take down a daemon whose own home is
-        current; the skipped home's calls still fail, with the loader's
-        sentence, when they arrive.  This is the `StaleSchema` rule one level
-        up: refuse the artifact, not the machine.
-
-        The pass belongs here because the turns do: a file belongs to the plugin
-        that owns its schema, and a startup pass is part of owning one.
+        The hook still owns what the process opened: one embedder per home and
+        one connection per model server, closed on the way out.
         """
-        # Every per-agent store, the agent's own and its subagents'.  Named by
-        # `slife2.libs.host.paths` rather than globbed here: a `*/*.db` in this directory
-        # is not a description of a conversation store — `schedule.db` lives
-        # beside each `turns.db` and matched it — so this pass would open the
-        # scheduler's ledger as a `TurnStore` and write the turn schema into it.
-        #
-        # **Each home's stores are synced with that home's model**, so the pass
-        # puts the ambient home in place before it asks — a second home's
-        # `embeddings:` model is not the first's, and an index built at one
-        # width cannot be searched at another.
-        everything = turn_dbs()
-        for root in known_homes():
-            mine = [path for path in everything if path.is_relative_to(root)]
-            if not mine:
-                continue
-            try:
-                with in_home(root):
-                    model = await embedding_of_call()
-                    for path in mine:
-                        try:
-                            await indexed(await off_loop(TurnStore, path), model)
-                        except StaleSchema:
-                            # The store has named the file and the column, which
-                            # is the report this pass exists to make.  **The pass
-                            # continues**, and that is not a lenient reading of
-                            # "nothing is served until this has finished": a scan
-                            # of every known home is not one conversation, and a
-                            # file from an older build — possibly in a home nobody
-                            # is using — must not take every readable conversation
-                            # down with it.  Calls that do use the file still
-                            # fail, with the same sentence, at `store_of`.
-                            continue
-            except ConfigError as exc:
-                # The same rule for the home itself: its file could not be read,
-                # so it is named and skipped, and a call that actually uses it
-                # fails with this sentence at `for_the_call`.
-                logger.warning("start-up sync for %s skipped: %s", root, exc)
         try:
             yield {}
         finally:
             # Both halves of what this process holds open: the embedder it opened
-            # for the startup pass, and one connection per model server it was
-            # asked to decide with.  Cleared as well as closed, because
-            # this hook is not the process's lifetime over the in-memory
-            # transport — a client left in place is one the next session is
-            # handed already shut, and every `rebuild` of it would fail at its
-            # first ask.
+            # for a call, and one connection per model server it was asked to
+            # decide with.  Cleared as well as closed, because this hook is not
+            # the process's lifetime over the in-memory transport — a client left
+            # in place is one the next session is handed already shut, and every
+            # `rebuild` of it would fail at its first ask.
             for connection in embeddings.values():
                 await connection.close()
             for client in list(model_clients.values()):

@@ -103,8 +103,8 @@ async def test_a_matching_name_is_enough_and_costs_no_round_trip() -> None:
     The tool list is deliberately empty — if the name decides, a client that
     exposes nothing still identifies, and `list_tools` is never called.  That
     `list_calls == 0` is the point of the test, not a detail.  An identity with
-    no version is this test's case on purpose: the build is compared only when
-    the server reports one.
+    no version is this test's case on purpose: the name decides whether a build
+    is reported, not whether the server is ours.
     """
     client = CountingClient(name="slife2-context")
     assert await identifies(client, "slife2-context", fallback_tool="remember")
@@ -115,9 +115,8 @@ async def test_a_matching_name_is_enough_and_costs_no_round_trip() -> None:
 async def test_a_server_calling_itself_something_else_is_not_ours() -> None:
     """A name is not a hint to combine with the tool list.
 
-    This is what a stale build of one of our own servers looks like: the right
-    tool, the wrong build.  Accepting it on the strength of the tool name is how
-    a signature change turns into a refusal on every turn.
+    A stranger on the port may expose the same tools; the name is what says
+    whether it is the server we meant, and the answer costs no round trip.
     """
     client = CountingClient(name="someone-else", tools=("remember",))
     assert not await identifies(client, "slife2-context", fallback_tool="remember")
@@ -125,17 +124,15 @@ async def test_a_server_calling_itself_something_else_is_not_ours() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_server_from_another_build_is_not_ours() -> None:
-    """The name is half the identity; the build is the other half.
+async def test_a_server_from_another_build_is_still_ours() -> None:
+    """The name is the identity; the build is reported, not compared.
 
-    A daemon left by a previous build advertises the same name and answers MCP
-    correctly, and its old tool signatures then fail every turn.  The handshake
-    carries the build (`house_server` passes this package's version), and a
-    mismatch is the same answer as a foreign name — without asking for the tool
-    list, which would only say what the wrong build happens to expose.
+    A daemon left by another build advertises the same name, and the two builds
+    may be compatible — whether the tool surface fits is a question only the
+    call that uses it can answer.
     """
     client = CountingClient(name="slife2-context", version="0.3.0")
-    assert not await identifies(client, "slife2-context", fallback_tool="remember")
+    assert await identifies(client, "slife2-context", fallback_tool="remember")
     assert client.list_calls == 0
 
     same_build = CountingClient(name="slife2-context", version=__version__)
@@ -468,24 +465,20 @@ async def test_a_connected_server_we_did_not_ask_for_is_refused_and_closed(
 
 
 @pytest.mark.asyncio
-async def test_a_server_from_another_build_is_refused_with_the_remedy(
-    monkeypatch,
-) -> None:
-    """The refusal says *which* build answered and what to do about it.
+async def test_a_server_from_another_build_is_handed_back(monkeypatch) -> None:
+    """The name decides; the build is the daemon's own business.
 
-    Reporting this as "not slife2-context" would be false — it is that server,
-    from another build — and would send the reader looking for a stranger on
-    the port instead of running the one command that replaces the daemon.
+    Refusing here would stop a pair whose tool surfaces are compatible, and a
+    mismatch, when there is one, fails at the call that needs the moved
+    signature.
     """
     transport = StubTransport(name="slife2-context", version="0.3.0")
     stub(monkeypatch, transport)
 
-    with pytest.raises(
-        ConnectionError, match=r"build 0\.3\.0, not this build .*`slife2 down`"
-    ):
-        await open_server("http://test/mcp", name="slife2-context")
+    client = await open_server("http://test/mcp", name="slife2-context")
 
-    assert transport.closed, "a client we are not keeping has to be released"
+    assert client is transport
+    assert not transport.closed
 
 
 @pytest.mark.asyncio

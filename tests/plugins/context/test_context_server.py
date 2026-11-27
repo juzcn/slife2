@@ -2429,15 +2429,16 @@ async def test_the_carried_tail_survives_a_rebuild() -> None:
     assert answer.data["messages"] == [SYSTEM, tail]
 
 
-# --- startup: the index is brought up to date with the model ------------------
+# --- start-up: nothing is opened until a call asks for it --------------------
 
 
 @pytest.mark.asyncio
-async def test_startup_leaves_a_current_index_alone() -> None:
-    """The ordinary start costs nothing: the identity matches, so no embedding.
+async def test_a_start_touches_no_store() -> None:
+    """Starting the daemon does no work on any home's history.
 
-    Worth asserting because it is the difference between a server that starts in
-    milliseconds and one that re-embeds a history every time it is launched.
+    A start that re-embeds — or even opens — every store of every known home is
+    work nobody asked for.  The store a call is for is brought up to date when
+    that call arrives (`sync_once`), with that home's model.
     """
     store = TurnStore(agent_dir("jack") / "turns.db")
     for said in ("工具", "trump"):
@@ -2449,16 +2450,17 @@ async def test_startup_leaves_a_current_index_alone() -> None:
     async with Client(build_server(default_config(), embedder=again)):
         pass
 
-    assert again.calls == [], "a current index was rebuilt anyway"
+    assert again.calls == [], "a start embedded a history nobody asked for"
 
 
 @pytest.mark.asyncio
-async def test_startup_reindexes_every_turn_when_the_model_changed() -> None:
-    """The cost of changing the embedding model, paid once at start.
+async def test_first_use_reindexes_every_turn_when_the_model_changed() -> None:
+    """The cost of changing the embedding model, paid by the first call.
 
     Every turn has to be embedded again — vectors from two models cannot be
     ranked against each other — and the thing that decides it is the identity
-    recorded in the file, not anything remembered across restarts.
+    recorded in the file, not anything remembered across restarts.  The call
+    that needs the index pays, and it is the one that names the model.
     """
     first = StubEmbedder()
     store = TurnStore(agent_dir("jack") / "turns.db")
@@ -2468,10 +2470,12 @@ async def test_startup_reindexes_every_turn_when_the_model_changed() -> None:
         )
 
     second = StubEmbedder(identity="stub:two")
-    async with Client(build_server(default_config(), embedder=second)):
-        pass
+    async with Client(build_server(default_config(), embedder=second)) as client:
+        await client.call_tool(
+            "turn_search", {"keywords": ["trump"]}, meta=conversation_meta("jack")
+        )
 
-    assert sum(len(call) for call in second.calls) == 3
+    assert sum(len(call) for call in second.calls) >= 3
     assert store._turns_without_vectors() == []
     assert store.index_status(second)["ready"]
     with sqlite3.connect(store.path) as connection:
@@ -2482,14 +2486,12 @@ async def test_startup_reindexes_every_turn_when_the_model_changed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_survives_a_conversation_from_an_old_schema() -> None:
-    """One unreadable conversation does not take the readable ones down.
+async def test_an_old_schema_is_refused_where_it_is_used() -> None:
+    """A file from another build fails the call that uses it, and only that.
 
-    The startup pass scans **every known home** (`turn_dbs`), so letting a file
-    from an older build stop it would refuse the whole plugin — every
-    conversation, in every home — over one nobody may be using.  The pass names
-    the file and carries on; what still fails is a call that actually uses it,
-    and it fails with that same sentence.
+    Starting the daemon touches no store, so the file is first seen by a call
+    for *its* conversation; the refusal names the file and the column.  The
+    conversation beside it is served normally.
 
     Served instead, this is the failure that was seen: `restore` died per row
     as SQLite's `No item with that key`, naming neither the file nor the
@@ -2513,18 +2515,12 @@ async def test_startup_survives_a_conversation_from_an_old_schema() -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_survives_a_home_whose_config_this_build_cannot_read(
-    tmp_path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A home from another build must not take the daemon down at start-up.
+async def test_a_start_does_not_read_another_homes_config(tmp_path) -> None:
+    """Starting a daemon opens its own configuration, and no home but its own.
 
-    The start-up pass scans **every known home** (`turn_dbs`) and loads each
-    home's `slife2.yaml` to get that home's embedding model.  A home this build
-    refuses — an older data directory, a config with a typo — must therefore be
-    reported and skipped, not turned into a refusal for every other home: the
-    home being started is the caller's, and a read of *its* history must not
-    depend on a file in a directory nobody is using.  The skipped home's own
-    calls still fail, with the same sentence, when they arrive.
+    A recorded home from another build may have a `slife2.yaml` this build
+    refuses; that is its business until a call is made for it.  The call is
+    where the refusal belongs, and it names the file.
 
     This is the failure that was seen: a dev checkout, whose own config was
     valid, would not start because a recorded production home's config had
@@ -2537,25 +2533,21 @@ async def test_startup_survives_a_home_whose_config_this_build_cannot_read(
     turns.write_bytes(b"")
     register_home(old)
 
-    with caplog.at_level(logging.WARNING, logger=CONTEXT_LOGGER):
-        async with Client(
-            build_server(default_config(), embedder=EMBEDDER, source=load_cached)
-        ) as client:
-            # A conversation whose home is current is served normally.
+    async with Client(
+        build_server(default_config(), embedder=EMBEDDER, source=load_cached)
+    ) as client:
+        # The current home is served; the start never looked at the old one.
+        await client.call_tool(
+            "remember",
+            {"agent": "someone", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        with pytest.raises(ToolError) as refused:
             await client.call_tool(
-                "remember",
-                {"agent": "someone", "messages": [{"role": "user", "content": "hi"}]},
+                "restore",
+                {"agent": "jack", "messages": []},
+                meta=conversation_meta("jack", home=str(old)),
             )
-            with pytest.raises(ToolError) as refused:
-                await client.call_tool(
-                    "restore",
-                    {"agent": "jack", "messages": []},
-                    meta=conversation_meta("jack", home=str(old)),
-                )
 
-    assert any(str(old) in record.getMessage() for record in caplog.records), (
-        "the skipped home was not named in the log"
-    )
     assert str(old / "slife2.yaml") in str(refused.value)
 
 

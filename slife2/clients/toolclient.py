@@ -210,10 +210,10 @@ async def remote_catalogue(
     Raises:
         ConnectionError: If the hub answers with something this build cannot
             read.  Deliberately loud, and deliberately not an empty list: the
-            likely cause is a hub daemon left over from a previous build
-            (SDD §12.5), and the alternative — silently handing the model a
-            short tool list — turns a version mismatch into a model that has
-            quietly lost its abilities.  `slife2 down` is the answer.
+            likely cause is a hub daemon from another build (SDD §12.5), and
+            the alternative — silently handing the model a short tool list —
+            turns a version mismatch into a model that has quietly lost its
+            abilities.  `slife2 down` is the answer.
     """
     payload = tool_payload(
         await client.call_tool(

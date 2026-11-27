@@ -456,16 +456,15 @@ registry lives.
 
 A client MUST prove which server it reached before believing anything the server
 says. `identifies` compares the connected server's `server_info.name` against
-the name the caller expected, and `server_info.version` against this build's;
-when the server reports no name, it falls back to the server's own probe tool.
-Every server built by `house_server` advertises this package's version, so a
-daemon from a previous build fails the check on its build even though it answers
-to the right name. `open_server` is the single place a client connects to one of
-our servers; it raises, naming what could not be reached — or which build
-answered, and the `slife2 down` that replaces it — rather than returning a
-client that will fail later. The check prevents a server on the wrong port or an
-old build from answering MCP correctly and being mistaken for the intended
-server.
+the name the caller expected and, when the server reports no name, falls back to
+the server's own probe tool. The build is advertised and recorded, not compared:
+a daemon from another build answers to the right name, and whether its tool
+surface fits the caller is a question only the call that uses it can answer —
+two builds may be compatible, and a stop at the handshake would refuse them.
+`status` reports the build each daemon wrote down. `open_server` is the single
+place a client connects to one of our servers; it raises, naming what could not
+be reached, rather than returning a client that will fail later. The check
+prevents a server on the wrong port from being mistaken for the intended one.
 
 ### 3.7 Refusal vocabulary
 
@@ -1942,8 +1941,9 @@ build's. A file this build cannot read is refused, not upgraded in place,
 because an upgrade path is a permanent second way to build the tables. A file
 whose `turn` table lacks a column this build declares is refused at open, with
 the file and the column named. A file that still holds the previous schema's
-`turns` table is refused the same way, before any DDL. The startup pass over
-every known home carries on past a file it refuses: the refusal is that file's.
+`turns` table is refused the same way, before any DDL. A file this build refuses
+fails the call that uses it, and only that call; starting the plugin touches no
+store.
 
 The live-context list is a row, not a file. It is written in the same transaction
 as the turn that changed it. A turn can point outside itself: a tool output too
@@ -2966,11 +2966,10 @@ establishes it for the length of the call; `protocol.Peer` carries it on every
 hop. `paths.home()` resolves a file against the caller's home; a plugin's own
 configuration, records, and logs keep using `paths.data_dir()`.
 
-A start-up pass over every known home refuses at the home's granularity: a
-configuration this build cannot read, or a store from another schema, is named
-and skipped, and calls that use it fail with the same sentence when they arrive.
-One home — a data directory from an older build, possibly one nobody is using —
-must not refuse every other home's start-up.
+A start-up touches no home's stores: per-home work happens on the call that is
+for that home — the context plugin syncs a store on first use, with that home's
+embedding model, and a file or configuration this build cannot read fails that
+call. Starting a daemon is not a reason to walk the machine's other homes.
 
 Everything a plugin derives per home is kept per home: a home's catalogue, the
 declarations the hub holds, and the model list it resolves.
@@ -3226,16 +3225,16 @@ and a registry lookup used as a function-argument default.
 ### 12.5 Daemons outlive builds
 
 Reuse is by identity: the launcher attaches to whatever answers to the expected
-name and this build's version. A daemon from a previous build answers the name
-and still has the old tool signatures, so the handshake's version is what says
-it is not this build; `ensure` then refuses the port and names `slife2 down`,
-which is the remedy. A rename of a server or a tool must be accompanied by a
-stop.
+name, whichever build started it. The daemons on a machine are its own — the
+first starter's build is what runs — and a later build uses them rather than
+stopping them; `status` reports each daemon's build, which is how an operator
+sees what is answering. A tool surface that differs fails at the call that uses
+it. A rename of a server or a tool must be accompanied by a stop.
 
 An internal wire carries no compatibility path for a previous build. A progress
 line requires every field this build's encoder writes, and a store from another
-schema is refused rather than migrated. A fallback for an older shape is stale
-logic that hides the version mismatch instead of reporting it.
+schema is refused rather than migrated. The failure is reported where it
+happens, not prevented by a compatibility layer.
 
 ## 13. Project structure and development
 
